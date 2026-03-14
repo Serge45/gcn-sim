@@ -4,7 +4,7 @@ find_package(GTest REQUIRED)
 add_executable(test_elf_loader test_elf_loader.cpp)
 target_link_libraries(test_elf_loader gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_elf_loader COMMAND test_elf_loader
-         --hsaco /opt/rocm-7.3.0/bin/gfx90a/vector_add_memory_fault_kernels.hsaco)
+         --hsaco /opt/rocm/bin/gfx90a/vector_add_memory_fault_kernels.hsaco)
 
 # test_isa_decoder
 add_executable(test_isa_decoder test_isa_decoder.cpp)

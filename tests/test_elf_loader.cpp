@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         }
     }
     if (g_hsaco_path.empty()) {
-        g_hsaco_path = "/opt/rocm-7.3.0/bin/gfx90a/vector_add_memory_fault_kernels.hsaco";
+        g_hsaco_path = "/opt/rocm/bin/gfx90a/vector_add_memory_fault_kernels.hsaco";
     }
 
     ::testing::InitGoogleTest(&argc, argv);

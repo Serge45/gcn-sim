@@ -16,7 +16,7 @@ add_library(gcnsim SHARED
 
 target_include_directories(gcnsim
     PUBLIC  include
-    PRIVATE /opt/rocm-7.3.0/include)
+    PRIVATE /opt/rocm/include)
 
 target_link_libraries(gcnsim PRIVATE yaml-cpp)
 target_compile_options(gcnsim PRIVATE -Wall -Wextra)

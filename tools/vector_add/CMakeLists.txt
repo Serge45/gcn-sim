@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
-find_program(HIPCC hipcc HINTS /opt/rocm-7.3.0/bin)
+find_program(HIPCC hipcc HINTS /opt/rocm/bin)
 if(NOT HIPCC)
     message(WARNING "hipcc not found; skipping vector_add.hsaco")
     return()
 endif()
 
 find_program(CLANG_OFFLOAD_BUNDLER clang-offload-bundler
-    HINTS /opt/rocm/llvm/bin /opt/rocm-7.3.0/llvm/bin)
+    HINTS /opt/rocm/llvm/bin)
 
 set(HSACO_BUNDLE   ${CMAKE_CURRENT_BINARY_DIR}/vector_add_bundle.o)
 set(HSACO_OUTPUT   ${CMAKE_CURRENT_BINARY_DIR}/vector_add.hsaco)
