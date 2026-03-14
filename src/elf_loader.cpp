@@ -34,9 +34,6 @@ namespace gcnsim {
 std::vector<KernelArgInfo> parse_metadata_note(const uint8_t* note_data, size_t note_size,
                                                 const std::string& kernel_name);
 
-static uint32_t read_u32_le(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 
 std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& error_msg) {
     // Read file
@@ -140,8 +137,6 @@ std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& erro
     };
 
     // Find relevant sections
-    const Elf64_Shdr* text_shdr    = nullptr;
-    const Elf64_Shdr* rodata_shdr  = nullptr;
     const Elf64_Shdr* symtab_shdr  = nullptr;
     const Elf64_Shdr* dynsym_shdr  = nullptr;
     const Elf64_Shdr* strtab_shdr  = nullptr;
@@ -153,9 +148,7 @@ std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& erro
         if (!shdr) continue;
         std::string name = get_section_name(shdr);
 
-        if (name == ".text")         text_shdr    = shdr;
-        else if (name == ".rodata")  rodata_shdr  = shdr;
-        else if (name == ".symtab")  symtab_shdr  = shdr;
+        if (name == ".symtab")       symtab_shdr  = shdr;
         else if (name == ".dynsym")  dynsym_shdr  = shdr;
         else if (name == ".strtab")  strtab_shdr  = shdr;
         else if (name == ".dynstr")  dynstr_shdr  = shdr;
