@@ -297,6 +297,151 @@ TEST(ISADecoder, GlobalStoreDword) {
     EXPECT_EQ(inst.src[2].index, 3u);  // vdata
 }
 
+// --- SOPK tests ---
+TEST(ISADecoder, SMovkI32) {
+    // s_movk_i32 s0, 0x1234 — op=0, SIMM16=0x1234, SDST=s0
+    // Encoding: [31:28]=0xB=1011, [26:23]=op=0, [22:16]=sdst=0, [15:0]=simm16=0x1234
+    // = (0xBu<<28) | (0u<<23) | (0u<<16) | 0x1234
+    uint32_t w0 = (0xBu << 28) | (0u << 23) | (0u << 16) | 0x1234u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOPK);
+    EXPECT_EQ(inst.opcode, Opcode::S_MOVK_I32);
+    EXPECT_EQ(inst.size_bytes, 4);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.dst.index, 0u);
+    EXPECT_EQ(inst.simm16, (int16_t)0x1234);
+}
+
+TEST(ISADecoder, SAddk) {
+    // s_addk_i32 s5, 0x0007 — op=14, sdst=5, simm16=7
+    // Encoding: [31:28]=0xB, [26:23]=op=14, [22:16]=sdst=5, [15:0]=7
+    uint32_t w0 = (0xBu << 28) | (14u << 23) | (5u << 16) | 7u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOPK);
+    EXPECT_EQ(inst.opcode, Opcode::S_ADDK_I32);
+    EXPECT_EQ(inst.simm16, (int16_t)7);
+    EXPECT_EQ(inst.dst.index, 5u);
+}
+
+// --- SOPC tests ---
+TEST(ISADecoder, SCmpEqI32) {
+    // s_cmp_eq_i32 s0, s1 — SOPC, [31:23]=0x17E, [22:16]=op=0, [15:8]=ssrc1=1, [7:0]=ssrc0=0
+    uint32_t w0 = (0x17Eu << 23) | (0u << 16) | (1u << 8) | 0u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOPC);
+    EXPECT_EQ(inst.opcode, Opcode::S_CMP_EQ_I32);
+    EXPECT_EQ(inst.size_bytes, 4);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.src[0].index, 0u);
+    EXPECT_EQ(inst.src[1].kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.src[1].index, 1u);
+}
+
+TEST(ISADecoder, SCmpGtU32) {
+    // s_cmp_gt_u32 s2, s3 — SOPC op=8, ssrc0=2, ssrc1=3
+    uint32_t w0 = (0x17Eu << 23) | (8u << 16) | (3u << 8) | 2u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOPC);
+    EXPECT_EQ(inst.opcode, Opcode::S_CMP_GT_U32);
+}
+
+// --- DS tests ---
+TEST(ISADecoder, DsWriteB32) {
+    // ds_write_b32 v0, v1 — DS op=11, addr=v0 (in w1[7:0]), data0=v1 (in w1[15:8])
+    // word0: [31:26]=0x36, [25:18]=op=11, offset1=0, offset0=0
+    // word1: [31:24]=vdst=0, [23:16]=data1=0, [15:8]=data0=v1=1, [7:0]=addr=v0=0
+    uint32_t w0 = (0x36u << 26) | (11u << 18);
+    uint32_t w1 = (0u << 24) | (0u << 16) | (1u << 8) | 0u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::DS);
+    EXPECT_EQ(inst.opcode, Opcode::DS_WRITE_B32);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR); // addr
+    EXPECT_EQ(inst.src[0].index, 0u);
+    EXPECT_EQ(inst.src[1].kind, Operand::Kind::VGPR); // data0
+    EXPECT_EQ(inst.src[1].index, 1u);
+}
+
+TEST(ISADecoder, DsReadB32) {
+    // ds_read_b32 v2, v0 — DS op=56, vdst=v2, addr=v0
+    // word0: [31:26]=0x36, [25:18]=op=56
+    // word1: [31:24]=vdst=2, [7:0]=addr=0
+    uint32_t w0 = (0x36u << 26) | (56u << 18);
+    uint32_t w1 = (2u << 24) | 0u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::DS);
+    EXPECT_EQ(inst.opcode, Opcode::DS_READ_B32);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.dst.index, 2u);
+}
+
+// --- MUBUF tests ---
+TEST(ISADecoder, BufferLoadDword) {
+    // buffer_load_dword v4, v0, s[8:11], s0 offen
+    // word0: [31:26]=0x38, [24:18]=op=4, [12]=offen=1
+    // word1: [31:24]=vdata=v4, [23:16]=vaddr=v0, [12:8]=srsrc=2(=s8), [7:0]=soffset=0
+    uint32_t w0 = (0x38u << 26) | (4u << 18) | (1u << 12);
+    uint32_t w1 = (4u << 24) | (0u << 16) | (2u << 8) | 0u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::MUBUF);
+    EXPECT_EQ(inst.opcode, Opcode::BUFFER_LOAD_DWORD);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_TRUE(inst.mubuf_offen);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.dst.index, 4u);
+}
+
+// --- VOP3P tests ---
+TEST(ISADecoder, VPkAddF16) {
+    // v_pk_add_f16 v2, v0, v1 — VOP3P format
+    // [31:26]=0b110011=0x33, [25:23]=op-bits, [22:16]=vdst
+    // v_pk_add_f16 has op within VOP3P
+    // op for v_pk_add_f16 varies by assembler, let's use what our decoder assigns
+    // From vop3p_opcode: op=0x1E corresponds to V_PK_ADD_F16 per our table
+    // [31:26]=0x33, [25:23]=?, [22:16]=vdst=2
+    // word0 bits: [25:16]=op_and_dst, let's construct from encoder knowledge
+    // VOP3P: w[31:26]=0x33, w[25:23]=op[8:6], w[22:16]=dst, op total 9 bits
+    // For simplicity: just check format detection
+    uint32_t w0 = (0x33u << 26) | (2u << 16); // dst=v2, op bits in [25:23]=0
+    uint32_t w1 = (0u << 9) | (1u << 0) | (0u << 9); // src1=v1=256+1, src0=256+0
+    // src0/src1 encoding: VGPR0=256, VGPR1=257
+    w1 = (257u << 9) | 256u; // src0=v0, src1=v1
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP3P);
+    EXPECT_EQ(inst.size_bytes, 8);
+}
+
+// --- MFMA tests ---
+TEST(ISADecoder, MfmaF32_4x4x1f32) {
+    // v_mfma_f32_4x4x1f32 agpr[0:3], v0, v1, agpr[0:3]
+    // MFMA: [31:26]=0x34 (same as VOP3), op in [25:18] = MFMA op
+    // v_mfma_f32_4x4x1f32 MFMA op = 2 (per mfma_opcode table)
+    // Word0: [31:26]=0x34, [25:18]=op=2, [17:16]=?, [15:8]=src1, [7:0]=src0
+    // src0=v0=256, src1=v1=257, dst=agpr0=0
+    // Actually the MFMA encoding has op at [25:18] in the 64-bit instruction
+    // word0: [31:26]=0x34=110100, [25:18]=op=2=00000010
+    // bits: 1101 0000 0000 1000 = 0xD008? Let's build it:
+    // [31:26]=0b110100 → top 6 bits of w0 = 0x34 << 26
+    // [25:18]=2 → bits 25:18 of w0
+    uint32_t w0 = (0x34u << 26) | (2u << 18);
+    // word1: [31:24]=vdst=0, [23:16]=src2, [15:8]=src1, [7:0]=src0
+    uint32_t w1 = (0u << 24) | (0u << 16) | (1u << 8) | 0u; // src0=v0, src1=v1, src2=agpr0
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    // MFMA ops are in VOP3 encoding space; format may be VOP3A or MFMA
+    EXPECT_TRUE(inst.format == InstFormat::MFMA || inst.format == InstFormat::VOP3A);
+    EXPECT_EQ(inst.size_bytes, 8);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

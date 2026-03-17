@@ -29,3 +29,4 @@ if(GCNSIM_BUILD_TESTS)
 endif()
 
 add_subdirectory(tools/vector_add)
+add_subdirectory(tools/gemm_mfma)

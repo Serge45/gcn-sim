@@ -85,11 +85,18 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     const uint8_t* kernarg = kernarg_buf.data();
 
+    // Determine LDS size from kernel descriptor
+    uint32_t lds_bytes = kernel.descriptor->group_segment_fixed_size;
+
     for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
     for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
     for (uint32_t wg_x = 0; wg_x < wg_count_x; wg_x++) {
+        // Allocate per-workgroup LDS buffer; shared across all waves in the workgroup
+        std::vector<uint8_t> lds_buf(lds_bytes, 0);
+        uint8_t* lds_ptr = lds_bytes > 0 ? lds_buf.data() : nullptr;
+
         for (uint32_t wave = 0; wave < waves_per_wg; wave++) {
-            // Allocate on heap — WavefrontState is ~66KB, too large for the stack
+            // Allocate on heap — WavefrontState is large, too large for the stack
             auto ws = std::make_unique<WavefrontState>();
             init_wavefront(*ws, *kernel.descriptor,
                            kernarg,
@@ -98,6 +105,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                            wg_x, wg_y, wg_z,
                            wave, waves_per_wg,
                            block_x, block_y, block_z);
+            ws->lds_ptr  = lds_ptr;
+            ws->lds_size = lds_bytes;
             run_wavefront(*ws);
         }
     }

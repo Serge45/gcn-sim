@@ -26,6 +26,9 @@ void init_wavefront(WavefrontState& wave,
     wave.workgroup_id[1] = wg_id_y;
     wave.workgroup_id[2] = wg_id_z;
     wave.pc = 0;
+    // lds_ptr and lds_size are set by the execution engine per workgroup
+    wave.lds_ptr = nullptr;
+    wave.lds_size = 0;
 
     // -----------------------------------------------------------------------
     // EXEC mask — active lanes
