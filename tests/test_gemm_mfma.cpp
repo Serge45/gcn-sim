@@ -155,6 +155,76 @@ TEST_F(GemmMfmaTest, CorrectResults) {
         FAIL() << "Total element failures: " << failures << " / " << M * N;
 }
 
+// ---------------------------------------------------------------------------
+// 64-thread wavefront test: one workgroup = 64 threads = 16 MFMA 4x4x1 blocks
+// ---------------------------------------------------------------------------
+
+TEST_F(GemmMfmaTest, CorrectResultsWave64) {
+    std::string err;
+    auto mod = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod.has_value()) << "load_hsaco failed: " << err;
+
+    const gcnsim::KernelInfo* ki = nullptr;
+    for (const auto& k : mod->kernels) {
+        if (k.name.find("gemm_mfma_wave64") != std::string::npos) {
+            ki = &k;
+            break;
+        }
+    }
+    ASSERT_NE(ki, nullptr)    << "gemm_mfma_wave64 kernel not found";
+    ASSERT_NE(ki->code_ptr,   nullptr);
+    ASSERT_NE(ki->descriptor, nullptr);
+
+    // Use 64-wide N so one workgroup covers a full 4x64 tile (16 blocks x 4x4)
+    constexpr int M64 = 16, N64 = 64, K64 = 16;
+
+    std::vector<float> A64(M64 * K64), B64(K64 * N64);
+    std::vector<float> C_sim64(M64 * N64, 0.f), C_ref64(M64 * N64, 0.f);
+    for (int i = 0; i < M64 * K64; i++) A64[i] = (float)(i % 8 + 1);
+    for (int i = 0; i < K64 * N64; i++) B64[i] = (float)(i % 4 + 1);
+
+    float* pA = A64.data();
+    float* pB = B64.data();
+    float* pC = C_sim64.data();
+    int    pM = M64, pN = N64, pK = K64;
+
+    void* params[] = { &pA, &pB, &pC, &pM, &pN, &pK };
+    auto kernarg = build_kernarg(*ki, params, 6);
+
+    // Each workgroup covers 4 rows x 64 cols. block=(64,1,1).
+    gcnsim::LaunchConfig cfg;
+    cfg.grid_x  = (N64 / 64) * 64;  // N64/64 workgroups * 64 threads each
+    cfg.grid_y  = (M64 / 4)  * 1;   // M64/4 workgroups * 1 thread each
+    cfg.grid_z  = 1;
+    cfg.block_x = 64;
+    cfg.block_y = 1;
+    cfg.block_z = 1;
+    cfg.kernarg      = kernarg.data();
+    cfg.kernarg_size = (uint32_t)kernarg.size();
+
+    std::string launch_err;
+    bool ok = gcnsim::launch_kernel(*ki, cfg, launch_err);
+    ASSERT_TRUE(ok) << "launch_kernel failed: " << launch_err;
+
+    cpu_gemm(A64.data(), B64.data(), C_ref64.data(), M64, N64, K64);
+
+    int failures = 0;
+    for (int i = 0; i < M64 * N64; i++) {
+        float got      = C_sim64[i];
+        float expected = C_ref64[i];
+        if (std::abs(got - expected) > 1e-3f * std::abs(expected) + 1e-3f) {
+            if (failures < 10)
+                EXPECT_NEAR(got, expected, 1e-3f)
+                    << "Mismatch at element " << i
+                    << " (row=" << i/N64 << " col=" << i%N64 << ")"
+                    << ": expected " << expected << " got " << got;
+            failures++;
+        }
+    }
+    if (failures > 10)
+        FAIL() << "Total element failures: " << failures << " / " << M64 * N64;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--hsaco" && i + 1 < argc)

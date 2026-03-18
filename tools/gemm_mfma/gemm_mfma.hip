@@ -21,6 +21,22 @@
 // Launch: grid=(N/4, M/4, 1) workgroups * block=(4, 1, 1) threads
 //   => total grid threads: (N/4 * 4, M/4 * 1, 1)
 // ----------------------------------------------------------------------------
+//
+// gemm_mfma_wave64: same computation but uses a full 64-thread wavefront.
+//
+// A single 64-lane wavefront contains 16 MFMA 4x4x1 blocks (lanes 0-3,
+// 4-7, ..., 60-63).  Each block independently computes one 4x4 tile.
+// The workgroup covers a 4-row x 64-col region of C (16 tiles wide).
+//
+// Lane mapping within the wavefront:
+//   block    = lane / 4       (0..15, which of the 16 4x4 tiles)
+//   t        = lane % 4       (row within the 4x4 tile)
+//   c_row    = wg_row * 4 + t
+//   c_col_base = wg_col * 64 + block * 4
+//   acc[gpr] = C[c_row][c_col_base + gpr]
+//
+// Launch: grid=(N/64 * 64, M/4, 1) total threads, block=(64, 1, 1)
+// ----------------------------------------------------------------------------
 
 using float32x4_t = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 
@@ -65,6 +81,43 @@ void gemm_mfma_f32_4x4x1(const float* __restrict__ A,
     if (c_row < M) {
         for (int g = 0; g < 4; g++) {
             int c_col = wg_col * 4 + g;
+            if (c_col < N)
+                C[c_row * N + c_col] = acc[g];
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 64-thread wavefront variant: one workgroup = 64 threads = 16 MFMA blocks.
+// Each block covers one 4x4 tile; the workgroup covers a 4-row x 64-col tile.
+// ----------------------------------------------------------------------------
+extern "C" __global__
+void gemm_mfma_wave64_f32_4x4x1(const float* __restrict__ A,
+                                  const float* __restrict__ B,
+                                  float*       __restrict__ C,
+                                  int M, int N, int K)
+{
+    int wg_row = blockIdx.y;
+    int wg_col = blockIdx.x;   // indexes 64-col-wide tiles
+    int lane   = threadIdx.x;  // 0..63
+    int block  = lane / 4;     // which 4x4 tile within the wavefront (0..15)
+    int t      = lane % 4;     // row within the 4x4 tile
+
+    int c_row      = wg_row * 4 + t;
+    int c_col_base = wg_col * 64 + block * 4;
+    int b_col      = c_col_base + t;  // B column this lane provides
+
+    float32x4_t acc = {0.f, 0.f, 0.f, 0.f};
+
+    for (int k = 0; k < K; k++) {
+        float a_val = (c_row < M)      ? A[c_row * K + k]  : 0.f;
+        float b_val = (b_col < N)      ? B[k * N + b_col]  : 0.f;
+        acc = __builtin_amdgcn_mfma_f32_4x4x1f32(a_val, b_val, acc, 0, 0, 0);
+    }
+
+    if (c_row < M) {
+        for (int g = 0; g < 4; g++) {
+            int c_col = c_col_base + g;
             if (c_col < N)
                 C[c_row * N + c_col] = acc[g];
         }
