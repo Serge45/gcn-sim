@@ -22,8 +22,14 @@ target_link_libraries(test_vector_add gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_vector_add COMMAND test_vector_add
          --hsaco ${CMAKE_BINARY_DIR}/tools/vector_add/vector_add.hsaco)
 
-# test_gemm_mfma (MFMA integration test)
+# test_gemm_mfma (MFMA 4x4x1 integration test)
 add_executable(test_gemm_mfma test_gemm_mfma.cpp)
 target_link_libraries(test_gemm_mfma gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_gemm_mfma COMMAND test_gemm_mfma
          --hsaco ${CMAKE_BINARY_DIR}/tools/gemm_mfma/gemm_mfma.hsaco)
+
+# test_mfma_kernels (16x16x1, 16x16x4, 32x32x1, 32x32x2 integration tests)
+add_executable(test_mfma_kernels test_mfma_kernels.cpp)
+target_link_libraries(test_mfma_kernels gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_mfma_kernels COMMAND test_mfma_kernels
+         --hsaco ${CMAKE_BINARY_DIR}/tools/mfma_kernels/mfma_kernels.hsaco)

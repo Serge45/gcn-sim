@@ -32,9 +32,10 @@ ctest --test-dir build -V
 ./build/tests/test_isa_decoder
 ./build/tests/test_vector_add
 ./build/tests/test_gemm_mfma --hsaco build/tools/gemm_mfma/gemm_mfma.hsaco
+./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
 ```
 
-**Expected:** 47 tests pass across 5 suites.
+**Expected:** 51 tests pass across 6 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -299,9 +300,10 @@ Common past mistakes to watch for:
   (re-convergence stack is not implemented).
 - The instruction safety limit in `run_wavefront()` is 1,000,000 iterations; infinite-loop kernels
   will be silently cut off.
-- **MFMA data layout**: the per-lane output mapping for MFMA instructions follows a simplified
-  approximation rather than the exact CDNA2 matrix-block lane assignment. Functional but not
-  bitwise-identical to hardware for multi-block shapes (32×32, 16×16 with multiple AGPRs).
+- **MFMA F32 data layout**: all five F32 MFMA shapes (4×4×1, 16×16×1, 16×16×4,
+  32×32×1, 32×32×2) implement the correct CDNA2 cross-lane outer-product semantics.
+  Non-F32 shapes (F16, BF16, I8) still use a simplified per-lane approximation and
+  are not bitwise-identical to hardware.
 - **MIMG** (image sampling) instructions are not decoded — they require texture hardware state.
   All MIMG instructions silently skip.
 - **SDWA / DPP** sub-encoding variants are not decoded; instructions using `src0 == 0xF9/0xFA`
@@ -318,8 +320,8 @@ Common past mistakes to watch for:
 - **DPP decode path**: if `src0 == 0xFA`, word1 contains DPP control for cross-lane data
   movement (`row_shl`, `row_shr`, `wave_shl/shr`, broadcast patterns). Required for
   warp-level reductions without LDS.
-- **Exact MFMA lane layout**: implement the full CDNA2 matrix-block lane assignment tables
-  for 32×32 and 16×16 shapes so simulation is bitwise-identical to hardware.
+- **Exact MFMA lane layout for non-F32**: F16, BF16, I8 shapes still use per-lane
+  approximation; implement full CDNA2 matrix-block lane tables for those shapes.
 - **Re-convergence stack**: properly handle divergent loops where EXEC changes mid-loop,
   allowing accurate simulation of branchy kernels.
 - **Scratch segment addressing**: route FLAT SEG=1 instructions through

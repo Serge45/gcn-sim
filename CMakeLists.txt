@@ -30,3 +30,4 @@ endif()
 
 add_subdirectory(tools/vector_add)
 add_subdirectory(tools/gemm_mfma)
+add_subdirectory(tools/mfma_kernels)

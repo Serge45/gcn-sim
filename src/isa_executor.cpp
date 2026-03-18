@@ -38,6 +38,12 @@ static uint64_t read_src_scalar64(const WavefrontState& w, const Operand& op) {
     if (op.kind == Operand::Kind::EXEC || op.kind == Operand::Kind::EXEC_LO) {
         return w.exec;
     }
+    // For inline constants and literals, sign-extend the 32-bit value to 64 bits
+    // so that -1 (0xFFFFFFFF) becomes 0xFFFFFFFFFFFFFFFF for B64 operations.
+    if (op.kind == Operand::Kind::INLINE_CONST ||
+        op.kind == Operand::Kind::LITERAL) {
+        return (uint64_t)(int64_t)(int32_t)(uint32_t)op.imm;
+    }
     return (uint64_t)read_src_scalar(w, op);
 }
 
@@ -103,13 +109,22 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst);
 void run_wavefront(WavefrontState& wave) {
     static constexpr uint64_t MAX_INSNS = 1000000ULL; // safety limit
     uint64_t count = 0;
+    const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
     while (true) {
         if (wave.pc >= wave.kernel_code_size) {
             // Out of bounds — treat as endpgm
             break;
         }
+        uint64_t pre_pc = wave.pc;
         Instruction inst = decode(wave.kernel_code_ptr + wave.pc);
         wave.pc += inst.size_bytes;
+        if (trace) {
+            fprintf(stderr, "PC=%#llx enc=%08X exec=%#llx op=%s\n",
+                    (unsigned long long)pre_pc,
+                    inst.encoding[0],
+                    (unsigned long long)wave.exec,
+                    opcode_name(inst.opcode));
+        }
         execute_instruction(wave, inst);
         if (inst.opcode == Opcode::S_ENDPGM) break;
         if (++count >= MAX_INSNS) {
@@ -486,22 +501,25 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     }
     case Opcode::S_XOR_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
+        uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec ^ wave.vcc;
+        wave.exec = old_exec ^ src;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
     case Opcode::S_ANDN2_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
+        uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec & ~wave.vcc;
+        wave.exec = old_exec & ~src;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
     case Opcode::S_ORN2_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
+        uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec | ~wave.vcc;
+        wave.exec = old_exec | ~src;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -797,17 +815,17 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     }
     case Opcode::S_AND_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
-        // Save old exec to dst
+        uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        // exec = exec & VCC
-        wave.exec = old_exec & wave.vcc;
+        wave.exec = old_exec & src;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
     case Opcode::S_OR_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
+        uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec | wave.vcc;
+        wave.exec = old_exec | src;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -1171,7 +1189,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a < b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_LE_U32: {
@@ -1182,7 +1200,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a <= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GT_U32: {
@@ -1193,7 +1211,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a > b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GE_U32: {
@@ -1204,7 +1222,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a >= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_EQ_U32: {
@@ -1215,7 +1233,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a == b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_NE_U32: {
@@ -1226,7 +1244,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane);
             if (a != b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_LT_I32: {
@@ -1237,7 +1255,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a < b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_LE_I32: {
@@ -1248,7 +1266,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a <= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GT_I32: {
@@ -1259,7 +1277,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a > b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GE_I32: {
@@ -1270,7 +1288,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a >= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_EQ_I32: {
@@ -1281,7 +1299,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a == b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_NE_I32: {
@@ -1292,7 +1310,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int32_t b = (int32_t)read_vsrc(wave, inst.src[1], lane);
             if (a != b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
 
@@ -1817,7 +1835,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a < b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1831,7 +1849,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a == b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1845,7 +1863,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a <= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1859,7 +1877,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a > b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1873,7 +1891,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a >= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1888,7 +1906,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a != b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1903,7 +1921,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (!(a >= b)) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -1920,7 +1938,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                                    wave.vgpr[inst.src[1].index][lane]);
             if (a < b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_EQ_I64: {
@@ -1931,7 +1949,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a == b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GE_I64: {
@@ -1942,7 +1960,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int64_t b = (int64_t)(((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane]);
             if (a >= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_NE_I64: {
@@ -1953,7 +1971,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a != b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_LT_U64: {
@@ -1964,7 +1982,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a < b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_EQ_U64: {
@@ -1975,7 +1993,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a == b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_GE_U64: {
@@ -1986,7 +2004,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a >= b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     case Opcode::V_CMP_NE_U64: {
@@ -1997,7 +2015,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
             if (a != b) mask |= (1ULL << lane);
         }
-        wave.vcc = mask;
+        write_sdst64(wave, inst.dst, mask);
         break;
     }
     // -----------------------------------------------------------------------
@@ -4327,31 +4345,38 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // -----------------------------------------------------------------------
     // Helper: BF16 to float conversion
     // BF16 is stored in upper 16 bits of a float32.
-    // v_mfma_f32_4x4x1f32: simplest case, M=N=K=1, 16 lanes per block
-    // Each lane has one (a,b,c) triple; result: d[lane] = a*b + c
+    // v_mfma_f32_4x4x1f32: 16 blocks of 4 lanes, 4 output GPRs.
+    // Cross-lane outer product: D[row=t][col=gpr] += A[t] * B[gpr]
+    // where A[t] = src0 of lane (block*4+t), B[gpr] = src1 of lane (block*4+gpr).
     case Opcode::V_MFMA_F32_4X4X1F32: {
-        // 4x4 output: 16 lanes hold the output, src0/src1 are scalars per lane.
-        // src2 and dst may be VGPR (accumulator VGPR) or AGPR depending on
-        // how the compiler allocated accumulators.
+        // Collect src0 and src1 across all lanes first for cross-lane reads.
+        float a_all[WAVE_SIZE], b_all[WAVE_SIZE];
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a_bits = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b_bits = read_vsrc(wave, inst.src[1], lane);
-            // Read accumulator from src2 (VGPR or AGPR)
-            uint32_t c_bits;
-            if (inst.src[2].kind == Operand::Kind::AGPR)
-                c_bits = wave.agpr[inst.src[2].index][lane];
-            else
-                c_bits = read_vsrc(wave, inst.src[2], lane);
-            float a, b, c;
-            memcpy(&a, &a_bits, 4); memcpy(&b, &b_bits, 4); memcpy(&c, &c_bits, 4);
-            float r = a * b + c;
-            uint32_t r_bits; memcpy(&r_bits, &r, 4);
-            // Write result to dst (VGPR or AGPR)
-            if (inst.dst.kind == Operand::Kind::AGPR)
-                wave.agpr[inst.dst.index][lane] = r_bits;
-            else
-                wave.vgpr[inst.dst.index][lane] = r_bits;
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            uint32_t bb = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&a_all[lane], &ab, 4);
+            memcpy(&b_all[lane], &bb, 4);
+        }
+        // MFMA ignores EXEC: all 64 lanes participate in the matrix multiply.
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int block_base = (lane / 4) * 4;
+            // Each lane writes 4 output elements: acc[gpr] for gpr=0..3
+            for (int gpr = 0; gpr < 4; gpr++) {
+                // B[col=gpr] comes from the lane at block_base + gpr
+                float b_val = b_all[block_base + gpr];
+                uint32_t c_bits;
+                if (inst.dst.kind == Operand::Kind::AGPR)
+                    c_bits = wave.agpr[inst.dst.index + gpr][lane];
+                else
+                    c_bits = wave.vgpr[inst.dst.index + gpr][lane];
+                float c; memcpy(&c, &c_bits, 4);
+                float r = fmaf(a_all[lane], b_val, c);
+                uint32_t r_bits; memcpy(&r_bits, &r, 4);
+                if (inst.dst.kind == Operand::Kind::AGPR)
+                    wave.agpr[inst.dst.index + gpr][lane] = r_bits;
+                else
+                    wave.vgpr[inst.dst.index + gpr][lane] = r_bits;
+            }
         }
         break;
     }
@@ -4561,50 +4586,128 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
-    // F32 MFMA larger sizes
+    // F32 MFMA larger sizes — all use correct CDNA2 cross-lane outer-product semantics.
+    // dst may be VGPR or AGPR depending on compiler register allocation.
+    //
+    // v_mfma_f32_16x16x1f32: 4 blocks of 16 lanes, 16 output GPRs.
+    // D[row=t][col=gpr] += A[t] * B[gpr]
+    // A[t] = src0 of lane (block*16+t), B[gpr] = src1 of lane (block*16+gpr).
     case Opcode::V_MFMA_F32_16X16X1F32: {
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        float a_all[WAVE_SIZE], b_all[WAVE_SIZE];
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a_bits = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b_bits = read_vsrc(wave, inst.src[1], lane);
-            uint32_t c_bits = wave.agpr[inst.dst.index][lane];
-            float a, b, c; memcpy(&a, &a_bits, 4); memcpy(&b, &b_bits, 4); memcpy(&c, &c_bits, 4);
-            float r = fmaf(a, b, c);
-            uint32_t rb; memcpy(&rb, &r, 4);
-            wave.agpr[inst.dst.index][lane] = rb;
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            uint32_t bb = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&a_all[lane], &ab, 4);
+            memcpy(&b_all[lane], &bb, 4);
         }
-        break;
-    }
-    case Opcode::V_MFMA_F32_32X32X1F32:
-    case Opcode::V_MFMA_F32_32X32X2F32: {
-        int num_out_regs = 16;
+        // MFMA ignores EXEC: all 64 lanes participate.
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a_bits = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b_bits = read_vsrc(wave, inst.src[1], lane);
-            float a, b; memcpy(&a, &a_bits, 4); memcpy(&b, &b_bits, 4);
-            float prod = a * b;
-            for (int r = 0; r < num_out_regs; r++) {
-                uint32_t cb = wave.agpr[inst.dst.index + r][lane];
+            int block_base = (lane / 16) * 16;
+            for (int gpr = 0; gpr < 16; gpr++) {
+                float b_val = b_all[block_base + gpr];
+                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
+                                       : wave.vgpr[inst.dst.index + gpr][lane];
                 float c; memcpy(&c, &cb, 4);
-                float res = c + prod;
-                uint32_t rb; memcpy(&rb, &res, 4);
-                wave.agpr[inst.dst.index + r][lane] = rb;
+                float r = fmaf(a_all[lane], b_val, c);
+                uint32_t rb; memcpy(&rb, &r, 4);
+                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
+                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
             }
         }
         break;
     }
-    case Opcode::V_MFMA_F32_16X16X4F32: {
+    // v_mfma_f32_32x32x1f32: 2 blocks of 32 lanes, 16 output GPRs per lane.
+    // Each lane writes acc[0..15] (not acc[b*16..b*16+15]).
+    // acc[gpr] at lane l (b=l/32, col=l%32) = D[b*16+gpr][col].
+    // A[b*16+gpr][k] lives at lane b*32+gpr (same block, position=gpr).
+    case Opcode::V_MFMA_F32_32X32X1F32: {
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        float a_all[WAVE_SIZE], b_all[WAVE_SIZE];
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a_bits = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b_bits = read_vsrc(wave, inst.src[1], lane);
-            float a, b; memcpy(&a, &a_bits, 4); memcpy(&b, &b_bits, 4);
-            uint32_t cb = wave.agpr[inst.dst.index][lane];
-            float c; memcpy(&c, &cb, 4);
-            float r = fmaf(a, b, c);
-            uint32_t rb; memcpy(&rb, &r, 4);
-            wave.agpr[inst.dst.index][lane] = rb;
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            uint32_t bb = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&a_all[lane], &ab, 4);
+            memcpy(&b_all[lane], &bb, 4);
+        }
+        // MFMA ignores EXEC: all 64 lanes participate.
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int block_base = (lane / 32) * 32;
+            for (int gpr = 0; gpr < 16; gpr++) {
+                // A[b*16+gpr][k] is src0 of lane (block_base+gpr)
+                float a_val = a_all[block_base + gpr];
+                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
+                                       : wave.vgpr[inst.dst.index + gpr][lane];
+                float c; memcpy(&c, &cb, 4);
+                float r = fmaf(a_val, b_all[lane], c);
+                uint32_t rb; memcpy(&rb, &r, 4);
+                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
+                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
+            }
+        }
+        break;
+    }
+    // v_mfma_f32_32x32x2f32: 2 K-groups of 32 lanes, 16 output GPRs per lane.
+    // acc[gpr] at lane l (kg_out=l/32, col=l%32) = D[kg_out*16+gpr][col].
+    // A[kg_out*16+gpr][k] lives at lane kg*32+(kg_out*16+gpr).
+    case Opcode::V_MFMA_F32_32X32X2F32: {
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        float a_all[WAVE_SIZE], b_all[WAVE_SIZE];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            uint32_t bb = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&a_all[lane], &ab, 4);
+            memcpy(&b_all[lane], &bb, 4);
+        }
+        // MFMA ignores EXEC: all 64 lanes participate.
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int kg_out   = lane / 32;
+            int col      = lane % 32;
+            int row_base = kg_out * 16;
+            for (int gpr = 0; gpr < 16; gpr++) {
+                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
+                                       : wave.vgpr[inst.dst.index + gpr][lane];
+                float acc; memcpy(&acc, &cb, 4);
+                for (int kg = 0; kg < 2; kg++) {
+                    acc = fmaf(a_all[kg * 32 + row_base + gpr],
+                               b_all[kg * 32 + col], acc);
+                }
+                uint32_t rb; memcpy(&rb, &acc, 4);
+                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
+                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
+            }
+        }
+        break;
+    }
+    // v_mfma_f32_16x16x4f32: 1 block of 64 lanes, K=4, 4 output GPRs.
+    // Four K-groups of 16 lanes.
+    // Lane l: output row for gpr g = (l/16)*4 + g, output col = l%16.
+    // A[row][k] lives at lane kg*16+row; B[k][col] at lane kg*16+col.
+    case Opcode::V_MFMA_F32_16X16X4F32: {
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        float a_all[WAVE_SIZE], b_all[WAVE_SIZE];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            uint32_t bb = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&a_all[lane], &ab, 4);
+            memcpy(&b_all[lane], &bb, 4);
+        }
+        // MFMA ignores EXEC: all 64 lanes participate.
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int col      = lane % 16;
+            int row_base = (lane / 16) * 4;
+            for (int gpr = 0; gpr < 4; gpr++) {
+                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
+                                       : wave.vgpr[inst.dst.index + gpr][lane];
+                float acc; memcpy(&acc, &cb, 4);
+                for (int kg = 0; kg < 4; kg++) {
+                    acc = fmaf(a_all[kg * 16 + row_base + gpr],
+                               b_all[kg * 16 + col], acc);
+                }
+                uint32_t rb; memcpy(&rb, &acc, 4);
+                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
+                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
+            }
         }
         break;
     }
@@ -4991,7 +5094,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a < b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5009,7 +5112,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a == b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5027,7 +5130,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a <= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5045,7 +5148,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a > b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5064,7 +5167,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a != b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5082,7 +5185,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a >= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5100,7 +5203,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (!(a == b)) mask |= (1ULL << lane); // ordered not-equal
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5116,7 +5219,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a <= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5129,7 +5232,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a > b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5145,7 +5248,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a <= b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }
@@ -5158,7 +5261,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             if (a > b) mask |= (1ULL << lane);
         }
         if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            wave.vcc = mask;
+            write_sdst64(wave, inst.dst, mask);
         else write_sdst64(wave, inst.dst, mask);
         break;
     }

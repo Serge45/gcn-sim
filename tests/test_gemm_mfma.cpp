@@ -117,14 +117,14 @@ TEST_F(GemmMfmaTest, CorrectResults) {
     void* params[] = { &pA, &pB, &pC, &pM, &pN, &pK };
     auto kernarg = build_kernarg(*ki, params, 6);
 
-    // Grid: (N/4 * 16, M/4 * 1, 1) total threads, block: (16, 1, 1)
-    // Each workgroup handles one 4x4 output tile; 16 threads per workgroup.
+    // Grid: (N/4 * 4, M/4 * 1, 1) total threads, block: (4, 1, 1)
+    // Each workgroup is 4 threads (one MFMA block) and handles one 4x4 tile.
     // LaunchConfig.grid_x is total threads (not workgroup count).
     gcnsim::LaunchConfig cfg;
-    cfg.grid_x  = (N / 4) * 16;  // 4 workgroups * 16 threads = 64 total threads
-    cfg.grid_y  = (M / 4) * 1;   // 4 workgroups * 1 thread = 4 total threads
+    cfg.grid_x  = (N / 4) * 4;  // N/4 workgroups * 4 threads each
+    cfg.grid_y  = (M / 4) * 1;  // M/4 workgroups * 1 thread each
     cfg.grid_z  = 1;
-    cfg.block_x = 16;
+    cfg.block_x = 4;
     cfg.block_y = 1;
     cfg.block_z = 1;
     cfg.kernarg      = kernarg.data();

@@ -529,10 +529,10 @@ static Opcode vopc_opcode(uint32_t op) {
 }
 
 // VOP3 opcode space (10-bit field):
-// 0x140-0x17F = VOP2 re-encoded
-// 0x180-0x1BF = VOP1 re-encoded
-// 0x1C0-0x1FF = VOPC re-encoded (0x1C0 + vopc_8bit_op)
-// 0x200+ = true VOP3 ops
+// 0x00-0xFF    = VOPC re-encoded (8-bit VOPC op used directly)
+// 0x140-0x17F  = VOP2 re-encoded (subtract 0x140 for VOP2 op)
+// 0x180-0x1BF  = VOP1 re-encoded (subtract 0x180 for VOP1 op)
+// 0x200+       = true VOP3 ops
 static Opcode vop3_opcode(uint32_t op) {
     switch (op) {
         // True VOP3A/B ops
@@ -549,10 +549,10 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x282: return Opcode::V_MIN_F64;
         case 0x283: return Opcode::V_MAX_F64;
         case 0x284: return Opcode::V_LDEXP_F64;
-        case 0x200: return Opcode::V_MAD_F32;       // v_mad_legacy_f32 (treat as v_mad_f32)
-        case 0x201: return Opcode::V_MAD_F32;
-        case 0x202: return Opcode::V_MAD_I32_I24;
-        case 0x203: return Opcode::V_MAD_U32_U24;
+        case 0x1FF: return Opcode::V_ADD3_U32;       // gfx90a encoding (was 0x275 on Vega)
+        case 0x200: return Opcode::V_LSHL_OR_B32;   // gfx90a encoding (was 0x276 on Vega)
+        case 0x201: return Opcode::V_AND_OR_B32;    // gfx90a encoding (was 0x277 on Vega)
+        case 0x202: return Opcode::V_OR3_B32;       // gfx90a encoding (was 0x278 on Vega)
         case 0x204: return Opcode::UNKNOWN;         // v_cubeid_f32 (graphics)
         case 0x209: return Opcode::V_BFE_U32;
         case 0x20A: return Opcode::V_BFE_I32;
@@ -610,10 +610,6 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x144: return Opcode::V_SUB_CO_U32;
         case 0x145: return Opcode::V_SUBREV_CO_U32;
         default: {
-            // VOP3->VOPC: op = 0x1C0 | vopc_8bit
-            if (op >= 0x1C0 && op <= 0x1FF) {
-                return vopc_opcode(op - 0x1C0);
-            }
             // VOP3->VOP2
             if (op >= 0x140 && op <= 0x17F) {
                 return vop2_opcode(op - 0x140);
@@ -621,6 +617,13 @@ static Opcode vop3_opcode(uint32_t op) {
             // VOP3->VOP1
             if (op >= 0x180 && op <= 0x1BF) {
                 return vop1_opcode(op - 0x180);
+            }
+            // VOP3->VOPC: 8-bit VOPC op used directly as the VOP3 10-bit op field
+            // (e.g. V_CMP_GT_I32 = vopc op 0xC4 → VOP3 op field 0xC4)
+            {
+                Opcode candidate = vopc_opcode(op);
+                if (candidate != Opcode::UNKNOWN)
+                    return candidate;
             }
             return Opcode::UNKNOWN;
         }
@@ -1285,6 +1288,11 @@ Instruction decode(const uint8_t* pc) {
             inst.dst.kind  = Operand::Kind::VGPR;
             inst.dst.index = vdst;
             inst.dst2 = decode_sdst(sdst);
+        } else if (vopc_opcode(op) != Opcode::UNKNOWN) {
+            // VOPC ops encoded in VOP3A: 8-bit VOPC op in the 10-bit op field.
+            // The destination is an SGPR pair encoded in the vdst field.
+            inst.format = InstFormat::VOP3A;
+            inst.dst    = decode_sdst(vdst);
         } else {
             inst.format = InstFormat::VOP3A;
             inst.dst.kind  = Operand::Kind::VGPR;
