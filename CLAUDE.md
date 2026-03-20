@@ -131,6 +131,23 @@ Detection order in `decode()` (most specific first):
 - SOPC: `bits[31:23] = 0x17E` (top byte `0xBF`, bit 23 clear)
 - SOPP: `bits[31:23] = 0x17F` (top byte `0xBF`, bit 23 set)
 
+**FLAT/GLOBAL/SCRATCH word 0 layout** (bits[31:26] = `110111`):
+- bits[25:18]: OP (8-bit) — same value for flat and global variants of the same operation
+- bits[15:14]: SEG — `00`=flat, `01`=scratch, `10`=global (**not** bits[17:16])
+- Example: `flat_load_dword` = `0xDC50_0000` (SEG=00), `global_load_dword` = `0xDC50_8000` (SEG=10)
+
+**MFMA word 0 bit 15** — "acc" flag distinguishing accumulator register file:
+- `0`: accumulator is VGPR (HIP compiler path; `vdst` = VGPR index, e.g. `v[2:5]`)
+- `1`: accumulator is AGPR (assembly path; `vdst` = AGPR index, e.g. `a[0:3]`)
+- Example: `D3C2_0002` = VGPR acc (bit15=0), `D3C2_8000` = AGPR acc (bit15=1)
+
+**VOP3A opcode ranges for VOP2 re-encoding** (both must be handled):
+- `0x100`–`0x13F`: VOP2 op N encoded as VOP3 op `0x100+N` (primary GFX9 encoding)
+- `0x140`–`0x17F`: VOP2 op N encoded as VOP3 op `0x140+N` (alternate encoding)
+- `0x180`–`0x1BF`: VOP1 re-encoding
+- `0x3D8`: V_ACCVGPR_READ_B32 (AGPR → VGPR)
+- `0x3D9`: V_ACCVGPR_WRITE_B32 (VGPR/const → AGPR)
+
 **Always verify opcode numbers against actual disassembly**, not only the ISA PDF.
 Use `llvm-objdump -d <kernel>.hsaco` and cross-check the hex encoding. The PDF
 table ordering does not always match the binary op field value.
@@ -315,6 +332,19 @@ Common past mistakes to watch for:
 - SOP2 shift/logic group starts at op 28, not op 18.
 - SOPC encoding is `0x17E`, not `0x17C` or `0x17D`.
 - Test byte sequences must come from real `llvm-objdump` output, not hand-crafted values.
+- **FLAT/GLOBAL SEG field is at bits[15:14]**, not bits[17:16]. Bits[17:16] are always
+  zero on GFX9/GFX90a and cannot distinguish flat from global. Correct extraction:
+  `seg = (w0 >> 14) & 0x3`  (0=flat, 1=scratch, 2=global).
+  Both flat and global share the same 8-bit OP value (e.g. 0x14 = load_dword); only
+  the SEG field disambiguates them.
+- **MFMA accumulator kind**: bit 15 of MFMA word 0 is the "acc" flag.
+  0 = VGPR accumulator (HIP compiler path — vdst encodes a physical VGPR index).
+  1 = AGPR accumulator (hand-written assembly path — vdst encodes an AGPR index).
+  Getting this wrong silently overwrites general-purpose VGPRs (e.g. v0 = lane id,
+  v1 = row index) with MFMA results, corrupting subsequent address computations.
+- **VOP3→VOP2 opcode range**: GFX9 encodes VOP2 op N as VOP3 op `0x100+N` *and*
+  as `0x140+N`. Both ranges must be handled. Missing the 0x100–0x13F range causes
+  `v_add_u32_e64` (op 0x134) to decode as UNKNOWN.
 
 ---
 
