@@ -33,3 +33,10 @@ add_executable(test_mfma_kernels test_mfma_kernels.cpp)
 target_link_libraries(test_mfma_kernels gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_mfma_kernels COMMAND test_mfma_kernels
          --hsaco ${CMAKE_BINARY_DIR}/tools/mfma_kernels/mfma_kernels.hsaco)
+
+# test_asm_gemm (hand-written GFX90A assembly MFMA GEMM integration test)
+add_executable(test_asm_gemm test_asm_gemm.cpp)
+target_link_libraries(test_asm_gemm gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_asm_gemm COMMAND test_asm_gemm
+         --hsaco ${CMAKE_BINARY_DIR}/tools/asm_gemm_mfma/asm_gemm_mfma.co)
+add_dependencies(test_asm_gemm asm_gemm_mfma_co)

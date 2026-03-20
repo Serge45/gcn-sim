@@ -609,8 +609,16 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x143: return Opcode::V_ADDC_CO_U32;
         case 0x144: return Opcode::V_SUB_CO_U32;
         case 0x145: return Opcode::V_SUBREV_CO_U32;
+        // GFX90a AGPR ops (VOP3 op space, op >= 960 but not MFMA)
+        case 0x3D8: return Opcode::V_ACCVGPR_READ_B32;
+        case 0x3D9: return Opcode::V_ACCVGPR_WRITE_B32;
         default: {
-            // VOP3->VOP2
+            // VOP3->VOP2: GFX9/GFX90a encodes VOP2 op N as VOP3 op 0x100+N.
+            // Range 0x100-0x13F covers VOP2 ops 0-63 (primary GFX9 encoding).
+            // Range 0x140-0x17F covers VOP2 ops 0-63 (alternate/older encoding).
+            if (op >= 0x100 && op <= 0x13F) {
+                return vop2_opcode(op - 0x100);
+            }
             if (op >= 0x140 && op <= 0x17F) {
                 return vop2_opcode(op - 0x140);
             }
@@ -1048,13 +1056,12 @@ Instruction decode(const uint8_t* pc) {
         inst.size_bytes = 8;
 
         uint32_t op    = (w0 >> 18) & 0xFF;
-        uint32_t seg   = (w0 >> 16) & 0x3;  // [17:16]: 00=flat, 01=scratch, 10=global
+        // SEG is at bits[15:14]: 00=flat, 01=scratch, 10=global.
+        // (Not [17:16] — those bits are always 0 for all variants on GFX9/GFX90a.)
+        uint32_t seg   = (w0 >> 14) & 0x3;
 
         bool is_scratch = (seg == 1);
-        // Determine global vs flat by op range:
-        // ops 0x10-0x4F are global-only ops; ops 0x08-0x0F are flat ops.
-        // Also detect global from seg=2. Treat op >= 0x10 as global.
-        bool is_global = (seg == 2) || (op >= 0x10);
+        bool is_global  = (seg == 2);
 
         uint32_t vdst  = (w1 >> 24) & 0xFF;
         uint32_t saddr = (w1 >> 16) & 0xFF;
@@ -1257,10 +1264,11 @@ Instruction decode(const uint8_t* pc) {
                 if (mc != Opcode::UNKNOWN) {
                     inst.format = InstFormat::MFMA;
                     inst.opcode = mc;
-                    // On gfx90a the compiler may use either VGPR or AGPR for
-                    // the accumulator (dst / src2). Keep whatever the encoding
-                    // says; both VGPRs (accum VGPRs) and AGPRs are valid.
-                    inst.dst.kind  = Operand::Kind::VGPR;
+                    // GFX90a: bit 15 of word 0 = "acc" flag.
+                    // 0 = accumulator is VGPR (HIP compiler path, vdst = VGPR index).
+                    // 1 = accumulator is AGPR (assembly path, vdst = AGPR index).
+                    bool is_agpr = (w0 >> 15) & 1;
+                    inst.dst.kind  = is_agpr ? Operand::Kind::AGPR : Operand::Kind::VGPR;
                     inst.dst.index = vdst;
                     inst.src[0] = decode_src(src0, nullptr);
                     inst.src[1] = decode_src(src1, nullptr);
@@ -1302,6 +1310,18 @@ Instruction decode(const uint8_t* pc) {
         inst.src[0] = decode_src(src0, nullptr);
         inst.src[1] = decode_src(src1, nullptr);
         inst.src[2] = decode_src(src2, nullptr);
+
+        // GFX90a AGPR ops encoded in VOP3A:
+        // v_accvgpr_write_b32: dst is AGPR, src0 is VGPR or inline const
+        if (inst.opcode == Opcode::V_ACCVGPR_WRITE_B32) {
+            inst.dst.kind = Operand::Kind::AGPR;
+        }
+        // v_accvgpr_read_b32: dst is VGPR, src0 is AGPR
+        if (inst.opcode == Opcode::V_ACCVGPR_READ_B32) {
+            if (inst.src[0].kind == Operand::Kind::VGPR) {
+                inst.src[0].kind = Operand::Kind::AGPR;
+            }
+        }
         return inst;
     }
 

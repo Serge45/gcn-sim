@@ -33,9 +33,10 @@ ctest --test-dir build -V
 ./build/tests/test_vector_add
 ./build/tests/test_gemm_mfma --hsaco build/tools/gemm_mfma/gemm_mfma.hsaco
 ./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
+./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
 ```
 
-**Expected:** 51 tests pass across 6 suites.
+**Expected:** 53 tests pass across 7 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -46,8 +47,10 @@ Always run the full test suite after any change to `src/` or `include/`.
 include/gcnsim/    Public headers — data structures and API declarations
 src/               Implementation — one .cpp per concern
 tests/             GTest unit and integration tests
-tools/vector_add/  Vector-add HIP kernel (.hsaco) for integration tests
-tools/gemm_mfma/   MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
+tools/vector_add/       Vector-add HIP kernel (.hsaco) for integration tests
+tools/gemm_mfma/        MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
+tools/mfma_kernels/     Multi-shape MFMA kernels (.hsaco) for integration tests
+tools/asm_gemm_mfma/    Hand-written GFX90A assembly MFMA GEMM (.co)
 ```
 
 | File | Responsibility |
@@ -255,12 +258,34 @@ Do **not** use raw pointer casts (`*(uint32_t*)addr`) — this violates strict a
 
 ## Adding a new test kernel
 
+### HIP C++ kernel
+
 1. Write the kernel in `tools/<name>/` directory.
 2. Add a `CMakeLists.txt` that builds the `.hsaco` with `hipcc --offload-arch=gfx90a -c --genco`.
 3. Add `add_subdirectory(tools/<name>)` to the root `CMakeLists.txt`.
 4. Write an integration test in `tests/` that uses `module_load` → `module_get_function` → `launch_kernel`.
 5. Pass the `.hsaco` path as a command-line argument (`--hsaco <path>`) and register it
    in `CMakeLists.txt` via `add_test(... --hsaco ...)`.
+
+### Hand-written assembly kernel
+
+ROCm clang at `/opt/rocm/llvm/bin/clang` can assemble GFX90A `.s` files.
+The build requires two steps (assemble then link):
+
+```bash
+clang -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 \
+      -mcpu=gfx90a:xnack- -mwavefrontsize64 -c -o kernel.o kernel.s
+clang -target amdgcn-amd-amdhsa -mcpu=gfx90a:xnack- kernel.o -o kernel.co
+```
+
+See `tools/asm_gemm_mfma/` for a complete example using `.amdhsa_kernel`,
+`.amdgpu_metadata` (COV4 YAML), and the corresponding `CMakeLists.txt`.
+
+Key assembly constraints (GFX9 constant bus rule):
+- A VALU instruction may read at most **one** SGPR operand.
+- When you need two SGPR values in a VALU op, copy one to a VGPR first with `v_mov_b32`.
+- `v_addc_co_u32` carry-in/out and src1 cannot both be SGPRs; use a VGPR copy for src1.
+- GFX9 does **not** support `.amdhsa_wavefront_size32` (that flag is GFX10+ only).
 
 ---
 
