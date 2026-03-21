@@ -58,6 +58,8 @@ enum class Opcode {
     S_BFE_U64,
     S_BFE_I64,
     S_ABSDIFF_I32,
+    S_CSELECT_B32,
+    S_CSELECT_B64,
     // Scalar ALU — SOP1
     S_MOV_B32,
     S_MOV_B64,
@@ -274,6 +276,7 @@ enum class Opcode {
     V_ACCVGPR_READ_B32,
     V_ACCVGPR_WRITE_B32,
     // Vector ALU — VOP2
+    V_CNDMASK_B32,
     V_ADD_F32,
     V_SUB_F32,
     V_SUBREV_F32,
@@ -470,6 +473,9 @@ enum class Opcode {
     V_PK_MIN_F16,
     V_PK_MAX_F16,
     V_PK_MOV_B32,
+    V_PK_FMA_F32,
+    V_PK_MUL_F32,
+    V_PK_ADD_F32,
     V_FMA_MIX_F32,
     V_FMA_MIXLO_F16,
     V_FMA_MIXHI_F16,
@@ -756,6 +762,38 @@ struct Instruction {
     uint32_t mubuf_offset  = 0;
     bool     mubuf_offen   = false;
     bool     mubuf_idxen   = false;
+    bool     mubuf_lds     = false;
+    // VOP3 source/destination modifiers
+    uint8_t  neg   = 0;   // bits [2:0] = negate src0/src1/src2
+    uint8_t  abs_  = 0;   // bits [2:0] = abs src0/src1/src2
+    uint8_t  clamp = 0;   // 1 bit: clamp result to [0,1]
+    uint8_t  omod  = 0;   // 2 bits: 0=none, 1=*2, 2=*4, 3=/2
+    // SDWA fields
+    bool     is_sdwa       = false;
+    uint8_t  sdwa_dst_sel  = 6;   // 0=BYTE_0..3=BYTE_3, 4=WORD_0, 5=WORD_1, 6=DWORD
+    uint8_t  sdwa_dst_unused = 0; // 0=PAD, 1=SEXT, 2=PRESERVE
+    uint8_t  sdwa_src0_sel = 6;
+    uint8_t  sdwa_src1_sel = 6;
+    bool     sdwa_src0_sext = false;
+    bool     sdwa_src1_sext = false;
+    bool     sdwa_src0_neg  = false;
+    bool     sdwa_src0_abs  = false;
+    bool     sdwa_src1_neg  = false;
+    bool     sdwa_src1_abs  = false;
+    // DPP fields
+    bool     is_dpp         = false;
+    uint16_t dpp_ctrl       = 0;      // bits [8:0] of word1
+    bool     dpp_bound_ctrl = false;  // bit 19
+    uint8_t  dpp_bank_mask  = 0xF;    // bits [27:24]
+    uint8_t  dpp_row_mask   = 0xF;    // bits [31:28]
+    bool     dpp_src0_neg   = false;  // bit 20
+    bool     dpp_src0_abs   = false;  // bit 21
+    bool     dpp_src1_neg   = false;  // bit 22
+    bool     dpp_src1_abs   = false;  // bit 23
+    // VOP3P fields
+    uint8_t  op_sel     = 0;  // bits [3:0]: select hi/lo 16-bit for each src + dst
+    uint8_t  op_sel_hi  = 0;  // bits [2:0]: high 16-bit source select (VOP3P)
+    uint8_t  neg_hi     = 0;  // bits [2:0]: negate hi 16-bit
 };
 
 // Decode one instruction at pc; returns decoded struct.

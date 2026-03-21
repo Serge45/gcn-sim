@@ -135,6 +135,74 @@ TEST(Wavefront, WorkgroupIDSet) {
     EXPECT_EQ(ws.workgroup_id[2], 1u);
 }
 
+// --- Phase 3: workitem_id.y/z in VGPRs ---
+TEST(Wavefront, VGPR1IsWorkitemIdY) {
+    // enable_vgpr_workitem_id >= 1: VGPR1 = workitem_id.y
+    // compute_pgm_rsrc2 bits[12:11] = enable_vgpr_workitem_id
+    // value 1 = X and Y
+    uint32_t rsrc2 = (1u << 11); // enable_vgpr_workitem_id = 1
+    KernelDescriptor kd = make_kd(0, rsrc2);
+    uint8_t dummy_kernarg[32] = {};
+    uint8_t dummy_code[64] = {};
+
+    WavefrontState ws;
+    // 8x8 block = 64 threads
+    init_wavefront(ws, kd, dummy_kernarg, dummy_code, 64,
+                   0, 0, 0,
+                   0, 1,
+                   8, 8, 1);
+
+    for (int lane = 0; lane < 64; lane++) {
+        uint32_t expected_x = lane % 8;
+        uint32_t expected_y = lane / 8;
+        EXPECT_EQ(ws.vgpr[0][lane], expected_x) << "vgpr[0] = workitem_id.x at lane " << lane;
+        EXPECT_EQ(ws.vgpr[1][lane], expected_y) << "vgpr[1] = workitem_id.y at lane " << lane;
+    }
+}
+
+TEST(Wavefront, VGPR2IsWorkitemIdZ) {
+    // enable_vgpr_workitem_id = 2: VGPR0=X, VGPR1=Y, VGPR2=Z
+    uint32_t rsrc2 = (2u << 11); // enable_vgpr_workitem_id = 2
+    KernelDescriptor kd = make_kd(0, rsrc2);
+    uint8_t dummy_kernarg[32] = {};
+    uint8_t dummy_code[64] = {};
+
+    WavefrontState ws;
+    // 4x4x4 block = 64 threads
+    init_wavefront(ws, kd, dummy_kernarg, dummy_code, 64,
+                   0, 0, 0,
+                   0, 1,
+                   4, 4, 4);
+
+    for (int lane = 0; lane < 64; lane++) {
+        uint32_t expected_x = lane % 4;
+        uint32_t expected_y = (lane / 4) % 4;
+        uint32_t expected_z = lane / 16;
+        EXPECT_EQ(ws.vgpr[0][lane], expected_x) << "vgpr[0] = workitem_id.x at lane " << lane;
+        EXPECT_EQ(ws.vgpr[1][lane], expected_y) << "vgpr[1] = workitem_id.y at lane " << lane;
+        EXPECT_EQ(ws.vgpr[2][lane], expected_z) << "vgpr[2] = workitem_id.z at lane " << lane;
+    }
+}
+
+TEST(Wavefront, VGPR1NotSetWhenDisabled) {
+    // enable_vgpr_workitem_id = 0: only VGPR0=X, VGPR1 should be zero
+    uint32_t rsrc2 = 0; // enable_vgpr_workitem_id = 0
+    KernelDescriptor kd = make_kd(0, rsrc2);
+    uint8_t dummy_kernarg[32] = {};
+    uint8_t dummy_code[64] = {};
+
+    WavefrontState ws;
+    init_wavefront(ws, kd, dummy_kernarg, dummy_code, 64,
+                   0, 0, 0,
+                   0, 1,
+                   8, 8, 1);
+
+    for (int lane = 0; lane < 64; lane++) {
+        EXPECT_EQ(ws.vgpr[0][lane], (uint32_t)(lane % 8)) << "vgpr[0] = workitem_id.x";
+        EXPECT_EQ(ws.vgpr[1][lane], 0u) << "vgpr[1] should be 0 when workitem_id.y disabled";
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

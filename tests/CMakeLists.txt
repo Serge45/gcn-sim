@@ -11,6 +11,11 @@ add_executable(test_isa_decoder test_isa_decoder.cpp)
 target_link_libraries(test_isa_decoder gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_isa_decoder COMMAND test_isa_decoder)
 
+# test_isa_executor
+add_executable(test_isa_executor test_isa_executor.cpp)
+target_link_libraries(test_isa_executor gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_isa_executor COMMAND test_isa_executor)
+
 # test_wavefront
 add_executable(test_wavefront test_wavefront.cpp)
 target_link_libraries(test_wavefront gcnsim GTest::gtest GTest::gtest_main)

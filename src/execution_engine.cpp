@@ -19,7 +19,7 @@ void init_wavefront(WavefrontState& wave,
                     uint32_t wave_in_wg, uint32_t waves_per_wg,
                     uint32_t block_x, uint32_t block_y, uint32_t block_z);
 
-void run_wavefront(WavefrontState& wave);
+WaveStatus run_wavefront(WavefrontState& wave);
 
 bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg) {
     if (!kernel.descriptor) {
@@ -46,8 +46,6 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t waves_per_wg   = (threads_per_wg + WAVE_SIZE - 1) / WAVE_SIZE;
 
     // Build a mutable kernarg copy so we can fill in hidden args.
-    // HIP/AMDHSA kernels have "hidden" implicit args after user args that describe
-    // the launch configuration (block counts, group sizes, remainders, etc.).
     size_t kernarg_size = kernel.descriptor ? kernel.descriptor->kernarg_size : cfg.kernarg_size;
     if (kernarg_size == 0) kernarg_size = cfg.kernarg_size;
     std::vector<uint8_t> kernarg_buf(kernarg_size, 0);
@@ -73,20 +71,22 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         } else if (arg.value_kind == "hidden_group_size_z") {
             uint32_t v = block_z; memcpy(dst, &v, std::min((size_t)arg.size, sizeof(v)));
         } else if (arg.value_kind == "hidden_remainder_x") {
-            // remainder = (grid_x % block_x) — how many threads in the last partial block
             uint32_t v = grid_x % block_x; memcpy(dst, &v, std::min((size_t)arg.size, sizeof(v)));
         } else if (arg.value_kind == "hidden_remainder_y") {
             uint32_t v = grid_y % block_y; memcpy(dst, &v, std::min((size_t)arg.size, sizeof(v)));
         } else if (arg.value_kind == "hidden_remainder_z") {
             uint32_t v = grid_z % block_z; memcpy(dst, &v, std::min((size_t)arg.size, sizeof(v)));
         }
-        // hidden_global_offset_* and hidden_grid_dims left as 0 (no offset, not used by vector_add)
     }
 
     const uint8_t* kernarg = kernarg_buf.data();
 
     // Determine LDS size from kernel descriptor
     uint32_t lds_bytes = kernel.descriptor->group_segment_fixed_size;
+
+    // Determine scratch (private) size per lane from kernel descriptor
+    uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
+    uint32_t scratch_per_wave = scratch_per_lane * WAVE_SIZE;
 
     for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
     for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
@@ -95,19 +95,62 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         std::vector<uint8_t> lds_buf(lds_bytes, 0);
         uint8_t* lds_ptr = lds_bytes > 0 ? lds_buf.data() : nullptr;
 
-        for (uint32_t wave = 0; wave < waves_per_wg; wave++) {
-            // Allocate on heap — WavefrontState is large, too large for the stack
-            auto ws = std::make_unique<WavefrontState>();
-            init_wavefront(*ws, *kernel.descriptor,
+        // Initialize all wavefronts for this workgroup
+        std::vector<std::unique_ptr<WavefrontState>> waves(waves_per_wg);
+        std::vector<std::vector<uint8_t>> scratch_bufs(waves_per_wg);
+        std::vector<bool> ended(waves_per_wg, false);
+
+        for (uint32_t w = 0; w < waves_per_wg; w++) {
+            waves[w] = std::make_unique<WavefrontState>();
+            init_wavefront(*waves[w], *kernel.descriptor,
                            kernarg,
                            kernel.code_ptr,
                            kernel.code_size,
                            wg_x, wg_y, wg_z,
-                           wave, waves_per_wg,
+                           w, waves_per_wg,
                            block_x, block_y, block_z);
-            ws->lds_ptr  = lds_ptr;
-            ws->lds_size = lds_bytes;
-            run_wavefront(*ws);
+            waves[w]->lds_ptr  = lds_ptr;
+            waves[w]->lds_size = lds_bytes;
+
+            scratch_bufs[w].resize(scratch_per_wave, 0);
+            waves[w]->scratch_ptr      = scratch_per_wave > 0 ? scratch_bufs[w].data() : nullptr;
+            waves[w]->scratch_size     = scratch_per_wave;
+            waves[w]->scratch_per_lane = scratch_per_lane;
+        }
+
+        // Round-robin execution with barrier synchronization.
+        // Run each wavefront until it hits s_barrier or s_endpgm.
+        // When all active wavefronts have hit a barrier, resume them all.
+        bool any_active = true;
+        while (any_active) {
+            uint32_t barrier_count = 0;
+            uint32_t active_count  = 0;
+
+            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                if (ended[w]) continue;
+                active_count++;
+
+                WaveStatus status = run_wavefront(*waves[w]);
+                if (status == WaveStatus::ENDED) {
+                    ended[w] = true;
+                } else {
+                    barrier_count++;
+                }
+            }
+
+            // If all active waves hit barrier, they all proceed past it
+            // If some ended and others hit barrier, the barrier is satisfied
+            // (remaining waves continue)
+            if (active_count == 0) {
+                any_active = false;
+            } else if (barrier_count == 0) {
+                // All active waves ended this round — check if any remain
+                any_active = false;
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    if (!ended[w]) { any_active = true; break; }
+                }
+            }
+            // else: barrier_count > 0, waves are waiting — loop resumes them
         }
     }
     return true;

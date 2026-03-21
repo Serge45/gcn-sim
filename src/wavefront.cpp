@@ -7,7 +7,7 @@
 namespace gcnsim {
 
 // Forward declaration from isa_executor.cpp
-void run_wavefront(WavefrontState& wave);
+WaveStatus run_wavefront(WavefrontState& wave);
 
 void init_wavefront(WavefrontState& wave,
                     const KernelDescriptor& kd,
@@ -56,6 +56,20 @@ void init_wavefront(WavefrontState& wave,
     // VGPR0 = workitem_id.x (always provided by hardware)
     for (int lane = 0; lane < WAVE_SIZE; lane++)
         wave.vgpr[0][lane] = wave.workitem_id[lane][0];
+
+    // VGPR1 = workitem_id.y, VGPR2 = workitem_id.z (if enabled by kernel descriptor)
+    // enable_vgpr_workitem_id is bits [1:0] of compute_pgm_rsrc2[11:12]
+    // Actually: RSRC2 bits [12:11] = enable_vgpr_workitem_id
+    // 0 = only X, 1 = X and Y, 2 = X, Y, and Z
+    uint32_t enable_vgpr_workitem_id = (kd.compute_pgm_rsrc2 >> 11) & 0x3;
+    if (enable_vgpr_workitem_id >= 1) {
+        for (int lane = 0; lane < WAVE_SIZE; lane++)
+            wave.vgpr[1][lane] = wave.workitem_id[lane][1];
+    }
+    if (enable_vgpr_workitem_id >= 2) {
+        for (int lane = 0; lane < WAVE_SIZE; lane++)
+            wave.vgpr[2][lane] = wave.workitem_id[lane][2];
+    }
 
     // -----------------------------------------------------------------------
     // SGPR initialization based on kernel_code_properties and compute_pgm_rsrc2

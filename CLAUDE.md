@@ -30,13 +30,14 @@ ctest --test-dir build -V
 
 # Run a single test binary directly
 ./build/tests/test_isa_decoder
+./build/tests/test_isa_executor
 ./build/tests/test_vector_add
 ./build/tests/test_gemm_mfma --hsaco build/tools/gemm_mfma/gemm_mfma.hsaco
 ./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
 ./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
 ```
 
-**Expected:** 53 tests pass across 7 suites.
+**Expected:** 83 tests pass across 8 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -59,8 +60,8 @@ tools/asm_gemm_mfma/    Hand-written GFX90A assembly MFMA GEMM (.co)
 | `metadata_parser.cpp` | Decode MsgPack-encoded kernel metadata from ELF .note section |
 | `isa_decoder.cpp` | Decode raw bytes → `Instruction` struct |
 | `isa_executor.cpp` | Execute one `Instruction` against a `WavefrontState` |
-| `wavefront.cpp` | `init_wavefront()` + `run_wavefront()` execution loop |
-| `execution_engine.cpp` | Grid dispatch, wavefront splitting, LDS allocation, hidden arg injection |
+| `wavefront.cpp` | `init_wavefront()` (SGPR/VGPR setup from KD) + `run_wavefront()` (returns `WaveStatus`) |
+| `execution_engine.cpp` | Grid dispatch, wavefront splitting, LDS/scratch allocation, barrier sync, hidden arg injection |
 | `gcnsim_api.cpp` | Public API wrappers: thin glue over the above |
 
 ---
@@ -89,12 +90,29 @@ The complete execution state of one 64-lane wavefront:
 - `exec` (uint64_t) — active lane bitmask
 - `pc` — **byte offset** into `kernel_code_ptr` (not a pointer)
 - `lds_ptr` / `lds_size` — per-workgroup LDS buffer; set by execution engine
+- `scratch_ptr` / `scratch_size` / `scratch_per_lane` — per-wavefront scratch memory;
+  set by execution engine (`scratch_size = private_segment_fixed_size * 64`)
 
 `sizeof(WavefrontState)` ≈ 132 KB — **never allocate on the stack**. The execution engine uses `std::make_unique`.
+
+### `WaveStatus` (`include/gcnsim/wavefront.h`)
+Returned by `run_wavefront()`:
+- `ENDED` — wavefront hit `s_endpgm` or ran out of code
+- `BARRIER_HIT` — wavefront hit `s_barrier` and is paused until all waves in the
+  workgroup reach the barrier
 
 ### `Instruction` (`include/gcnsim/isa_decoder.h`)
 Decoded instruction. `size_bytes` is 4 or 8. The caller advances `wave.pc += inst.size_bytes`
 **before** calling `execute_instruction`, so branch handlers add their offset to the already-advanced PC.
+
+Key fields beyond `dst`/`src`/`opcode`:
+- **VOP3 modifiers**: `neg` (3 bits), `abs_` (3 bits), `clamp` (1 bit), `omod` (2 bits)
+- **SDWA fields**: `is_sdwa`, `sdwa_dst_sel`, `sdwa_src0_sel`, `sdwa_src1_sel`,
+  `sdwa_src0_sext/neg/abs`, `sdwa_src1_sext/neg/abs`
+- **DPP fields**: `is_dpp`, `dpp_ctrl`, `dpp_bound_ctrl`, `dpp_bank_mask`, `dpp_row_mask`,
+  `dpp_src0_neg/abs`, `dpp_src1_neg/abs`
+- **VOP3P fields**: `op_sel` (4 bits), `op_sel_hi` (3 bits), `neg_hi` (3 bits)
+- **MUBUF fields**: `mubuf_offset`, `mubuf_offen`, `mubuf_idxen`, `mubuf_lds`
 
 ### `KernelDescriptor` (`include/gcnsim/kernel_descriptor.h`)
 Exactly 64 bytes. Lives at the `.kd`-suffixed symbol in the ELF. The first instruction is at:
@@ -160,6 +178,37 @@ When adding a new instruction:
 5. Add a test case in `tests/test_isa_decoder.cpp` using a **real encoding byte
    sequence taken from `llvm-objdump` output**, not a hand-constructed value.
 
+**VOP3 modifier bit layout** (GFX9 VOP3A, verified against AMD Vega ISA Reference):
+```
+Word 0: [31:26]=110100  [25:16]=OP  [15]=CLAMP  [10:8]=ABS[2:0]  [7:0]=VDST
+Word 1: [31:29]=NEG[2:0]  [28:27]=OMOD[1:0]  [26:18]=SRC2  [17:9]=SRC1  [8:0]=SRC0
+```
+- CLAMP bit 15 conflicts with MFMA "acc" flag — decoder only extracts CLAMP for non-MFMA VOP3
+- Source modifier application order: `ABS` first, then `NEG`
+- Destination modifier application order: `OMOD` first, then `CLAMP`
+- `apply_src_mod(float val, bool neg, bool abs_)` and `apply_dst_mod(float val, bool clamp, uint8_t omod)`
+  are static helpers in `isa_executor.cpp`
+
+**SDWA sub-encoding** (triggered by VOP1/VOP2/VOPC with src0 raw field == 0xF9):
+```
+Word 1: [7:0]=SRC0_VGPR  [10:8]=SRC0_SEL  [11]=SRC0_SEXT  [12]=SRC0_NEG
+         [13]=SRC0_ABS  [18:16]=SRC1_SEL  [19]=SRC1_SEXT  [20]=SRC1_NEG
+         [21]=SRC1_ABS  [26:24]=DST_SEL  [28:27]=DST_UNUSED  [29]=CLAMP
+```
+- Sel values: 0=BYTE_0, 1=BYTE_1, 2=BYTE_2, 3=BYTE_3, 4=WORD_0, 5=WORD_1, 6=DWORD
+- `read_vsrc_sdwa()` / `write_vdst_sdwa()` / `apply_sdwa_sel()` in `isa_executor.cpp`
+
+**DPP sub-encoding** (triggered by VOP1/VOP2/VOPC with src0 raw field == 0xFA):
+```
+Word 1: [8:0]=DPP_CTRL  [19]=BOUND_CTRL  [20]=SRC0_NEG  [21]=SRC0_ABS
+         [22]=SRC1_NEG  [23]=SRC1_ABS  [27:24]=BANK_MASK  [31:28]=ROW_MASK
+         [7:0]=SRC0_VGPR
+```
+- Key DPP_CTRL patterns: `row_shl:N` (0x01-0x0F), `row_shr:N` (0x11-0x1F),
+  `row_ror:N` (0x21-0x2F), quad permute (0x00-0xFF in quad range),
+  `row_bcast:15` (0x142), `row_bcast:31` (0x143)
+- `dpp_src_lane()` / `read_vsrc_dpp()` in `isa_executor.cpp`
+
 GCN source operand encoding (9-bit field):
 - 0–103 → SGPR
 - 106 → VCC_LO, 107 → VCC_HI
@@ -191,6 +240,8 @@ as ground truth when adding or debugging instructions.
 | 7 | S_MIN_U32 |
 | 8 | S_MAX_I32 |
 | 9 | S_MAX_U32 |
+| 10 | S_CSELECT_B32 |
+| 11 | S_CSELECT_B64 |
 | 12 | S_AND_B32 |
 | 13 | S_AND_B64 |
 | 14 | S_OR_B32 |
@@ -226,6 +277,7 @@ as ground truth when adding or debugging instructions.
 
 | op | Mnemonic |
 |---|---|
+| 0 | V_CNDMASK_B32 |
 | 1 | V_ADD_F32 |
 | 5 | V_MUL_F32 |
 | 16 | V_LSHRREV_B32 ← **confirmed: enc `20020082`** |
@@ -257,6 +309,22 @@ as ground truth when adding or debugging instructions.
 - **VOP3B** vs **VOP3A**: distinguished by bit 7 of word0. VOP3B has a second SGPR destination (`dst2`) for carry-out.
 - **`LaunchConfig.grid_x/y/z`** are **total thread counts**, not workgroup counts.
   The execution engine divides by `block_x/y/z` to get the workgroup grid dimensions.
+- **Barrier synchronization**: `run_wavefront()` returns `WaveStatus::BARRIER_HIT` when
+  hitting `s_barrier`, and `WaveStatus::ENDED` on `s_endpgm` or out-of-bounds. The
+  execution engine runs all wavefronts in a workgroup round-robin: each wave runs
+  until barrier or end, and when all active waves have hit the barrier, they all resume.
+- **Scratch memory**: per-wavefront scratch buffer is allocated by the execution engine
+  (size = `private_segment_fixed_size * 64`). FLAT_SCRATCH instructions use
+  `scratch_ptr + lane * scratch_per_lane + offset` for per-lane private memory.
+- **VOP3 source modifiers** (NEG, ABS) and **destination modifiers** (CLAMP, OMOD) are
+  decoded and applied to all VOP3 float instructions. Applied order: ABS then NEG for
+  sources; OMOD then CLAMP for destinations.
+- **SDWA/DPP**: VOP1/VOP2/VOPC instructions with `src0 == 0xF9` (SDWA) or `src0 == 0xFA`
+  (DPP) are decoded as 8-byte instructions with the sub-encoding fields extracted from
+  word1. SDWA applies byte/word selection; DPP applies cross-lane data movement.
+- **MFMA ignores EXEC mask** — all 64 lanes always participate in matrix operations.
+- **MUBUF LDS bit** (word0 bit 16): when set, `buffer_load_dword` writes loaded data
+  directly to LDS at `wave.m0 + lane * element_size` instead of to VGPR.
 
 ---
 
@@ -306,6 +374,41 @@ Key assembly constraints (GFX9 constant bus rule):
 
 ---
 
+## Test suites
+
+| Suite | Tests | What it covers |
+|---|---|---|
+| `test_elf_loader` | 6 | ELF parsing, symbol table, section extraction |
+| `test_isa_decoder` | 41 | Instruction decoding for all formats (SOPP, SOP1/2, SOPK, SOPC, SMEM, VOP1/2/3, VOPC, DS, MUBUF, VOP3P, MFMA, FLAT/GLOBAL, SDWA, DPP) |
+| `test_isa_executor` | 16 | Instruction execution: `v_cndmask_b32`, `s_cselect_b32`, VOP3 modifiers (NEG/ABS/CLAMP/OMOD), `s_getpc_b64`, `s_barrier` (WaveStatus), scratch memory store/load/isolation, `v_mul_f32` baseline |
+| `test_wavefront` | 9 | Wavefront initialization: EXEC masks, workitem IDs, SGPR setup, VGPR0-2 for workitem_id.x/y/z |
+| `test_vector_add` | 2 | End-to-end vector-add kernel (HSACO integration) |
+| `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
+| `test_mfma_kernels` | 4 | Multi-shape MFMA integration (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
+| `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM integration |
+
+### Writing new tests
+
+**Decoder tests** (`test_isa_decoder.cpp`): use `enc2(w0, w1)` to build byte sequences,
+call `decode()`, and verify format/opcode/operands. Use real encodings from
+`llvm-objdump` where possible; hand-constructed bit patterns are acceptable for new
+sub-encodings (SDWA, DPP).
+
+**Executor tests** (`test_isa_executor.cpp`): forward-declare `execute_instruction`
+and `run_wavefront` from the `gcnsim` namespace, build an `Instruction` struct manually
+(set opcode, format, operands, modifiers), allocate `WavefrontState` on the heap via
+`make_wave()`, and verify VGPR/SGPR outputs. `WavefrontState` is ~132 KB — never put
+it on the stack. See `make_inst()` and `f2u()`/`u2f()` helpers in the test file.
+
+**Wavefront tests** (`test_wavefront.cpp`): call `init_wavefront()` with a
+`KernelDescriptor` built via `make_kd(kcp, rsrc2)` and verify initial register state.
+
+**Integration tests**: load a real HSACO via `module_load`, find the kernel via
+`module_get_function`, execute via `launch_kernel`, and compare output against a CPU
+reference.
+
+---
+
 ## Debugging decoder bugs
 
 When a kernel produces wrong results or skips instructions unexpectedly:
@@ -345,6 +448,10 @@ Common past mistakes to watch for:
 - **VOP3→VOP2 opcode range**: GFX9 encodes VOP2 op N as VOP3 op `0x100+N` *and*
   as `0x140+N`. Both ranges must be handled. Missing the 0x100–0x13F range causes
   `v_add_u32_e64` (op 0x134) to decode as UNKNOWN.
+- **SDWA src0 field** (word1 bits[7:0]) is always a **VGPR index** (0-255), NOT a
+  standard 9-bit source encoding. Do NOT pass it to `decode_src()` — that maps
+  indices 0-103 to SGPRs. Set `inst.src[0].kind = Operand::Kind::VGPR` directly,
+  same as the DPP path does.
 
 ---
 
@@ -355,36 +462,29 @@ Common past mistakes to watch for:
   (re-convergence stack is not implemented).
 - The instruction safety limit in `run_wavefront()` is 1,000,000 iterations; infinite-loop kernels
   will be silently cut off.
-- **MFMA F32 data layout**: all five F32 MFMA shapes (4×4×1, 16×16×1, 16×16×4,
-  32×32×1, 32×32×2) implement the correct CDNA2 cross-lane outer-product semantics.
-  Non-F32 shapes (F16, BF16, I8) still use a simplified per-lane approximation and
-  are not bitwise-identical to hardware.
 - **MIMG** (image sampling) instructions are not decoded — they require texture hardware state.
   All MIMG instructions silently skip.
-- **SDWA / DPP** sub-encoding variants are not decoded; instructions using `src0 == 0xF9/0xFA`
-  are treated as UNKNOWN and skipped.
-- **Scratch segment** FLAT instructions (SEG=1) are treated as flat (VGPR-pair address) rather
-  than using the scratch base + offset addressing.
+- **F16/BF16 precision**: F16↔F32 and BF16→F32 conversions use software helpers in
+  `isa_executor.cpp` (`f16_to_f32`, `f32_to_f16`, `bf16_to_f32`). These may differ from
+  hardware rounding behavior in edge cases (denormals, NaN payloads).
+- **MFMA lane mapping**: all MFMA shapes (F32, F16, BF16, I8, F64) now use CDNA2
+  cross-lane outer-product semantics. F16/BF16/I8 results are functionally correct
+  but may have minor rounding differences vs. hardware due to FMA accumulation order.
 
 ---
 
 ## Future work
 
-- **SDWA decode path**: if VOP1/VOP2/VOPC has `src0 == 0xF9`, word1 contains SDWA fields
-  (sub-dword byte/word extraction). Required for kernels that manipulate packed data types.
-- **DPP decode path**: if `src0 == 0xFA`, word1 contains DPP control for cross-lane data
-  movement (`row_shl`, `row_shr`, `wave_shl/shr`, broadcast patterns). Required for
-  warp-level reductions without LDS.
-- **Exact MFMA lane layout for non-F32**: F16, BF16, I8 shapes still use per-lane
-  approximation; implement full CDNA2 matrix-block lane tables for those shapes.
 - **Re-convergence stack**: properly handle divergent loops where EXEC changes mid-loop,
   allowing accurate simulation of branchy kernels.
-- **Scratch segment addressing**: route FLAT SEG=1 instructions through
-  `flat_scratch_base + lane_offset` rather than treating them as VGPR-pair addresses.
-- **S_CSELECT_B32/B64** (SOP2 op 10/11): not yet implemented.
 - **s_sub_i32 signed semantics** (SOP2 op 3): currently aliased to `S_SUB_U32`.
 - **Memory ordering model**: `s_waitcnt` is currently a no-op; a simple counter-based
   model would allow detection of missing barriers in test kernels.
+- **MIMG instructions**: require texture descriptor and sampler state; currently silently skipped.
+- **DPP16/DPP8** (GFX10+ only): not relevant for gfx90a but would be needed for newer targets.
+- **Tensile SGEMM end-to-end test**: the simulator now has the instruction coverage to run
+  a real Tensile kernel; an integration test extracting a small GEMM from rocBLAS would
+  validate the full pipeline.
 
 ---
 

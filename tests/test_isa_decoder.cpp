@@ -442,6 +442,189 @@ TEST(ISADecoder, MfmaF32_4x4x1f32) {
     EXPECT_EQ(inst.size_bytes, 8);
 }
 
+// --- VOP2: v_cndmask_b32 (Phase 1) ---
+TEST(ISADecoder, VCndmaskB32) {
+    // v_cndmask_b32_e32 v2, v0, v1, vcc
+    // VOP2 op=0, vdst=2, vsrc1=1, src0=v0(=256)
+    // Encoding: [31]=0, [30:25]=0, [24:17]=vdst=2, [16:9]=vsrc1=1, [8:0]=src0=256=0x100
+    // But 9-bit src0 can only encode 0–511; VGPR0=256=0x100
+    // w0 = (0<<25) | (2<<17) | (1<<9) | 0x100 = 0x00040300
+    uint32_t w0 = (0u << 25) | (2u << 17) | (1u << 9) | 0x100u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP2);
+    EXPECT_EQ(inst.opcode, Opcode::V_CNDMASK_B32);
+    EXPECT_EQ(inst.size_bytes, 4);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.dst.index, 2u);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[0].index, 0u);
+    EXPECT_EQ(inst.src[1].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[1].index, 1u);
+}
+
+// --- SOP2: s_cselect_b32 / s_cselect_b64 (Phase 1) ---
+TEST(ISADecoder, SCselectB32) {
+    // s_cselect_b32 s0, s1, s2 — SOP2 op=10
+    // SOP2: [31:30]=10, [29:23]=op=10, [22:16]=sdst=0, [15:8]=ssrc1=2, [7:0]=ssrc0=1
+    uint32_t w0 = (2u << 30) | (10u << 23) | (0u << 16) | (2u << 8) | 1u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOP2);
+    EXPECT_EQ(inst.opcode, Opcode::S_CSELECT_B32);
+    EXPECT_EQ(inst.size_bytes, 4);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.dst.index, 0u);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.src[0].index, 1u);
+    EXPECT_EQ(inst.src[1].kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.src[1].index, 2u);
+}
+
+TEST(ISADecoder, SCselectB64) {
+    // s_cselect_b64 s[4:5], s[0:1], s[2:3] — SOP2 op=11
+    uint32_t w0 = (2u << 30) | (11u << 23) | (4u << 16) | (2u << 8) | 0u;
+    auto b = enc2(w0);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::SOP2);
+    EXPECT_EQ(inst.opcode, Opcode::S_CSELECT_B64);
+    EXPECT_EQ(inst.dst.kind, Operand::Kind::SGPR);
+    EXPECT_EQ(inst.dst.index, 4u);
+}
+
+// --- VOP3 modifiers (Phase 1) ---
+TEST(ISADecoder, VOP3Modifiers) {
+    // v_add_f32_e64 v0, -|v1|, v2 clamp mul:2
+    // VOP3A: w0[31:26]=0x34, w0[25:16]=op, w0[15]=CLAMP, w0[10:8]=ABS, w0[7:0]=VDST
+    // v_add_f32 is VOP2 op=1, VOP3 encoding: op = 0x100 + 1 = 0x101
+    // ABS bit 0 set (abs src0) → w0[8]=1
+    // CLAMP set → w0[15]=1
+    // NEG bit 0 set (neg src0) → w1[29]=1
+    // OMOD=1 (mul:2) → w1[27]=1
+    // VDST=0, src0=v1=257, src1=v2=258
+    uint32_t w0 = (0x34u << 26) | (0x101u << 16) | (1u << 15) | (1u << 8) | 0u;
+    uint32_t w1 = (1u << 29) | (1u << 27) | (258u << 9) | 257u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP3A);
+    EXPECT_EQ(inst.opcode, Opcode::V_ADD_F32);
+    EXPECT_EQ(inst.neg, 1u);      // neg src0
+    EXPECT_EQ(inst.abs_, 1u);     // abs src0
+    EXPECT_EQ(inst.clamp, 1u);
+    EXPECT_EQ(inst.omod, 1u);     // mul:2
+    EXPECT_EQ(inst.dst.index, 0u);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[0].index, 1u);
+    EXPECT_EQ(inst.src[1].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[1].index, 2u);
+}
+
+// --- VOP2 SDWA sub-encoding (Phase 2) ---
+TEST(ISADecoder, VOP2_SDWA) {
+    // v_add_f32 v0, v1, v2 src0_sel:BYTE_0 src1_sel:WORD_1 dst_sel:WORD_0
+    // VOP2 with src0=0xF9 triggers SDWA
+    // w0: [31]=0, [30:25]=op=1(V_ADD_F32), [24:17]=vdst=0, [16:9]=vsrc1=2, [8:0]=0xF9
+    uint32_t w0 = (1u << 25) | (0u << 17) | (2u << 9) | 0xF9u;
+    // SDWA w1: [7:0]=real_src0=1(v1), [10:8]=src0_sel=0(BYTE_0), [18:16]=src1_sel=5(WORD_1),
+    //          [26:24]=dst_sel=4(WORD_0), [28:27]=dst_unused=0(PAD)
+    uint32_t w1 = 1u | (0u << 8) | (5u << 16) | (4u << 24);
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP2);
+    EXPECT_EQ(inst.opcode, Opcode::V_ADD_F32);
+    EXPECT_TRUE(inst.is_sdwa);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[0].index, 1u);
+    EXPECT_EQ(inst.sdwa_src0_sel, 0u);  // BYTE_0
+    EXPECT_EQ(inst.sdwa_src1_sel, 5u);  // WORD_1
+    EXPECT_EQ(inst.sdwa_dst_sel, 4u);   // WORD_0
+}
+
+// --- VOP2 DPP sub-encoding (Phase 2) ---
+TEST(ISADecoder, VOP2_DPP) {
+    // v_add_f32 v0, v1, v2 dpp:row_shr:1 bound_ctrl:0 row_mask:0xF bank_mask:0xF
+    // VOP2 with src0=0xFA triggers DPP
+    // w0: [31]=0, [30:25]=op=1(V_ADD_F32), [24:17]=vdst=0, [16:9]=vsrc1=2, [8:0]=0xFA
+    uint32_t w0 = (1u << 25) | (0u << 17) | (2u << 9) | 0xFAu;
+    // DPP w1: [7:0]=real_src0=1(v1), [16:8]=dpp_ctrl=0x111(row_shr:1),
+    //         [19]=bound_ctrl=1, [27:24]=bank_mask=0xF, [31:28]=row_mask=0xF
+    uint32_t w1 = 1u | (0x111u << 8) | (1u << 19) | (0xFu << 24) | (0xFu << 28);
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP2);
+    EXPECT_EQ(inst.opcode, Opcode::V_ADD_F32);
+    EXPECT_TRUE(inst.is_dpp);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[0].index, 1u);
+    EXPECT_EQ(inst.dpp_ctrl, 0x111u);   // row_shr:1
+    EXPECT_TRUE(inst.dpp_bound_ctrl);
+    EXPECT_EQ(inst.dpp_bank_mask, 0xFu);
+    EXPECT_EQ(inst.dpp_row_mask, 0xFu);
+}
+
+// --- VOP1 SDWA sub-encoding (Phase 2) ---
+TEST(ISADecoder, VOP1_SDWA) {
+    // v_mov_b32 v0, v5 src0_sel:BYTE_2
+    // VOP1 with src0=0xF9
+    // VOP1: [31:25]=0x3F, [24:17]=vdst=0, [16:9]=op=1(v_mov_b32), [8:0]=0xF9
+    uint32_t w0 = (0x3Fu << 25) | (0u << 17) | (1u << 9) | 0xF9u;
+    // SDWA w1: [7:0]=real_src0=5(v5), [10:8]=src0_sel=2(BYTE_2), [26:24]=dst_sel=6(DWORD)
+    uint32_t w1 = 5u | (2u << 8) | (6u << 24);
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP1);
+    EXPECT_EQ(inst.opcode, Opcode::V_MOV_B32);
+    EXPECT_TRUE(inst.is_sdwa);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(inst.src[0].index, 5u);
+    EXPECT_EQ(inst.sdwa_src0_sel, 2u);  // BYTE_2
+    EXPECT_EQ(inst.sdwa_dst_sel, 6u);   // DWORD
+}
+
+// --- MUBUF LDS bit (Phase 4) ---
+TEST(ISADecoder, BufferLoadDwordLDS) {
+    // buffer_load_dword v0, v0, s[0:3], 0 lds
+    // word0: [31:26]=0x38, [24:18]=op=4, [16]=lds=1, [12]=offen=0
+    uint32_t w0 = (0x38u << 26) | (4u << 18) | (1u << 16);
+    uint32_t w1 = (0u << 24) | (0u << 16) | (0u << 8) | 0u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::MUBUF);
+    EXPECT_EQ(inst.opcode, Opcode::BUFFER_LOAD_DWORD);
+    EXPECT_TRUE(inst.mubuf_lds);
+    EXPECT_FALSE(inst.mubuf_offen);
+}
+
+// --- FLAT_SCRATCH (SEG=1) (Phase 4) ---
+TEST(ISADecoder, FlatScratchLoadDword) {
+    // scratch_load_dword v3, v0, off
+    // FLAT: [31:26]=0b110111=0x37, [25:18]=OP=0x14(load_dword), [15:14]=SEG=01(scratch)
+    uint32_t w0 = (0x37u << 26) | (0x14u << 18) | (1u << 14);
+    uint32_t w1 = (3u << 24) | (0x7Fu << 16) | 0u;
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::FLAT_SCRATCH);
+    EXPECT_EQ(inst.size_bytes, 8);
+}
+
+// --- VOP3P op_sel fields (Phase 3) ---
+TEST(ISADecoder, VOP3P_OpSel) {
+    // VOP3P: [31:26]=0x33, op with op_sel bits set
+    // op_sel at bits[12:11], op_sel_hi at bits[15:13]
+    // Set op_sel[0]=1 (bit 11) and op_sel_hi[0]=1 (bit 13)
+    uint32_t w0 = (0x33u << 26) | (1u << 13) | (1u << 11) | (2u << 16);
+    uint32_t w1 = (257u << 9) | 256u; // src0=v0, src1=v1
+    auto b = enc2(w0, w1);
+    Instruction inst = decode(b.data());
+    EXPECT_EQ(inst.format, InstFormat::VOP3P);
+    EXPECT_EQ(inst.size_bytes, 8);
+    EXPECT_EQ(inst.op_sel & 1, 1u);       // op_sel bit 0 set
+    EXPECT_EQ(inst.op_sel_hi & 1, 1u);    // op_sel_hi bit 0 set
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

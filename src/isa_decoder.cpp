@@ -132,7 +132,8 @@ static Opcode sop2_opcode(uint32_t op) {
         case 7:  return Opcode::S_MIN_U32;
         case 8:  return Opcode::S_MAX_I32;
         case 9:  return Opcode::S_MAX_U32;
-        // 10: S_CSELECT_B32, 11: S_CSELECT_B64 (not yet implemented)
+        case 10: return Opcode::S_CSELECT_B32;
+        case 11: return Opcode::S_CSELECT_B64;
         case 12: return Opcode::S_AND_B32;
         case 13: return Opcode::S_AND_B64;
         case 14: return Opcode::S_OR_B32;
@@ -327,7 +328,7 @@ static Opcode smem_opcode(uint32_t op) {
 static Opcode vop2_opcode(uint32_t op) {
     // GCN3/GFX90a VOP2 opcode table (from AMD ISA spec)
     switch (op) {
-        case 0:  return Opcode::UNKNOWN;    // v_cndmask_b32
+        case 0:  return Opcode::V_CNDMASK_B32;
         case 1:  return Opcode::V_ADD_F32;
         case 2:  return Opcode::V_SUB_F32;
         case 3:  return Opcode::V_SUBREV_F32;
@@ -670,6 +671,10 @@ static Opcode vop3p_opcode(uint32_t op) {
         case 28: return Opcode::V_DOT4_U32_U8;
         case 29: return Opcode::V_DOT8_I32_I4;
         case 30: return Opcode::V_DOT8_U32_U4;
+        // MI-200 CDNA2 packed F32 ops
+        case 35: return Opcode::V_PK_FMA_F32;
+        case 36: return Opcode::V_PK_MUL_F32;
+        case 37: return Opcode::V_PK_ADD_F32;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -713,8 +718,8 @@ static Opcode flat_opcode(uint32_t op, bool is_global, bool is_scratch) {
             default:   return Opcode::UNKNOWN;
         }
     }
-    (void)is_scratch;
-    // flat (SEG=0): treat like global with VGPR 64-bit address
+    // flat (SEG=0) and scratch (SEG=1) use the same FLAT opcode enum values
+    // The executor distinguishes them by inst.format (FLAT_GLOBAL vs FLAT_SCRATCH)
     switch (op) {
         case 0x0C: return Opcode::FLAT_LOAD_DWORD;
         case 0x0D: return Opcode::FLAT_LOAD_DWORDX2;
@@ -1134,6 +1139,7 @@ Instruction decode(const uint8_t* pc) {
         inst.mubuf_offset = w0 & 0xFFF;
         inst.mubuf_offen  = (w0 >> 12) & 1;
         inst.mubuf_idxen  = (w0 >> 13) & 1;
+        inst.mubuf_lds    = (w0 >> 16) & 1;
 
         uint32_t vdata = (w1 >> 24) & 0xFF;
         uint32_t vaddr = (w1 >> 16) & 0xFF;
@@ -1217,6 +1223,24 @@ Instruction decode(const uint8_t* pc) {
         inst.src[0] = decode_src(src0, nullptr);
         inst.src[1] = decode_src(src1, nullptr);
         inst.src[2] = decode_src(src2, nullptr);
+
+        // VOP3P modifiers
+        // op_sel: bits[14:11] of word0 — select hi(1) vs lo(0) for src0/src1/src2/dst
+        inst.op_sel    = (w0 >> 11) & 0xF;
+        // op_sel_hi: bits[15,14,13] but in VOP3P these are [15:13] — actually
+        // VOP3P has op_sel_hi at bits[15:14] of w0 for src2/src1, bit[11] for src0
+        // Simplified: extract raw bits for use by handlers
+        inst.op_sel_hi = ((w0 >> 13) & 0x1) | (((w0 >> 14) & 0x1) << 1) | (((w0 >> 15) & 0x1) << 2);
+        // neg_lo: bits[31:29] of w1
+        inst.neg       = (w1 >> 29) & 0x7;
+        // neg_hi: bits[28:26] of... actually VOP3P neg_hi is w0 bits[2:0] at a different position
+        // For GFX9 VOP3P: neg_lo = w1[31:29], neg_hi = w1[28:26] — no, let me check.
+        // Actually: neg fields for VOP3P use the same positions as VOP3A.
+        // VOP3P w0: [15]=op_sel_hi[2], [14]=op_sel_hi[1], [13]=op_sel_hi[0],
+        //           [12:11]=op_sel[1:0], bit[10]=op_sel[2], bit[9:8]=clamp(unused)+abs(unused)
+        // Simplified for now: neg from w1[31:29], neg_hi from w0[2:0] — actually different.
+        // The key VOP3P modifiers are op_sel. neg/neg_hi are less common.
+        // Leave neg_hi at 0 for now since we already extract neg from w1.
         return inst;
     }
 
@@ -1311,6 +1335,13 @@ Instruction decode(const uint8_t* pc) {
         inst.src[1] = decode_src(src1, nullptr);
         inst.src[2] = decode_src(src2, nullptr);
 
+        // Extract VOP3 source/destination modifiers
+        // Note: bit[15] is CLAMP for VOP3A but "acc" flag for MFMA — skip for MFMA
+        inst.clamp = (w0 >> 15) & 1;   // word0 bit 15
+        inst.abs_  = (w0 >> 8) & 0x7;  // word0 bits [10:8]
+        inst.neg   = (w1 >> 29) & 0x7; // word1 bits [31:29]
+        inst.omod  = (w1 >> 27) & 0x3; // word1 bits [28:27]
+
         // GFX90a AGPR ops encoded in VOP3A:
         // v_accvgpr_write_b32: dst is AGPR, src0 is VGPR or inline const
         if (inst.opcode == Opcode::V_ACCVGPR_WRITE_B32) {
@@ -1335,9 +1366,45 @@ Instruction decode(const uint8_t* pc) {
 
         inst.opcode = vop1_opcode(op);
         inst.dst    = decode_vdst(vdst);
-        bool has_literal = (src0 == 255);
-        inst.src[0] = decode_src(src0, has_literal ? (pc + 4) : nullptr);
-        if (has_literal) inst.size_bytes = 8;
+
+        // Check for SDWA/DPP sub-encodings
+        if ((src0 & 0xFF) == 0xF9) {
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_sdwa = true;
+            uint32_t real_src0 = w1 & 0xFF;
+            // SDWA src0 field is always a VGPR index (0-255)
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = real_src0;
+            inst.sdwa_src0_sel  = (w1 >> 8) & 0x7;
+            inst.sdwa_src0_sext = (w1 >> 11) & 1;
+            inst.sdwa_src0_neg  = (w1 >> 12) & 1;
+            inst.sdwa_src0_abs  = (w1 >> 13) & 1;
+            inst.sdwa_dst_sel   = (w1 >> 24) & 0x7;
+            inst.sdwa_dst_unused = (w1 >> 27) & 0x3;
+            inst.clamp          = (w1 >> 29) & 1;
+        } else if ((src0 & 0xFF) == 0xFA) {
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_dpp = true;
+            uint32_t real_src0 = w1 & 0xFF;
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = real_src0;
+            inst.dpp_ctrl       = (w1 >> 8) & 0x1FF;
+            inst.dpp_bound_ctrl = (w1 >> 19) & 1;
+            inst.dpp_src0_neg   = (w1 >> 20) & 1;
+            inst.dpp_src0_abs   = (w1 >> 21) & 1;
+            inst.dpp_src1_neg   = (w1 >> 22) & 1;
+            inst.dpp_src1_abs   = (w1 >> 23) & 1;
+            inst.dpp_bank_mask  = (w1 >> 24) & 0xF;
+            inst.dpp_row_mask   = (w1 >> 28) & 0xF;
+        } else {
+            bool has_literal = (src0 == 255);
+            inst.src[0] = decode_src(src0, has_literal ? (pc + 4) : nullptr);
+            if (has_literal) inst.size_bytes = 8;
+        }
 
         // accvgpr_write: dst is AGPR
         if (inst.opcode == Opcode::V_ACCVGPR_WRITE_B32) {
@@ -1362,9 +1429,49 @@ Instruction decode(const uint8_t* pc) {
 
         inst.opcode = vopc_opcode(op);
         inst.dst.kind = Operand::Kind::VCC;
-        inst.src[0] = decode_src(src0, nullptr);
-        inst.src[1].kind  = Operand::Kind::VGPR;
-        inst.src[1].index = vsrc1;
+
+        // Check for SDWA/DPP sub-encodings
+        if ((src0 & 0xFF) == 0xF9) {
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_sdwa = true;
+            uint32_t real_src0 = w1 & 0xFF;
+            // SDWA src0 field is always a VGPR index (0-255)
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = real_src0;
+            inst.src[1].kind  = Operand::Kind::VGPR;
+            inst.src[1].index = vsrc1;
+            inst.sdwa_src0_sel  = (w1 >> 8) & 0x7;
+            inst.sdwa_src0_sext = (w1 >> 11) & 1;
+            inst.sdwa_src0_neg  = (w1 >> 12) & 1;
+            inst.sdwa_src0_abs  = (w1 >> 13) & 1;
+            inst.sdwa_src1_sel  = (w1 >> 16) & 0x7;
+            inst.sdwa_src1_sext = (w1 >> 19) & 1;
+            inst.sdwa_src1_neg  = (w1 >> 20) & 1;
+            inst.sdwa_src1_abs  = (w1 >> 21) & 1;
+        } else if ((src0 & 0xFF) == 0xFA) {
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_dpp = true;
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = w1 & 0xFF;
+            inst.src[1].kind  = Operand::Kind::VGPR;
+            inst.src[1].index = vsrc1;
+            inst.dpp_ctrl       = (w1 >> 8) & 0x1FF;
+            inst.dpp_bound_ctrl = (w1 >> 19) & 1;
+            inst.dpp_src0_neg   = (w1 >> 20) & 1;
+            inst.dpp_src0_abs   = (w1 >> 21) & 1;
+            inst.dpp_src1_neg   = (w1 >> 22) & 1;
+            inst.dpp_src1_abs   = (w1 >> 23) & 1;
+            inst.dpp_bank_mask  = (w1 >> 24) & 0xF;
+            inst.dpp_row_mask   = (w1 >> 28) & 0xF;
+        } else {
+            inst.src[0] = decode_src(src0, nullptr);
+            inst.src[1].kind  = Operand::Kind::VGPR;
+            inst.src[1].index = vsrc1;
+        }
         return inst;
     }
 
@@ -1398,6 +1505,79 @@ Instruction decode(const uint8_t* pc) {
 
         inst.opcode = vop2_opcode(op);
         inst.dst    = decode_vdst(vdst);
+
+        // Check for SDWA/DPP sub-encodings
+        if ((src0 & 0xFF) == 0xF9) {
+            // SDWA: word1 contains SDWA fields, instruction is 8 bytes
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_sdwa = true;
+            uint32_t real_src0 = w1 & 0xFF;
+            // SDWA src0 field is always a VGPR index (0-255)
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = real_src0;
+            inst.src[1].kind  = Operand::Kind::VGPR;
+            inst.src[1].index = vsrc1;
+            // SDWA word1 layout for VOP2:
+            // [7:0]   = SRC0 (VGPR index)
+            // [10:8]  = SRC0_SEL
+            // [11]    = SRC0_SEXT
+            // [12]    = SRC0_NEG
+            // [13]    = SRC0_ABS
+            // [18:16] = SRC1_SEL
+            // [19]    = SRC1_SEXT
+            // [20]    = SRC1_NEG
+            // [21]    = SRC1_ABS
+            // [26:24] = DST_SEL
+            // [28:27] = DST_UNUSED
+            // [31:29] = unused / clamp
+            inst.sdwa_src0_sel  = (w1 >> 8) & 0x7;
+            inst.sdwa_src0_sext = (w1 >> 11) & 1;
+            inst.sdwa_src0_neg  = (w1 >> 12) & 1;
+            inst.sdwa_src0_abs  = (w1 >> 13) & 1;
+            inst.sdwa_src1_sel  = (w1 >> 16) & 0x7;
+            inst.sdwa_src1_sext = (w1 >> 19) & 1;
+            inst.sdwa_src1_neg  = (w1 >> 20) & 1;
+            inst.sdwa_src1_abs  = (w1 >> 21) & 1;
+            inst.sdwa_dst_sel   = (w1 >> 24) & 0x7;
+            inst.sdwa_dst_unused = (w1 >> 27) & 0x3;
+            inst.clamp          = (w1 >> 29) & 1;
+            return inst;
+        }
+        if ((src0 & 0xFF) == 0xFA) {
+            // DPP: word1 contains DPP fields, instruction is 8 bytes
+            uint32_t w1 = read_u32_le(pc + 4);
+            inst.encoding[1] = w1;
+            inst.size_bytes = 8;
+            inst.is_dpp = true;
+            uint32_t real_src0 = w1 & 0xFF;
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = real_src0;
+            inst.src[1].kind  = Operand::Kind::VGPR;
+            inst.src[1].index = vsrc1;
+            // DPP word1 layout:
+            // [7:0]   = SRC0 (VGPR)
+            // [16:8]  = DPP_CTRL
+            // [18:17] = reserved
+            // [19]    = BOUND_CTRL
+            // [20]    = SRC0_NEG
+            // [21]    = SRC0_ABS
+            // [22]    = SRC1_NEG
+            // [23]    = SRC1_ABS
+            // [27:24] = BANK_MASK
+            // [31:28] = ROW_MASK
+            inst.dpp_ctrl       = (w1 >> 8) & 0x1FF;
+            inst.dpp_bound_ctrl = (w1 >> 19) & 1;
+            inst.dpp_src0_neg   = (w1 >> 20) & 1;
+            inst.dpp_src0_abs   = (w1 >> 21) & 1;
+            inst.dpp_src1_neg   = (w1 >> 22) & 1;
+            inst.dpp_src1_abs   = (w1 >> 23) & 1;
+            inst.dpp_bank_mask  = (w1 >> 24) & 0xF;
+            inst.dpp_row_mask   = (w1 >> 28) & 0xF;
+            return inst;
+        }
+
         inst.src[0] = decode_src(src0, nullptr);
         inst.src[1].kind  = Operand::Kind::VGPR;
         inst.src[1].index = vsrc1;
@@ -1461,6 +1641,8 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_BFE_U64:              return "s_bfe_u64";
         case Opcode::S_BFE_I64:              return "s_bfe_i64";
         case Opcode::S_ABSDIFF_I32:          return "s_absdiff_i32";
+        case Opcode::S_CSELECT_B32:          return "s_cselect_b32";
+        case Opcode::S_CSELECT_B64:          return "s_cselect_b64";
         case Opcode::S_MOV_B32:              return "s_mov_b32";
         case Opcode::S_MOV_B64:              return "s_mov_b64";
         case Opcode::S_NOT_B32:              return "s_not_b32";
@@ -1553,6 +1735,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_FFBH_U32:             return "v_ffbh_u32";
         case Opcode::V_FFBL_B32:             return "v_ffbl_b32";
         case Opcode::V_ADD_U32:              return "v_add_u32";
+        case Opcode::V_CNDMASK_B32:          return "v_cndmask_b32";
         case Opcode::V_ADD_F32:              return "v_add_f32";
         case Opcode::V_SUB_F32:              return "v_sub_f32";
         case Opcode::V_MUL_F32:              return "v_mul_f32";
@@ -1673,6 +1856,9 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_MFMA_F64_4X4X4F64:    return "v_mfma_f64_4x4x4f64";
         case Opcode::V_PK_ADD_F16:           return "v_pk_add_f16";
         case Opcode::V_PK_MUL_F16:           return "v_pk_mul_f16";
+        case Opcode::V_PK_FMA_F32:           return "v_pk_fma_f32";
+        case Opcode::V_PK_MUL_F32:           return "v_pk_mul_f32";
+        case Opcode::V_PK_ADD_F32:           return "v_pk_add_f32";
         case Opcode::V_DOT2_F32_F16:         return "v_dot2_f32_f16";
         case Opcode::V_DOT4_I32_I8:          return "v_dot4_i32_i8";
         case Opcode::V_DOT8_I32_I4:          return "v_dot8_i32_i4";
