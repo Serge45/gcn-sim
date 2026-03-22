@@ -45,3 +45,10 @@ target_link_libraries(test_asm_gemm gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_asm_gemm COMMAND test_asm_gemm
          --hsaco ${CMAKE_BINARY_DIR}/tools/asm_gemm_mfma/asm_gemm_mfma.co)
 add_dependencies(test_asm_gemm asm_gemm_mfma_co)
+
+# test_tensile_gemm (Tensile-style MFMA 16x16x1 GEMM with LDS + barrier)
+add_executable(test_tensile_gemm test_tensile_gemm.cpp)
+target_link_libraries(test_tensile_gemm gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_tensile_gemm COMMAND test_tensile_gemm
+         --hsaco ${CMAKE_BINARY_DIR}/tools/tensile_style_gemm/tensile_style_gemm.co)
+add_dependencies(test_tensile_gemm tensile_style_gemm_co)

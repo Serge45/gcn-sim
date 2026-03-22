@@ -763,6 +763,7 @@ struct Instruction {
     bool     mubuf_offen   = false;
     bool     mubuf_idxen   = false;
     bool     mubuf_lds     = false;
+    Operand  mubuf_soffset;         // SOFFSET operand (SGPR or inline const)
     // VOP3 source/destination modifiers
     uint8_t  neg   = 0;   // bits [2:0] = negate src0/src1/src2
     uint8_t  abs_  = 0;   // bits [2:0] = abs src0/src1/src2

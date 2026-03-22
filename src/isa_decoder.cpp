@@ -558,7 +558,8 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x209: return Opcode::V_BFE_U32;
         case 0x20A: return Opcode::V_BFE_I32;
         case 0x20B: return Opcode::V_BFI_B32;
-        case 0x20C: return Opcode::V_FMA_F32;
+        case 0x1CB: return Opcode::V_FMA_F32;    // gfx90a encoding
+        case 0x20C: return Opcode::V_FMA_F32;    // Vega encoding
         case 0x20D: return Opcode::V_FMA_F64;
         case 0x20E: return Opcode::UNKNOWN;         // v_lerp_u8
         case 0x20F: return Opcode::V_ALIGNBIT_B32;
@@ -587,7 +588,8 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x228: return Opcode::V_MAD_U64_U32;
         case 0x229: return Opcode::V_MAD_I64_I32;
         case 0x1FD: return Opcode::V_LSHL_ADD_U32;
-        case 0x274: return Opcode::V_ADD_I32;
+        case 0x274: return Opcode::V_ADD_I32;    // Vega encoding
+        case 0x29C: return Opcode::V_ADD_I32;    // gfx90a encoding
         case 0x275: return Opcode::V_ADD3_U32;
         case 0x276: return Opcode::V_LSHL_OR_B32;
         case 0x277: return Opcode::V_AND_OR_B32;
@@ -745,15 +747,18 @@ static Opcode flat_opcode(uint32_t op, bool is_global, bool is_scratch) {
 }
 
 static Opcode mubuf_opcode(uint32_t op) {
+    // Op values from AMD GFX9/Vega ISA Reference.
+    // Ops 0-15 are BUFFER_LOAD/STORE_FORMAT (not implemented).
+    // Raw load/store start at op 16.
     switch (op) {
-        case 0:  return Opcode::BUFFER_LOAD_UBYTE;
-        case 1:  return Opcode::BUFFER_LOAD_SBYTE;
-        case 2:  return Opcode::BUFFER_LOAD_USHORT;
-        case 3:  return Opcode::BUFFER_LOAD_SSHORT;
-        case 4:  return Opcode::BUFFER_LOAD_DWORD;
-        case 5:  return Opcode::BUFFER_LOAD_DWORDX2;
-        case 6:  return Opcode::BUFFER_LOAD_DWORDX3;
-        case 7:  return Opcode::BUFFER_LOAD_DWORDX4;
+        case 16: return Opcode::BUFFER_LOAD_UBYTE;
+        case 17: return Opcode::BUFFER_LOAD_SBYTE;
+        case 18: return Opcode::BUFFER_LOAD_USHORT;
+        case 19: return Opcode::BUFFER_LOAD_SSHORT;
+        case 20: return Opcode::BUFFER_LOAD_DWORD;
+        case 21: return Opcode::BUFFER_LOAD_DWORDX2;
+        case 22: return Opcode::BUFFER_LOAD_DWORDX3;
+        case 23: return Opcode::BUFFER_LOAD_DWORDX4;
         case 24: return Opcode::BUFFER_STORE_BYTE;
         case 25: return Opcode::BUFFER_STORE_SHORT;
         case 28: return Opcode::BUFFER_STORE_DWORD;
@@ -793,6 +798,8 @@ static Opcode mtbuf_opcode(uint32_t op) {
 }
 
 static Opcode ds_opcode(uint32_t op) {
+    // Op values from AMD GFX9/Vega ISA Reference, confirmed against llvm-objdump.
+    // Op field is bits[24:17] of DS word0 (8-bit, extracted as (w0>>17)&0xFF).
     switch (op) {
         case 0:   return Opcode::DS_ADD_U32;
         case 1:   return Opcode::DS_SUB_U32;
@@ -805,14 +812,14 @@ static Opcode ds_opcode(uint32_t op) {
         case 8:   return Opcode::DS_OR_B32;
         case 9:   return Opcode::DS_XOR_B32;
         case 10:  return Opcode::DS_MSKOR_B32;
-        case 11:  return Opcode::DS_WRITE_B32;
-        case 12:  return Opcode::DS_WRITE2_B32;
-        case 13:  return Opcode::DS_WRITE2ST64_B32;
-        case 14:  return Opcode::DS_CMPST_B32;
-        case 15:  return Opcode::DS_CMPST_F32;
-        case 16:  return Opcode::DS_MIN_F32;
-        case 17:  return Opcode::DS_MAX_F32;
-        case 20:  return Opcode::DS_WRITE_ADDTID_B32;
+        case 13:  return Opcode::DS_WRITE_B32;
+        case 14:  return Opcode::DS_WRITE2_B32;
+        case 15:  return Opcode::DS_WRITE2ST64_B32;
+        case 16:  return Opcode::DS_CMPST_B32;
+        case 17:  return Opcode::DS_CMPST_F32;
+        case 18:  return Opcode::DS_MIN_F32;
+        case 19:  return Opcode::DS_MAX_F32;
+        case 24:  return Opcode::DS_WRITE_ADDTID_B32;
         case 30:  return Opcode::DS_WRITE_B8;
         case 31:  return Opcode::DS_WRITE_B16;
         case 32:  return Opcode::DS_ADD_RTN_U32;
@@ -825,22 +832,24 @@ static Opcode ds_opcode(uint32_t op) {
         case 39:  return Opcode::DS_AND_RTN_B32;
         case 40:  return Opcode::DS_OR_RTN_B32;
         case 41:  return Opcode::DS_XOR_RTN_B32;
-        case 43:  return Opcode::DS_WRXCHG_RTN_B32;
-        case 44:  return Opcode::DS_WRXCHG2_RTN_B32;
-        case 46:  return Opcode::DS_CMPST_RTN_B32;
-        case 47:  return Opcode::DS_CMPST_RTN_F32;
-        case 48:  return Opcode::DS_MIN_RTN_F32;
-        case 49:  return Opcode::DS_MAX_RTN_F32;
-        case 54:  return Opcode::DS_ADD_F32;
-        case 55:  return Opcode::DS_NOP;
-        case 56:  return Opcode::DS_READ_B32;
-        case 57:  return Opcode::DS_READ2_B32;
-        case 58:  return Opcode::DS_READ2ST64_B32;
-        case 59:  return Opcode::DS_READ_I8;
-        case 60:  return Opcode::DS_READ_U8;
-        case 61:  return Opcode::DS_READ_I16;
-        case 62:  return Opcode::DS_READ_U16;
-        case 63:  return Opcode::DS_SWIZZLE_B32;
+        case 45:  return Opcode::DS_WRXCHG_RTN_B32;
+        case 46:  return Opcode::DS_WRXCHG2_RTN_B32;
+        case 48:  return Opcode::DS_CMPST_RTN_B32;
+        case 49:  return Opcode::DS_CMPST_RTN_F32;
+        case 50:  return Opcode::DS_MIN_RTN_F32;
+        case 51:  return Opcode::DS_MAX_RTN_F32;
+        case 52:  return Opcode::DS_WRAP_RTN_B32;
+        case 53:  return Opcode::DS_ADD_F32;
+        case 54:  return Opcode::DS_READ_B32;
+        case 55:  return Opcode::DS_READ2_B32;
+        case 56:  return Opcode::DS_READ2ST64_B32;
+        case 57:  return Opcode::DS_READ_I8;
+        case 58:  return Opcode::DS_READ_U8;
+        case 59:  return Opcode::DS_READ_I16;
+        case 60:  return Opcode::DS_READ_U16;
+        case 61:  return Opcode::DS_SWIZZLE_B32;
+        case 62:  return Opcode::DS_PERMUTE_B32;
+        case 63:  return Opcode::DS_BPERMUTE_B32;
         case 64:  return Opcode::DS_ADD_U64;
         case 65:  return Opcode::DS_SUB_U64;
         case 66:  return Opcode::DS_RSUB_U64;
@@ -851,13 +860,13 @@ static Opcode ds_opcode(uint32_t op) {
         case 71:  return Opcode::DS_AND_B64;
         case 72:  return Opcode::DS_OR_B64;
         case 73:  return Opcode::DS_XOR_B64;
-        case 75:  return Opcode::DS_WRITE_B64;
-        case 76:  return Opcode::DS_WRITE2_B64;
-        case 77:  return Opcode::DS_WRITE2ST64_B64;
-        case 78:  return Opcode::DS_CMPST_B64;
-        case 79:  return Opcode::DS_CMPST_F64;
-        case 80:  return Opcode::DS_MIN_F64;
-        case 81:  return Opcode::DS_MAX_F64;
+        case 77:  return Opcode::DS_WRITE_B64;
+        case 78:  return Opcode::DS_WRITE2_B64;
+        case 79:  return Opcode::DS_WRITE2ST64_B64;
+        case 80:  return Opcode::DS_CMPST_B64;
+        case 81:  return Opcode::DS_CMPST_F64;
+        case 82:  return Opcode::DS_MIN_F64;
+        case 83:  return Opcode::DS_MAX_F64;
         case 96:  return Opcode::DS_ADD_RTN_U64;
         case 97:  return Opcode::DS_SUB_RTN_U64;
         case 98:  return Opcode::DS_RSUB_RTN_U64;
@@ -868,14 +877,13 @@ static Opcode ds_opcode(uint32_t op) {
         case 103: return Opcode::DS_AND_RTN_B64;
         case 104: return Opcode::DS_OR_RTN_B64;
         case 105: return Opcode::DS_XOR_RTN_B64;
-        case 107: return Opcode::DS_WRXCHG_RTN_B64;
-        case 120: return Opcode::DS_READ_B64;
-        case 121: return Opcode::DS_READ2_B64;
-        case 122: return Opcode::DS_READ2ST64_B64;
-        case 126: return Opcode::DS_BPERMUTE_B32;
-        case 191: return Opcode::DS_PERMUTE_B32;
-        case 253: return Opcode::DS_WRITE_B128;
-        case 255: return Opcode::DS_READ_B128;
+        case 109: return Opcode::DS_WRXCHG_RTN_B64;
+        case 118: return Opcode::DS_READ_B64;
+        case 119: return Opcode::DS_READ2_B64;
+        case 120: return Opcode::DS_READ2ST64_B64;
+        case 126: return Opcode::DS_CONDXCHG32_RTN_B64;
+        case 223: return Opcode::DS_WRITE_B128;
+        case 254: return Opcode::DS_READ_B128;
         default:  return Opcode::UNKNOWN;
     }
 }
@@ -1030,17 +1038,41 @@ Instruction decode(const uint8_t* pc) {
         uint32_t w1 = read_u32_le(pc + 4);
         inst.encoding[1] = w1;
 
-        uint32_t op      = (w0 >> 18) & 0xFF;
-        inst.ds_gds      = (w0 >> 17) & 1;
-        inst.ds_offset1  = (w0 >> 8) & 0xFF;
-        inst.ds_offset0  = w0 & 0xFF;
+        uint32_t op      = (w0 >> 17) & 0xFF;
+        inst.ds_gds      = (w0 >> 16) & 1;
+
+        inst.opcode = ds_opcode(op);
+
+        // Dual operations (DS_READ2/WRITE2) use two separate 8-bit offsets.
+        // All other DS operations use a combined 16-bit offset in ds_offset0.
+        bool is_dual = false;
+        switch (inst.opcode) {
+            case Opcode::DS_WRITE2_B32:
+            case Opcode::DS_WRITE2ST64_B32:
+            case Opcode::DS_READ2_B32:
+            case Opcode::DS_READ2ST64_B32:
+            case Opcode::DS_WRITE2_B64:
+            case Opcode::DS_WRITE2ST64_B64:
+            case Opcode::DS_READ2_B64:
+            case Opcode::DS_READ2ST64_B64:
+                is_dual = true;
+                break;
+            default: break;
+        }
+
+        if (is_dual) {
+            inst.ds_offset0 = w0 & 0xFF;
+            inst.ds_offset1 = (w0 >> 8) & 0xFF;
+        } else {
+            // Combined 16-bit offset
+            inst.ds_offset0 = w0 & 0xFFFF;
+            inst.ds_offset1 = 0;
+        }
 
         uint32_t vdst  = (w1 >> 24) & 0xFF;
         uint32_t data1 = (w1 >> 16) & 0xFF;
         uint32_t data0 = (w1 >> 8)  & 0xFF;
         uint32_t addr  = w1 & 0xFF;
-
-        inst.opcode = ds_opcode(op);
 
         // src[0] = ADDR (VGPR), src[1] = DATA0, src[2] = DATA1
         inst.src[0].kind  = Operand::Kind::VGPR;
@@ -1141,10 +1173,11 @@ Instruction decode(const uint8_t* pc) {
         inst.mubuf_idxen  = (w0 >> 13) & 1;
         inst.mubuf_lds    = (w0 >> 16) & 1;
 
-        uint32_t vdata = (w1 >> 24) & 0xFF;
-        uint32_t vaddr = (w1 >> 16) & 0xFF;
-        uint32_t srsrc = (w1 >> 8)  & 0x1F;  // 5-bit, actual = srsrc * 4
-        uint32_t soffset = w1 & 0xFF;
+        // GFX9 MUBUF word1: [31:24]=SOFFSET, [20:16]=SRSRC, [15:8]=VDATA, [7:0]=VADDR
+        uint32_t soffset = (w1 >> 24) & 0xFF;
+        uint32_t srsrc   = (w1 >> 16) & 0x1F;  // 5-bit, actual = srsrc * 4
+        uint32_t vdata   = (w1 >> 8)  & 0xFF;
+        uint32_t vaddr   = w1 & 0xFF;
 
         inst.opcode = mubuf_opcode(op);
 
@@ -1161,17 +1194,25 @@ Instruction decode(const uint8_t* pc) {
             default: break;
         }
 
-        // src[0] = VADDR, src[1] = SRSRC (buffer descriptor base), src[2] = SOFFSET
+        // src[0] = VADDR, src[1] = SRSRC (buffer descriptor base)
+        // mubuf_soffset = SOFFSET operand (SGPR scalar offset)
         inst.src[0].kind  = Operand::Kind::VGPR;
         inst.src[0].index = vaddr;
         inst.src[1].kind  = Operand::Kind::SGPR;
         inst.src[1].index = srsrc * 4;
-        inst.src[2].kind  = Operand::Kind::SGPR;
-        inst.src[2].index = soffset;
+
+        // Decode SOFFSET: 0-103 = SGPR, 128 = zero (inline const 0)
+        if (soffset <= 103) {
+            inst.mubuf_soffset.kind  = Operand::Kind::SGPR;
+            inst.mubuf_soffset.index = soffset;
+        } else {
+            inst.mubuf_soffset.kind  = Operand::Kind::INLINE_CONST;
+            inst.mubuf_soffset.imm   = 0;
+        }
 
         if (is_store) {
             inst.dst.kind = Operand::Kind::NONE;
-            // vdata = source data
+            // src[2] = source data VGPRs
             inst.src[2].kind  = Operand::Kind::VGPR;
             inst.src[2].index = vdata;
         } else {
@@ -1191,14 +1232,23 @@ Instruction decode(const uint8_t* pc) {
         uint32_t op = (w0 >> 15) & 0x7;
         inst.opcode = mtbuf_opcode(op);
 
-        uint32_t vdata = (w1 >> 24) & 0xFF;
-        uint32_t vaddr = (w1 >> 16) & 0xFF;
-        uint32_t srsrc = (w1 >> 8)  & 0x1F;
+        // GFX9 MTBUF word1: [31:24]=SOFFSET, [20:16]=SRSRC, [15:8]=VDATA, [7:0]=VADDR
+        uint32_t soffset_mt = (w1 >> 24) & 0xFF;
+        uint32_t srsrc   = (w1 >> 16) & 0x1F;
+        uint32_t vdata   = (w1 >> 8)  & 0xFF;
+        uint32_t vaddr   = w1 & 0xFF;
 
         inst.src[0].kind  = Operand::Kind::VGPR;
         inst.src[0].index = vaddr;
         inst.src[1].kind  = Operand::Kind::SGPR;
         inst.src[1].index = srsrc * 4;
+        if (soffset_mt <= 103) {
+            inst.mubuf_soffset.kind  = Operand::Kind::SGPR;
+            inst.mubuf_soffset.index = soffset_mt;
+        } else {
+            inst.mubuf_soffset.kind  = Operand::Kind::INLINE_CONST;
+            inst.mubuf_soffset.imm   = 0;
+        }
         inst.dst.kind     = Operand::Kind::VGPR;
         inst.dst.index    = vdata;
         return inst;

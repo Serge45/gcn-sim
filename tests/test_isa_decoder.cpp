@@ -350,11 +350,11 @@ TEST(ISADecoder, SCmpGtU32) {
 }
 
 // --- DS tests ---
+// DS encoding: [31:26]=0x36, [24:17]=OP, [16]=GDS, [15:0]=OFFSET
 TEST(ISADecoder, DsWriteB32) {
-    // ds_write_b32 v0, v1 — DS op=11, addr=v0 (in w1[7:0]), data0=v1 (in w1[15:8])
-    // word0: [31:26]=0x36, [25:18]=op=11, offset1=0, offset0=0
-    // word1: [31:24]=vdst=0, [23:16]=data1=0, [15:8]=data0=v1=1, [7:0]=addr=v0=0
-    uint32_t w0 = (0x36u << 26) | (11u << 18);
+    // ds_write_b32 v0, v1 — DS op=13, addr=v0 (in w1[7:0]), data0=v1 (in w1[15:8])
+    // Verified: llvm-objdump encoding D81A0000 has bits[24:17]=13
+    uint32_t w0 = (0x36u << 26) | (13u << 17);
     uint32_t w1 = (0u << 24) | (0u << 16) | (1u << 8) | 0u;
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
@@ -368,10 +368,9 @@ TEST(ISADecoder, DsWriteB32) {
 }
 
 TEST(ISADecoder, DsReadB32) {
-    // ds_read_b32 v2, v0 — DS op=56, vdst=v2, addr=v0
-    // word0: [31:26]=0x36, [25:18]=op=56
-    // word1: [31:24]=vdst=2, [7:0]=addr=0
-    uint32_t w0 = (0x36u << 26) | (56u << 18);
+    // ds_read_b32 v2, v0 — DS op=54, vdst=v2, addr=v0
+    // Verified: llvm-objdump encoding D86C0000 has bits[24:17]=54
+    uint32_t w0 = (0x36u << 26) | (54u << 17);
     uint32_t w1 = (2u << 24) | 0u;
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
@@ -385,10 +384,10 @@ TEST(ISADecoder, DsReadB32) {
 // --- MUBUF tests ---
 TEST(ISADecoder, BufferLoadDword) {
     // buffer_load_dword v4, v0, s[8:11], s0 offen
-    // word0: [31:26]=0x38, [24:18]=op=4, [12]=offen=1
-    // word1: [31:24]=vdata=v4, [23:16]=vaddr=v0, [12:8]=srsrc=2(=s8), [7:0]=soffset=0
-    uint32_t w0 = (0x38u << 26) | (4u << 18) | (1u << 12);
-    uint32_t w1 = (4u << 24) | (0u << 16) | (2u << 8) | 0u;
+    // word0: [31:26]=0x38, [24:18]=op=20, [12]=offen=1
+    // word1: [31:24]=soffset=s0, [20:16]=srsrc=2(=s8), [15:8]=vdata=v4, [7:0]=vaddr=v0
+    uint32_t w0 = (0x38u << 26) | (20u << 18) | (1u << 12);
+    uint32_t w1 = (0u << 24) | (2u << 16) | (4u << 8) | 0u;
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
     EXPECT_EQ(inst.format, InstFormat::MUBUF);
@@ -587,9 +586,10 @@ TEST(ISADecoder, VOP1_SDWA) {
 // --- MUBUF LDS bit (Phase 4) ---
 TEST(ISADecoder, BufferLoadDwordLDS) {
     // buffer_load_dword v0, v0, s[0:3], 0 lds
-    // word0: [31:26]=0x38, [24:18]=op=4, [16]=lds=1, [12]=offen=0
-    uint32_t w0 = (0x38u << 26) | (4u << 18) | (1u << 16);
-    uint32_t w1 = (0u << 24) | (0u << 16) | (0u << 8) | 0u;
+    // word0: [31:26]=0x38, [24:18]=op=20, [16]=lds=1, [12]=offen=0
+    // word1: [31:24]=soffset=0, [20:16]=srsrc=0(=s0), [15:8]=vdata=0, [7:0]=vaddr=0
+    uint32_t w0 = (0x38u << 26) | (20u << 18) | (1u << 16);
+    uint32_t w1 = 0u;
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
     EXPECT_EQ(inst.format, InstFormat::MUBUF);

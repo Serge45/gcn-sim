@@ -179,10 +179,11 @@ void mfma_gemm_32x32x2f32(const float* __restrict__ A,
         acc = __builtin_amdgcn_mfma_f32_32x32x2f32(a, bv, acc, 0, 0, 0);
     }
 
-    // acc[gpr] at lane l = D[(l/32)*16+gpr][l%32]
+    // CDNA2 lane mapping for v_mfma_f32_32x32x2f32:
+    // D[i][j] at GPR g, lane l: row = 8*(g/4) + 4*(l/32) + (g%4), col = l%32
     int c_col = wg_col * 32 + t;
     for (int g = 0; g < 16; g++) {
-        int c_row = wg_row * 32 + kg_out * 16 + g;
+        int c_row = wg_row * 32 + 8 * (g / 4) + 4 * kg_out + (g % 4);
         if (c_row < M && c_col < N)
             C[c_row * N + c_col] = acc[g];
     }
