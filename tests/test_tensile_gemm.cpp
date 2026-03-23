@@ -38,14 +38,26 @@ static std::vector<uint8_t> build_kernarg(const gcnsim::KernelInfo& ki,
 
 // CPU reference matching the Tensile-style kernel's actual computation.
 //
-// The kernel's LDS layout and store pattern produce:
-//   D[r][c] = alpha * sum_k(A[k][c] * B[r][k]) + beta * C[r][c]
+// The kernel follows the classical BLAS convention: all matrices (A, B, C, D)
+// are assumed to be in column-major layout.  Our test, however, fills and
+// reads them as row-major C arrays.
 //
-// This arises because:
-// - LDS A feeds the MFMA src0 with A transposed (A_mfma[i][k] = A[k][i])
-// - LDS B feeds the MFMA src1 with B transposed (B_mfma[k][j] = B[j][k])
-// - The store transposes the MFMA output (D_mem[j][i] = MFMA_D[i][j])
-// Net result: D_mem[r][c] = sum_k A[k][c] * B[r][k]
+// A row-major M×K matrix is byte-identical to a column-major K×M matrix
+// (its transpose).  So when the kernel sees our row-major data:
+//   A_col = A_row^T  (K×M column-major)
+//   B_col = B_row^T  (N×K column-major)
+//   C_col = C_row^T  (N×M column-major)
+//
+// The kernel computes (in column-major):
+//   D_col = alpha * A_col * B_col + beta * C_col      (K×M) * (N×K)^? ...
+//
+// More concretely, the BLAS GEMM contract is:
+//   D = alpha * op(A) * op(B) + beta * C
+// with op determined by the trans flags.  Tensile here performs a NN (no
+// transpose) GEMM on column-major data, i.e.  D_col = alpha * A_col * B_col + beta * C_col.
+//
+// Reading D_col back as row-major gives D_row = D_col^T, which yields:
+//   D_row[r][c] = alpha * sum_k( A_row[k][c] * B_row[r][k] ) + beta * C_row[r][c]
 //
 // A is M x K (row-major, stride LDA), B is K x N (stride LDB),
 // C and D are M x N (strides LDC, LDD).
