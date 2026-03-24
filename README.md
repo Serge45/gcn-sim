@@ -77,8 +77,9 @@ The result is a GPU kernel running correctly on a CPU with zero GPU dependency. 
                      │  decode(pc) → Instruction                   │
                      │  execute_instruction(wave, inst)            │
                      │                                             │
-                     │  Formats: SOP1/2, SOPK, SOPP, VOP1/2/3A/B, │
-                     │           VOPC, SMEM, FLAT_GLOBAL           │
+                     │  Formats: SOP1/2, SOPK, SOPC, SOPP,        │
+                     │    VOP1/2/3A/3B/3P, VOPC, SMEM, DS, MUBUF, │
+                     │    MTBUF, FLAT/GLOBAL/SCRATCH, MFMA         │
                      └─────────────────────────────────────────────┘
 ```
 
@@ -104,22 +105,29 @@ gcn-sim/
 ├── src/
 │   ├── elf_loader.cpp               # HSACO ELF parsing (~280 lines)
 │   ├── metadata_parser.cpp          # MsgPack .note section parser (~315 lines)
-│   ├── isa_decoder.cpp              # Instruction decoder (~680 lines)
-│   ├── isa_executor.cpp             # Per-instruction handlers (~840 lines)
-│   ├── wavefront.cpp                # Wavefront init + run_wavefront() (~120 lines)
-│   ├── execution_engine.cpp         # Grid dispatch + kernarg build (~100 lines)
+│   ├── isa_decoder.cpp              # Instruction decoder
+│   ├── isa_executor.cpp             # Per-instruction handlers
+│   ├── wavefront.cpp                # Wavefront init + run_wavefront()
+│   ├── execution_engine.cpp         # Grid dispatch, LDS/scratch alloc, barrier sync
 │   └── gcnsim_api.cpp               # Public API wrappers (~95 lines)
 │
 ├── tests/
 │   ├── CMakeLists.txt
 │   ├── test_elf_loader.cpp          # 6 tests: ELF validation, kernel discovery
-│   ├── test_isa_decoder.cpp         # 22 tests: instruction format decoding
-│   ├── test_wavefront.cpp           # 6 tests: SGPR/VGPR/EXEC initialization
-│   └── test_vector_add.cpp          # 2 tests: end-to-end kernel execution
+│   ├── test_isa_decoder.cpp         # 41 tests: instruction format decoding
+│   ├── test_isa_executor.cpp        # 16 tests: instruction execution
+│   ├── test_wavefront.cpp           # 9 tests: SGPR/VGPR/EXEC initialization
+│   ├── test_vector_add.cpp          # 2 tests: end-to-end vector-add
+│   ├── test_gemm_mfma.cpp           # 3 tests: MFMA 4x4x1 GEMM
+│   ├── test_mfma_kernels.cpp        # 4 tests: multi-shape MFMA
+│   ├── test_asm_gemm.cpp            # 2 tests: hand-written assembly GEMM
+│   └── test_tensile_gemm.cpp        # 3 tests: Tensile-style SGEMM
 │
-└── tools/vector_add/
-    ├── vector_add.hip               # Test kernel (float A+B→C)
-    └── CMakeLists.txt               # Builds vector_add.hsaco via hipcc
+├── tools/vector_add/                # Vector-add HIP kernel (.hsaco)
+├── tools/gemm_mfma/                 # MFMA GEMM HIP kernel (.hsaco)
+├── tools/mfma_kernels/              # Multi-shape MFMA kernels (.hsaco)
+├── tools/asm_gemm_mfma/             # Hand-written GFX90A assembly GEMM (.co)
+└── tools/tensile_style_gemm/        # Tensile-style SGEMM assembly kernel (.co)
 ```
 
 ---
@@ -170,15 +178,20 @@ The decoder takes a pointer to raw bytes at the current PC and returns a fully-d
 | Bit pattern | Format | Instruction size |
 |---|---|---|
 | `w[31:23] == 0x17F` | SOPP | 4 bytes |
-| `w[31:23] == 0x17E` | SOP1 | 4 bytes (8 if SRC0 is literal) |
-| `w[31:23] == 0x17D` | SOPC | 4 bytes |
-| `w[31:30] == 0b10` (remainder) | SOP2 | 4 bytes |
+| `w[31:23] == 0x17D` | SOP1 | 4 bytes (8 if SRC0 is literal) |
+| `w[31:23] == 0x17E` | SOPC | 4 bytes |
+| `w[31:28] == 0xB` | SOPK | 4 bytes |
 | `w[31:26] == 0b110000` | SMEM | 8 bytes |
-| `w[31:26] == 0b110111` | FLAT/GLOBAL | 8 bytes |
-| `w[31:26] == 0b110100` | VOP3A/VOP3B | 8 bytes |
-| `w[31:25] == 0b0111111` | VOP1 | 4 bytes |
-| `w[31:25] == 0b0111110` | VOPC | 4 bytes |
-| `w[31] == 0` (remainder) | VOP2 | 4 bytes |
+| `w[31:26] == 0b110110` | DS | 8 bytes |
+| `w[31:26] == 0b110111` | FLAT/GLOBAL/SCRATCH | 8 bytes |
+| `w[31:26] == 0b111000` | MUBUF | 8 bytes |
+| `w[31:26] == 0b111010` | MTBUF | 8 bytes |
+| `w[31:26] == 0b110011` | VOP3P | 8 bytes |
+| `w[31:26] == 0b110100` | VOP3A/VOP3B/MFMA | 8 bytes |
+| `w[31:25] == 0b0111111` | VOP1 | 4 bytes (8 if SDWA/DPP) |
+| `w[31:25] == 0b0111110` | VOPC | 4 bytes (8 if SDWA/DPP) |
+| `w[31:30] == 0b10` (remainder) | SOP2 | 4 bytes |
+| `w[31] == 0` (remainder) | VOP2 | 4 bytes (8 if SDWA/DPP) |
 
 **Operand encoding:** GCN encodes source operands in 9 bits:
 
@@ -206,12 +219,15 @@ The decoder takes a pointer to raw bytes at the current PC and returns a fully-d
 
 **Files:** `src/wavefront.cpp`, `src/isa_executor.cpp`, `include/gcnsim/wavefront.h`
 
-**Wavefront state** (`WavefrontState`):
+**Wavefront state** (`WavefrontState`, ~132 KB — heap-allocated):
 - `sgpr[108]` — scalar registers; VCC lives at `sgpr[106:107]`
 - `vgpr[256][64]` — vector registers indexed as `[reg][lane]`
+- `agpr[256][64]` — accumulator registers (MFMA destinations)
 - `exec` (64-bit) — active lane bitmask
 - `vcc`, `scc`, `m0` — condition and special registers
 - `pc` — byte offset into `kernel_code_ptr`
+- `lds_ptr` / `lds_size` — per-workgroup LDS buffer
+- `scratch_ptr` / `scratch_size` / `scratch_per_lane` — per-wavefront scratch memory
 
 **Wavefront initialization (`init_wavefront()`):**
 
@@ -272,7 +288,7 @@ A safety limit of 1,000,000 instructions prevents infinite loops.
 
 **Files:** `src/execution_engine.cpp`, `src/gcnsim_api.cpp`, `include/gcnsim/gcnsim.h`, `include/gcnsim/execution_engine.h`
 
-**Execution engine** iterates the 3D workgroup grid and dispatches one wavefront per 64 threads:
+**Execution engine** iterates the 3D workgroup grid and dispatches wavefronts per workgroup:
 
 ```
 wg_count_x = ceil(grid_x / block_x)
@@ -281,13 +297,16 @@ wg_count_z = ceil(grid_z / block_z)
 waves_per_wg = ceil(block_x * block_y * block_z / 64)
 
 for each (wg_z, wg_y, wg_x):
+  allocate LDS buffer (group_segment_fixed_size bytes)
+  allocate scratch buffers (per wavefront)
   for wave in [0, waves_per_wg):
-    ws = new WavefrontState   // heap-allocated (~66 KB)
     init_wavefront(ws, ...)
-    run_wavefront(ws)
+  run wavefronts round-robin until all end (with barrier sync)
 ```
 
-`WavefrontState` is heap-allocated because its ~66 KB size exceeds safe stack space.
+`WavefrontState` is ~132 KB (with AGPRs) and always heap-allocated.
+
+Wavefronts within a workgroup share LDS and are synchronized at `s_barrier` instructions using round-robin scheduling: each wavefront runs until it hits a barrier or ends, and all wavefronts resume together when every active wave has reached the barrier.
 
 **Hidden kernel arguments** are automatically filled by scanning the metadata for args whose `value_kind` starts with `"hidden_"`. Recognized names and what they are set to:
 
@@ -363,7 +382,7 @@ Rather than guessing argument layout, the simulator reads the MsgPack-encoded ke
 The EXEC mask is a plain `uint64_t` where bit `n` represents lane `n`. All vector instructions iterate `lane` in `[0, 64)` and `continue` if the bit is clear. This is simple, correct, and easy to verify in a debugger.
 
 ### 6. Heap-allocated WavefrontState
-`sizeof(WavefrontState)` is approximately 66 KB (`108*4 + 256*64*4 + ...`). Allocating it on the stack for multi-wave kernels would overflow. The execution engine `new`s each wavefront, runs it, then `delete`s it.
+`sizeof(WavefrontState)` is approximately 132 KB (SGPRs + VGPRs + AGPRs). Allocating it on the stack for multi-wave kernels would overflow. The execution engine uses `std::make_unique` per wavefront.
 
 ---
 
@@ -402,18 +421,28 @@ ctest --test-dir build -V
 # Or run individual test binaries
 ./build/tests/test_elf_loader
 ./build/tests/test_isa_decoder
+./build/tests/test_isa_executor
 ./build/tests/test_wavefront
 ./build/tests/test_vector_add
+./build/tests/test_gemm_mfma --hsaco build/tools/gemm_mfma/gemm_mfma.hsaco
+./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
+./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ```
 
-Expected output: **34 tests pass**.
+Expected output: **86 tests pass across 9 suites**.
 
 | Test suite | Count | What it covers |
 |---|---|---|
 | `test_elf_loader` | 6 | ELF validation, kernel discovery, descriptor parsing |
-| `test_isa_decoder` | 22 | All instruction formats and operand encoding |
-| `test_wavefront` | 6 | SGPR/VGPR/EXEC initialization, 2D work-item layout |
-| `test_vector_add` | 2 | End-to-end gfx90a kernel simulation |
+| `test_isa_decoder` | 41 | All instruction formats, SDWA, DPP, VOP3 modifiers |
+| `test_isa_executor` | 16 | Instruction execution, modifiers, scratch memory |
+| `test_wavefront` | 9 | SGPR/VGPR/EXEC init, workitem_id.x/y/z |
+| `test_vector_add` | 2 | End-to-end vector-add kernel |
+| `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
+| `test_mfma_kernels` | 4 | Multi-shape MFMA (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
+| `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM |
+| `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 
 ---
 
@@ -462,75 +491,54 @@ int main() {
 
 ## Supported Instructions
 
-### Scalar (SOPP / SOP1 / SOP2)
+The simulator covers ~340 instruction opcodes across all major GFX9/GFX90a formats. Key categories:
 
-| Instruction | Format | Notes |
-|---|---|---|
-| `s_endpgm` | SOPP | Terminates execution loop |
-| `s_nop` | SOPP | No-op |
-| `s_branch` | SOPP | Unconditional PC-relative branch |
-| `s_cbranch_scc0/1` | SOPP | Branch on SCC |
-| `s_cbranch_execz/execnz` | SOPP | Branch on EXEC == 0 or ≠ 0 |
-| `s_waitcnt` | SOPP | No-op (simulation is synchronous) |
-| `s_mov_b32/b64` | SOP1 | Scalar move |
-| `s_and_saveexec_b64` | SOP1 | Save EXEC, mask with VCC |
-| `s_or_saveexec_b64` | SOP1 | Save EXEC, OR with VCC |
-| `s_add_u32/i32` | SOP2 | Add with SCC carry |
-| `s_sub_u32` | SOP2 | Subtract with SCC borrow |
-| `s_and_b32/b64` | SOP2 | Bitwise AND |
-| `s_or_b32` | SOP2 | Bitwise OR |
-| `s_lshl_b32` | SOP2 | Logical shift left |
-| `s_lshr_b32` | SOP2 | Logical shift right |
-| `s_mul_i32` | SOP2 | Scalar multiply |
+### Scalar (SOPP / SOP1 / SOP2 / SOPK / SOPC)
+
+- **SOPP**: `s_endpgm`, `s_nop`, `s_branch`, `s_cbranch_scc0/1`, `s_cbranch_execz/execnz`, `s_cbranch_vccz/vccnz`, `s_waitcnt` (no-op), `s_barrier`
+- **SOP1**: `s_mov_b32/b64`, `s_not_b32/b64`, `s_wqm_b64`, `s_and/or/xor/andn2/orn2_saveexec_b64`, `s_getpc_b64`, `s_setpc_b64`, `s_swappc_b64`, `s_ff1_i32_b32/b64`, `s_bitcnt1_b32_b64`, `s_abs_i32`, `s_movrels_b32`, `s_movreld_b32`
+- **SOP2**: full set including `s_add/sub_u32/i32`, `s_addc/subb_u32`, `s_min/max_i32/u32`, `s_cselect_b32/b64`, `s_and/or/xor/andn2/orn2/nand/nor/xnor_b32/b64`, `s_lshl/lshr_b32/b64`, `s_ashr_i32/i64`, `s_bfm/bfe_b32/b64`, `s_mul_i32`, `s_absdiff_i32`
+- **SOPK**: `s_movk_i32`, `s_cmovk_i32`, `s_cmpk_eq/lg/gt/ge/lt/le_i32/u32`, `s_addk_i32`, `s_mulk_i32`
+- **SOPC**: `s_cmp_eq/lg/gt/ge/lt/le_i32/u32`, `s_bitcmp0/1_b32`
 
 ### Scalar Memory (SMEM)
 
-| Instruction | Notes |
-|---|---|
-| `s_load_dword` | Load 1 DWORD from SGPR-pair base + offset |
-| `s_load_dwordx2` | Load 2 DWORDs |
-| `s_load_dwordx4` | Load 4 DWORDs — used for pointer args |
-| `s_load_dwordx8` | Load 8 DWORDs |
-| `s_load_dwordx16` | Load 16 DWORDs |
+`s_load_dword/x2/x4/x8/x16`, `s_buffer_load_dword/x2/x4/x8/x16`, `s_store_dword/x2/x4`
 
 ### Vector ALU (VOP1 / VOP2 / VOP3A / VOP3B / VOPC)
 
-| Instruction | Format | Notes |
-|---|---|---|
-| `v_mov_b32` | VOP1 | Copy SGPR/literal → VGPR |
-| `v_add_f32` | VOP2 | Float add |
-| `v_mul_f32` | VOP2 | Float multiply |
-| `v_add_u32` | VOP2 | Integer add (no carry) |
-| `v_sub_u32` | VOP2 | Integer subtract |
-| `v_lshlrev_b32` | VOP2 | Left shift |
-| `v_lshrrev_b32` | VOP2 | Logical right shift |
-| `v_ashrrev_i32` | VOP2 | Arithmetic right shift |
-| `v_and_b32` | VOP2 | Bitwise AND |
-| `v_or_b32` | VOP2 | Bitwise OR |
-| `v_add_co_u32` | VOP3B | Add with carry-out |
-| `v_addc_co_u32` | VOP3B | Add with carry-in and carry-out |
-| `v_ashrrev_i64` | VOP3A | 64-bit arithmetic right shift |
-| `v_lshlrev_b64` | VOP3A | 64-bit left shift |
-| `v_mad_f32` | VOP3A | Fused multiply-add |
-| `v_cvt_f32_i32` | VOP1 | Int → float |
-| `v_cvt_i32_f32` | VOP1 | Float → int |
-| `v_cmp_lt/le/gt/ge/eq/ne_u32` | VOPC | Unsigned compare → VCC |
-| `v_cmp_lt/ge_i32` | VOPC | Signed compare → VCC |
+- **VOP1**: `v_mov_b32`, `v_cvt_*` (f32↔i32, f32↔u32, f32↔f16, f32↔f64, f16↔u16), `v_rcp_f32/f64`, `v_rsq_f32/f64`, `v_sqrt_f32/f64`, `v_floor/ceil/trunc/fract/rndne_f32/f64`, `v_exp_f32`, `v_log_f32`, `v_not_b32`, `v_bfrev_b32`, `v_readfirstlane_b32`
+- **VOP2**: `v_cndmask_b32`, `v_add/sub/mul_f32`, `v_mac_f32`, `v_add/sub_u32`, `v_add_co_u32`, `v_addc_co_u32`, `v_lshlrev/lshrrev/ashrrev_b32`, `v_and/or/xor_b32`, `v_min/max_f32/i32/u32`, `v_madmk/madak_f32`, `v_mul_hi_u32`, `v_subrev_u32`
+- **VOP3A**: `v_mad/fma_f32/f64`, `v_mul_lo/hi_u32/i32`, `v_lshlrev_b64`, `v_ashrrev_i64`, `v_lshl_add_u32`, `v_add3_u32`, `v_lshl_or_b32`, `v_and_or_b32`, `v_or3_b32`, `v_med3_f32/i32/u32`, `v_bfe_u32/i32`, `v_bfi_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_mad_u64_u32`, `v_readlane_b32`, `v_writelane_b32`, `v_accvgpr_read/write_b32`
+- **VOP3B**: `v_add_co_u32`, `v_addc_co_u32`, `v_sub_co_u32`, `v_subb_co_u32`, `v_div_scale_f32/f64`
+- **VOPC**: full `v_cmp_*` set for F32, F64, I32, U32, I64, U64 (all conditions)
+- **VOP3 modifiers**: NEG, ABS (source), CLAMP, OMOD (destination) — applied to all float instructions
+- **SDWA**: byte/word selection sub-encoding (src0 == 0xF9)
+- **DPP**: cross-lane data movement sub-encoding (src0 == 0xFA)
 
-### Global Memory (FLAT_GLOBAL)
+### VOP3P (Packed Operations)
 
-| Instruction | Notes |
-|---|---|
-| `global_load_dword` | Per-lane 32-bit load |
-| `global_load_dwordx2` | Per-lane 64-bit load |
-| `global_load_dwordx4` | Per-lane 128-bit load |
-| `global_store_dword` | Per-lane 32-bit store |
-| `global_store_dwordx2` | Per-lane 64-bit store |
-| `global_store_dwordx4` | Per-lane 128-bit store |
+`v_pk_add/mul/fma_f16`, `v_pk_add/mul/fma_f32` (CDNA2), `v_dot2_f32_f16`, `v_dot2c_f32_f16`, `v_fma_mix_f32`, `v_fma_mixlo/mixhi_f16` — with op_sel/op_sel_hi/neg_hi support
 
-Both addressing modes are supported:
-- **SGPR base + VGPR offset**: `addr = sgpr_pair + vgpr + flat_offset`
-- **`off` (pure VGPR 64-bit pair)**: `addr = vgpr_pair + flat_offset`
+### DS (Local Data Share)
+
+`ds_read_b32/b64/b128/u8/u16`, `ds_write_b32/b64/b128/b8/b16`, `ds_read2_b32/b64`, `ds_write2_b32/b64`, `ds_add/sub/min/max/and/or/xor_u32/u64/rtn`, `ds_cmpst_b32/b64/rtn`
+
+### MUBUF / MTBUF (Buffer Memory)
+
+`buffer_load_dword/x2/x3/x4`, `buffer_load_ubyte/ushort/sbyte/sshort`, `buffer_store_dword/x2/x3/x4`, `buffer_store_byte/short`, `buffer_atomic_add/sub/smin/smax/umin/umax/and/or/xor/swap/cmpswap` — with LDS-direct flag support
+
+### FLAT / GLOBAL / SCRATCH
+
+`flat/global/scratch_load_dword/x2/x3/x4/ubyte/ushort/sbyte/sshort`, `flat/global/scratch_store_dword/x2/x3/x4/byte/short`, `flat/global_atomic_add/sub/smin/smax/umin/umax/and/or/xor/swap/cmpswap/add_x2`
+
+### MFMA (Matrix Fused Multiply-Accumulate)
+
+All CDNA2 MFMA shapes with correct cross-lane outer-product semantics:
+- **F32**: `v_mfma_f32_4x4x1f32`, `v_mfma_f32_16x16x1f32`, `v_mfma_f32_16x16x4f32`, `v_mfma_f32_32x32x1f32`, `v_mfma_f32_32x32x2f32`
+- **F16/BF16**: `v_mfma_f32_4x4x4f16`, `v_mfma_f32_16x16x4f16`, `v_mfma_f32_16x16x16f16`, `v_mfma_f32_32x32x4f16`, `v_mfma_f32_32x32x8f16` (and bf16_1k equivalents)
+- **I8**: `v_mfma_i32_4x4x4i8`, `v_mfma_i32_16x16x4i8`, `v_mfma_i32_16x16x16i8`, `v_mfma_i32_32x32x4i8`, `v_mfma_i32_32x32x8i8`
+- **F64**: `v_mfma_f64_4x4x4f64`, `v_mfma_f64_16x16x4f64`
 
 ---
 
@@ -549,68 +557,43 @@ Both addressing modes are supported:
 
 ## Potential Improvements
 
-### Correctness
-
-- **Carry/borrow propagation in SOP2** — `s_add_u32`/`s_sub_u32` currently set SCC but don't propagate a multi-word carry chain. Add `s_addc_u32` and `s_subb_u32`.
-- **`s_getpc_b64`** — reads the current PC into a SGPR pair. Needed by kernels that use position-independent code or call device functions.
-- **`v_readfirstlane_b32`** — copies lane 0's VGPR value to a SGPR. Required by some idioms for extracting a uniform value from a vector register.
-- **`v_readlane_b32` / `v_writelane_b32`** — cross-lane data movement. Needed for reductions and shuffles.
-- **Inline float constant accuracy** — the decoder handles the standard set (±0.5, ±1.0, ±2.0, ±4.0) but does not handle the extended set present in some encodings (e.g., 1/π, 2/π).
-- **SOPK instructions** — `s_movk_i32`, `s_cmpk_eq_i32`, etc. are not yet decoded or executed.
-- **`s_load_*` with SGPR offset** — the IMM=0 path (using a SGPR as the offset register rather than a literal) is not fully implemented.
-- **Flat memory segment** — SEG=0 (plain `flat_load/store`) is not handled; only SEG=2 (`global_*`) is implemented.
-
 ### Performance
 
-- **Parallel wavefront execution** — each wavefront is currently sequential. An `std::async` or thread pool over the wavefront loop in `execution_engine.cpp` would exploit multi-core CPUs and correctly model the GPU's wave-parallel execution.
-- **SIMD vectorization of lane loops** — the inner `for (int lane = 0; lane < 64; lane++)` loop in the executor is a natural target for AVX-512 auto-vectorization with a 64-element predicate mask.
-- **Decode cache** — the same instruction bytes are decoded every time the kernel loops. A decoded instruction cache keyed on PC offset would eliminate repeated decoding for loops.
+- **Parallel wavefront execution** — wavefronts across independent workgroups could run in parallel. An `std::async` or thread pool would exploit multi-core CPUs.
+- **SIMD vectorization of lane loops** — the inner `for (int lane = 0; lane < 64; lane++)` loop in the executor is a natural target for AVX-512 auto-vectorization.
+- **Decode cache** — the same instruction bytes are decoded every time the kernel loops. A decoded instruction cache keyed on PC offset would eliminate repeated decoding.
 
 ### Usability
 
-- **Instruction trace / logging** — an optional `--trace` mode that prints each decoded instruction and the registers it touches before/after execution would dramatically accelerate debugging new kernels.
-- **Register dump on S_ENDPGM** — print or return the final SGPR/VGPR state, useful for unit-testing small compute shaders.
-- **Error on unknown instruction** — currently `UNKNOWN` opcode is silently skipped. It should trigger a configurable error or assertion to catch unsupported instructions early.
-- **Bounds-checked memory model** — the current `memory_model.h` dereferences any address blindly. Adding a registered-region table and checking each access would turn silent segfaults into meaningful simulator errors.
+- **Instruction trace / logging** — an optional `--trace` mode that prints each decoded instruction and register state would accelerate debugging new kernels.
+- **Bounds-checked memory model** — the current `memory_model.h` dereferences any address blindly. Adding a registered-region table would turn silent segfaults into meaningful errors.
 
 ### Build / Integration
 
-- **`pkg-config` / CMake `find_package` export** — install a `gcnsim-config.cmake` so downstream projects can consume the library with a single `find_package(gcnsim)`.
-- **Python bindings** — a thin pybind11 wrapper over the public API would make it easy to drive simulation from Python test scripts.
+- **`pkg-config` / CMake `find_package` export** — install a `gcnsim-config.cmake` so downstream projects can consume the library with `find_package(gcnsim)`.
+- **Python bindings** — a thin pybind11 wrapper over the public API for driving simulation from Python test scripts.
 
 ---
 
 ## Future Work
 
-### Scratch / LDS Memory
-Local Data Share (LDS / shared memory in CUDA terminology) is not simulated. Supporting `ds_read_b32` / `ds_write_b32` and the `group_segment_fixed_size` field of the kernel descriptor would enable simulation of kernels that use shared memory for reductions, tiling, etc.
+### Re-convergence Stack
+The current EXEC mask handling is correct for `if/else` constructs that use `s_and_saveexec_b64` + `s_branch`. True divergent loops (where some lanes exit the loop body early) require a re-convergence stack — tracking pushed EXEC states and restoring them at merge points.
 
-Scratch (private) memory for stack spills is similarly absent. Adding an allocator that backs `FLAT_SCRATCH` addresses with host memory would support more complex kernels generated by optimizing compilers.
+### Multi-tile Tensile GEMM
+The single-tile (128x256x32) Tensile SGEMM passes end-to-end. Extending to multi-tile problems would exercise inter-workgroup correctness and validate the full production GEMM path.
 
-### Divergent Control Flow
-The current EXEC mask handling is correct for `if/else` constructs that use `s_and_saveexec_b64` + `s_branch`. True divergent loops (where some lanes exit the loop body early) require a re-convergence stack — tracking pushed EXEC states and restoring them at merge points. Without this, loops with `s_cbranch_execz` that span multiple iterations are not correctly simulated.
+### Memory Ordering Model
+`s_waitcnt` is currently a no-op since all simulation memory is synchronous. A simple counter-based model would allow detection of missing barriers in test kernels.
 
-### Multi-Wavefront Synchronization
-GPU kernels use `s_barrier` to synchronize wavefronts within a workgroup. Since the current engine runs wavefronts sequentially, no synchronization is needed — but this means kernels relying on inter-wave communication via LDS are not correctly simulated. Supporting barriers would require running all wavefronts of a workgroup together (interleaved at barrier points), or a split-phase approach.
-
-### F16 / BF16 / INT8 Support
-The MI-200 (gfx90a) is designed for mixed-precision AI workloads. Supporting `v_pk_add_f16`, `v_dot2_f32_f16`, and the matrix (MFMA) instruction family (`v_mfma_f32_32x32x8bf16`, etc.) would make the simulator useful for validating AI kernels without hardware.
-
-### Additional ISA Coverage
-
-| Category | Missing instructions |
-|---|---|
-| Scalar | SOPK family, `s_cmp_*`, `s_setpc_b64`, `s_swappc_b64` |
-| Vector | `v_min/max_*`, `v_med3_*`, `v_bfe_u32`, `v_bfi_b32` |
-| Atomic | `global_atomic_add`, `global_atomic_cmpswap`, etc. |
-| Texture | `image_load`, `image_store`, `image_sample` |
-| MFMA | All `v_mfma_*` matrix multiply-accumulate instructions |
-
-### Symbolic Execution / Taint Analysis
-Instead of simulating one concrete input, run the simulator with symbolic values (e.g., using the Z3 SMT solver or a custom interval domain). This would enable automatic verification of kernel correctness across all inputs, or detection of out-of-bounds access for any possible index.
+### MIMG (Texture) Instructions
+Image sampling instructions require texture descriptor and sampler hardware state. Currently silently skipped.
 
 ### Code Object V5 / V6
 The current implementation supports COV3 and COV4 fully. COV5 (ROCm 5.x+) and COV6 (ROCm 6.x+) introduced changes to the kernel descriptor and metadata format. Full support would extend compatibility to kernels compiled with newer toolchains.
 
+### Symbolic Execution / Taint Analysis
+Run the simulator with symbolic values (e.g., using Z3) to enable automatic verification of kernel correctness or detection of out-of-bounds access for any possible index.
+
 ### Disassembler Output
-Add a mode that takes an HSACO and prints a human-readable disassembly (similar to `llvm-objdump -d`) using the existing decoder. This would serve as both a useful standalone tool and a regression test — outputs can be diffed against `llvm-objdump` to validate the decoder.
+Add a mode that prints human-readable disassembly (similar to `llvm-objdump -d`) using the existing decoder. Useful as a standalone tool and a regression test against `llvm-objdump`.
