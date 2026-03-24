@@ -35,9 +35,10 @@ ctest --test-dir build -V
 ./build/tests/test_gemm_mfma --hsaco build/tools/gemm_mfma/gemm_mfma.hsaco
 ./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
 ./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ```
 
-**Expected:** 83 tests pass across 8 suites.
+**Expected:** 86 tests pass across 9 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -52,6 +53,7 @@ tools/vector_add/       Vector-add HIP kernel (.hsaco) for integration tests
 tools/gemm_mfma/        MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
 tools/mfma_kernels/     Multi-shape MFMA kernels (.hsaco) for integration tests
 tools/asm_gemm_mfma/    Hand-written GFX90A assembly MFMA GEMM (.co)
+tools/tensile_style_gemm/ Tensile-style SGEMM assembly kernel (.co) for end-to-end GEMM test
 ```
 
 | File | Responsibility |
@@ -386,6 +388,7 @@ Key assembly constraints (GFX9 constant bus rule):
 | `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
 | `test_mfma_kernels` | 4 | Multi-shape MFMA integration (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
 | `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM integration |
+| `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 
 ### Writing new tests
 
@@ -482,9 +485,8 @@ Common past mistakes to watch for:
   model would allow detection of missing barriers in test kernels.
 - **MIMG instructions**: require texture descriptor and sampler state; currently silently skipped.
 - **DPP16/DPP8** (GFX10+ only): not relevant for gfx90a but would be needed for newer targets.
-- **Tensile SGEMM end-to-end test**: the simulator now has the instruction coverage to run
-  a real Tensile kernel; an integration test extracting a small GEMM from rocBLAS would
-  validate the full pipeline.
+- **Multi-tile Tensile GEMM**: the single-tile (128x256x32) Tensile SGEMM passes end-to-end;
+  extending to multi-tile problems would exercise inter-workgroup correctness.
 
 ---
 
