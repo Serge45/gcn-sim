@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(yaml-cpp REQUIRED)
 
+# Find a clang with amdgcn target support (ROCm clang or upstream LLVM with AMDGPU)
+find_program(AMDGPU_CLANG clang HINTS /opt/rocm/llvm/bin)
+
 add_library(gcnsim SHARED
     src/elf_loader.cpp
     src/metadata_parser.cpp
@@ -15,8 +18,7 @@ add_library(gcnsim SHARED
     src/gcnsim_api.cpp)
 
 target_include_directories(gcnsim
-    PUBLIC  include
-    PRIVATE /opt/rocm/include)
+    PUBLIC  include)
 
 target_link_libraries(gcnsim PRIVATE yaml-cpp)
 target_compile_options(gcnsim PRIVATE -Wall -Wextra)

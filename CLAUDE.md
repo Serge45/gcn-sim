@@ -348,7 +348,24 @@ Do **not** use raw pointer casts (`*(uint32_t*)addr`) — this violates strict a
 ### HIP C++ kernel
 
 1. Write the kernel in `tools/<name>/` directory.
-2. Add a `CMakeLists.txt` that builds the `.hsaco` with `hipcc --offload-arch=gfx90a -c --genco`.
+2. Add a `CMakeLists.txt` that builds the `.hsaco` using `AMDGPU_CLANG` (discovered
+   in the root CMakeLists.txt):
+   ```cmake
+   if(NOT AMDGPU_CLANG)
+       message(WARNING "clang with amdgcn support not found; skipping <name>")
+       return()
+   endif()
+   set(HSACO_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/<name>.hsaco)
+   add_custom_command(
+       OUTPUT  ${HSACO_OUTPUT}
+       COMMAND ${AMDGPU_CLANG} -x hip --cuda-device-only --offload-arch=gfx90a
+               --no-gpu-bundle-output -O2 -c
+               -o ${HSACO_OUTPUT} ${CMAKE_CURRENT_SOURCE_DIR}/<name>.hip
+       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/<name>.hip
+       COMMENT "Compiling <name>.hip → <name>.hsaco"
+   )
+   add_custom_target(<name>_hsaco ALL DEPENDS ${HSACO_OUTPUT})
+   ```
 3. Add `add_subdirectory(tools/<name>)` to the root `CMakeLists.txt`.
 4. Write an integration test in `tests/` that uses `module_load` → `module_get_function` → `launch_kernel`.
 5. Pass the `.hsaco` path as a command-line argument (`--hsaco <path>`) and register it
@@ -356,8 +373,10 @@ Do **not** use raw pointer casts (`*(uint32_t*)addr`) — this violates strict a
 
 ### Hand-written assembly kernel
 
-ROCm clang at `/opt/rocm/llvm/bin/clang` can assemble GFX90A `.s` files.
-The build requires two steps (assemble then link):
+A clang with amdgcn target support (ROCm clang at `/opt/rocm/llvm/bin/clang`, or
+upstream LLVM built with AMDGPU) can assemble GFX90A `.s` files. The CMake variable
+`AMDGPU_CLANG` is discovered in the root CMakeLists.txt. The build requires two
+steps (assemble then link):
 
 ```bash
 clang -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 \

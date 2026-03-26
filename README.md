@@ -352,7 +352,8 @@ extern "C" __global__ void vector_add(const float* A, const float* B, float* C, 
 
 Compiled with:
 ```bash
-hipcc --offload-arch=gfx90a -c --genco vector_add.hip -o vector_add.hsaco
+clang -x hip --cuda-device-only --offload-arch=gfx90a --no-gpu-bundle-output -O2 -c \
+  -o vector_add.hsaco vector_add.hip
 ```
 
 The integration test (`test_vector_add.cpp`) runs with N=1024, block=256, grid=4:
@@ -396,7 +397,7 @@ The EXEC mask is a plain `uint64_t` where bit `n` represents lane `n`. All vecto
 | C++ compiler | GCC ≥ 11 or Clang ≥ 14 | C++20 required |
 | yaml-cpp | any | MsgPack/metadata parser dependency |
 | GTest | any | Unit tests |
-| ROCm | ≥ 6.0 at `/opt/rocm` | Headers + `hipcc` for kernel compilation |
+| clang (amdgcn) | ROCm clang at `/opt/rocm/llvm/bin/clang`, or upstream LLVM built with `-DLLVM_TARGETS_TO_BUILD=AMDGPU` | Kernel compilation (HIP `.hip` → `.hsaco`, assembly `.s` → `.co`) |
 
 ### Build steps
 
@@ -408,7 +409,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DGCNSIM_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ```
 
-The `vector_add.hsaco` kernel is built automatically as part of the `tools/vector_add` target if `hipcc` is found. If `hipcc` is not present, that target is silently skipped (the integration test will then be skipped or fail with a clear error).
+The `vector_add.hsaco` kernel is built automatically as part of the `tools/vector_add` target if a clang with amdgcn target support is found. If clang is not present, that target is silently skipped (the integration test will then be skipped or fail with a clear error).
 
 ---
 
