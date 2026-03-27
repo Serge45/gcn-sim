@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 #include <memory>
+#include <cstdio>
 
 namespace gcnsim {
 
@@ -33,6 +34,18 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     }
 
     if (total_cycles) *total_cycles = 0;
+
+    // Open trace file if requested (Chrome Trace Event Format)
+    FILE* trace_file = nullptr;
+    if (cfg.trace_path && cfg.enable_cycle_counting) {
+        trace_file = fopen(cfg.trace_path, "w");
+        if (trace_file) {
+            fprintf(trace_file, "{\"traceEvents\":[\n");
+            fprintf(trace_file,
+                "{\"ph\":\"M\",\"pid\":0,\"tid\":0,\"name\":\"process_name\","
+                "\"args\":{\"name\":\"gcn-sim\"}}");
+        }
+    }
 
     uint32_t block_x = std::max(1u, cfg.block_x);
     uint32_t block_y = std::max(1u, cfg.block_y);
@@ -122,6 +135,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
             waves[w]->count_cycles = cfg.enable_cycle_counting;
             waves[w]->global_mem_latency = cfg.global_mem_latency;
+            waves[w]->trace_file = trace_file;
+            waves[w]->trace_wave_id = w;
+            waves[w]->trace_wg_flat_id =
+                wg_z * wg_count_y * wg_count_x + wg_y * wg_count_x + wg_x;
         }
 
         // Round-robin execution with barrier synchronization.
@@ -163,6 +180,11 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             for (uint32_t w = 0; w < waves_per_wg; w++)
                 *total_cycles += waves[w]->cycle_count;
         }
+    }
+
+    if (trace_file) {
+        fprintf(trace_file, "\n]}\n");
+        fclose(trace_file);
     }
     return true;
 }

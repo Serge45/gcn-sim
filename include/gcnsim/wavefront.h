@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <vector>
 
 namespace gcnsim {
@@ -53,6 +54,10 @@ struct WavefrontState {
     // MFMA co-execution: miSIMD pipeline state
     uint64_t mfma_shadow_remaining = 0;  // shadow cycles left from in-flight MFMA
     uint64_t mfma_busy_until = 0;        // cycle when miSIMD becomes free
+    // Trace output (Chrome Trace Event Format); nullptr = no tracing
+    FILE*    trace_file = nullptr;
+    uint32_t trace_wave_id = 0;          // wave index within workgroup
+    uint32_t trace_wg_flat_id = 0;       // flat workgroup index
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores

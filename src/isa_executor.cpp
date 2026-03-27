@@ -570,6 +570,63 @@ static uint32_t mfma_exec_cycles(Opcode op) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trace helpers (Chrome Trace Event Format)
+// ---------------------------------------------------------------------------
+
+static const char* trace_category(const Instruction& inst) {
+    switch (inst.format) {
+    case InstFormat::MFMA:         return "MFMA";
+    case InstFormat::VOP1:
+    case InstFormat::VOP2:
+    case InstFormat::VOPC:
+    case InstFormat::VOP3A:
+    case InstFormat::VOP3B:
+    case InstFormat::VOP3P:        return "VALU";
+    case InstFormat::SOP1:
+    case InstFormat::SOP2:
+    case InstFormat::SOPK:
+    case InstFormat::SOPC:
+    case InstFormat::SOPP:         return "SALU";
+    case InstFormat::DS:           return "DS";
+    case InstFormat::SMEM:         return "SMEM";
+    case InstFormat::MUBUF:
+    case InstFormat::MTBUF:
+    case InstFormat::FLAT_GLOBAL:
+    case InstFormat::FLAT_SCRATCH: return "VMEM";
+    default:                       return "OTHER";
+    }
+}
+
+static void trace_emit(WavefrontState& wave, const char* cat,
+                       const char* name, uint64_t ts, uint64_t dur,
+                       uint64_t pc) {
+    if (!wave.trace_file) return;
+    fprintf(wave.trace_file,
+        ",\n{\"ph\":\"X\",\"pid\":%u,\"tid\":%u,"
+        "\"cat\":\"%s\",\"name\":\"%s\","
+        "\"ts\":%llu,\"dur\":%llu,"
+        "\"args\":{\"pc\":\"0x%llx\"}}",
+        wave.trace_wg_flat_id, wave.trace_wave_id,
+        cat, name,
+        (unsigned long long)ts, (unsigned long long)dur,
+        (unsigned long long)pc);
+}
+
+static void trace_stall(WavefrontState& wave, const char* reason,
+                        uint64_t ts, uint64_t dur, uint64_t pc) {
+    if (!wave.trace_file || dur == 0) return;
+    fprintf(wave.trace_file,
+        ",\n{\"ph\":\"X\",\"pid\":%u,\"tid\":%u,"
+        "\"cat\":\"STALL\",\"name\":\"%s\","
+        "\"ts\":%llu,\"dur\":%llu,"
+        "\"args\":{\"pc\":\"0x%llx\"}}",
+        wave.trace_wg_flat_id, wave.trace_wave_id,
+        reason,
+        (unsigned long long)ts, (unsigned long long)dur,
+        (unsigned long long)pc);
+}
+
 // Run one wavefront until s_endpgm or s_barrier.
 // Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier.
 WaveStatus run_wavefront(WavefrontState& wave) {
@@ -595,20 +652,30 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         }
         if (wave.count_cycles) {
             if (inst.opcode == Opcode::S_WAITCNT) {
+                uint64_t before = wave.cycle_count;
                 handle_waitcnt_cycles(wave, inst);
+                uint64_t stall = wave.cycle_count - before;
+                trace_stall(wave, "stall:waitcnt", before, stall, pre_pc);
+                trace_emit(wave, "SALU", "s_waitcnt", wave.cycle_count, 0, pre_pc);
             } else if (inst.format == InstFormat::MFMA) {
                 // MFMA: stall if miSIMD still busy, then issue + open shadow
-                if (wave.cycle_count < wave.mfma_busy_until)
+                uint64_t before = wave.cycle_count;
+                if (wave.cycle_count < wave.mfma_busy_until) {
                     wave.cycle_count = wave.mfma_busy_until;
+                    trace_stall(wave, "stall:mfma_busy", before, wave.cycle_count - before, pre_pc);
+                }
                 constexpr uint64_t MFMA_ISSUE = 4;
+                uint64_t issue_start = wave.cycle_count;
                 wave.cycle_count += MFMA_ISSUE;
                 uint32_t exec = mfma_exec_cycles(inst.opcode);
                 uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
                 wave.mfma_busy_until = wave.cycle_count + shadow;
                 wave.mfma_shadow_remaining = shadow;
+                trace_emit(wave, "MFMA", opcode_name(inst.opcode), issue_start, exec, pre_pc);
             } else {
                 // Non-MFMA: consume MFMA shadow if available
                 uint64_t cost = issue_cycles(wave, inst);
+                uint64_t start = wave.cycle_count;
                 if (wave.mfma_shadow_remaining >= cost) {
                     wave.mfma_shadow_remaining -= cost;
                 } else {
@@ -616,6 +683,8 @@ WaveStatus run_wavefront(WavefrontState& wave) {
                     wave.mfma_shadow_remaining = 0;
                 }
                 push_pending(wave, inst);
+                trace_emit(wave, trace_category(inst), opcode_name(inst.opcode),
+                           start, cost, pre_pc);
             }
         }
         execute_instruction(wave, inst);
