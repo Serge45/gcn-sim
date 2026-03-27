@@ -9,10 +9,14 @@ struct LaunchConfig {
     uint32_t block_x, block_y, block_z; // workgroup size
     const void* kernarg;                 // pointer to kernarg buffer
     size_t      kernarg_size;
+    bool enable_cycle_counting = false;  // if true, wavefronts accumulate cycle_count
 };
 
 // Run a kernel on the CPU simulator.
 // Returns false on error (sets error_msg).
-bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg);
+// If total_cycles is non-null and cfg.enable_cycle_counting is true, the sum of
+// cycle_count across all wavefronts is written there.
+bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
+                   uint64_t* total_cycles = nullptr);
 
 } // namespace gcnsim

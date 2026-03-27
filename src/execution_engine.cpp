@@ -21,7 +21,8 @@ void init_wavefront(WavefrontState& wave,
 
 WaveStatus run_wavefront(WavefrontState& wave);
 
-bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg) {
+bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
+                   uint64_t* total_cycles) {
     if (!kernel.descriptor) {
         error_msg = "Kernel descriptor is null";
         return false;
@@ -30,6 +31,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         error_msg = "Kernel code pointer is null";
         return false;
     }
+
+    if (total_cycles) *total_cycles = 0;
 
     uint32_t block_x = std::max(1u, cfg.block_x);
     uint32_t block_y = std::max(1u, cfg.block_y);
@@ -116,6 +119,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->scratch_ptr      = scratch_per_wave > 0 ? scratch_bufs[w].data() : nullptr;
             waves[w]->scratch_size     = scratch_per_wave;
             waves[w]->scratch_per_lane = scratch_per_lane;
+
+            waves[w]->count_cycles = cfg.enable_cycle_counting;
         }
 
         // Round-robin execution with barrier synchronization.
@@ -151,6 +156,11 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 }
             }
             // else: barrier_count > 0, waves are waiting — loop resumes them
+        }
+
+        if (cfg.enable_cycle_counting && total_cycles) {
+            for (uint32_t w = 0; w < waves_per_wg; w++)
+                *total_cycles += waves[w]->cycle_count;
         }
     }
     return true;

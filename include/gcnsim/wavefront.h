@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace gcnsim {
 
@@ -44,6 +45,13 @@ struct WavefrontState {
     uint8_t* scratch_ptr;
     uint32_t scratch_size;                  // total bytes (private_segment_fixed_size * 64)
     uint32_t scratch_per_lane;              // bytes per lane (private_segment_fixed_size)
+
+    // Cycle counting — optional, enabled per LaunchConfig::enable_cycle_counting
+    bool     count_cycles = false;
+    uint64_t cycle_count  = 0;
+    // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
+    std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
+    std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores
 };
 
 } // namespace gcnsim

@@ -35,7 +35,9 @@ bool launch_kernel(SimFunction& fn,
                    uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
                    uint32_t block_x, uint32_t block_y, uint32_t block_z,
                    void** kernel_params,
-                   std::string& err)
+                   std::string& err,
+                   bool enable_cycle_counting,
+                   uint64_t* total_cycles)
 {
     if (!fn.kernel) {
         err = "SimFunction has null kernel";
@@ -88,8 +90,9 @@ bool launch_kernel(SimFunction& fn,
     cfg.block_z = block_z;
     cfg.kernarg  = kernarg_buf.data();
     cfg.kernarg_size = kernarg_buf.size();
+    cfg.enable_cycle_counting = enable_cycle_counting;
 
-    return launch_kernel(*fn.kernel, cfg, err);
+    return launch_kernel(*fn.kernel, cfg, err, total_cycles);
 }
 
 } // namespace gcnsim

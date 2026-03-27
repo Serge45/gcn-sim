@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <cstdio>
+#include <algorithm>
 
 namespace gcnsim {
 
@@ -408,6 +409,79 @@ static uint64_t flat_addr(const WavefrontState& w, const Instruction& inst, int 
 
 void execute_instruction(WavefrontState& wave, const Instruction& inst);
 
+// ---------------------------------------------------------------------------
+// Cycle-counting helpers
+// ---------------------------------------------------------------------------
+
+// Compute the LDS bank-conflict factor k for a DS instruction.
+// gfx90a has 32 LDS banks; bank = (addr / 4) % 32.
+// k = maximum number of active lanes hitting the same bank.
+static uint32_t ds_bank_conflict_k(const WavefrontState& wave, const Instruction& inst) {
+    uint8_t bank_count[32] = {};
+    for (int lane = 0; lane < WAVE_SIZE; lane++) {
+        if (!((wave.exec >> lane) & 1)) continue;
+        uint32_t addr = wave.vgpr[inst.src[0].index][lane] + inst.ds_offset0;
+        bank_count[(addr / 4) % 32]++;
+    }
+    uint8_t k = 1;
+    for (int b = 0; b < 32; b++) k = std::max(k, bank_count[b]);
+    return k;
+}
+
+// Issue cycles: how long the wavefront is occupied issuing this instruction.
+// SMEM/MUBUF/FLAT latency is modeled separately via the pending queues.
+static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst) {
+    constexpr uint64_t BASE = 4;
+    if (inst.format == InstFormat::DS) {
+        uint32_t k = ds_bank_conflict_k(wave, inst);
+        return BASE + 4ULL * (k - 1);
+    }
+    return BASE;
+}
+
+// Push a completion timestamp for in-flight memory ops.
+static void push_pending(WavefrontState& wave, const Instruction& inst) {
+    constexpr uint64_t SMEM_LAT = 20;
+    constexpr uint64_t MEM_LAT  = 100;
+    switch (inst.format) {
+    case InstFormat::SMEM:
+        wave.lgkm_pending.push_back(wave.cycle_count + SMEM_LAT);
+        break;
+    case InstFormat::DS:
+        // DS completes at end of issue (bank-conflict cycles already counted)
+        wave.lgkm_pending.push_back(wave.cycle_count);
+        break;
+    case InstFormat::MUBUF:
+    case InstFormat::MTBUF:
+    case InstFormat::FLAT_GLOBAL:
+    case InstFormat::FLAT_SCRATCH:
+        wave.vm_pending.push_back(wave.cycle_count + MEM_LAT);
+        break;
+    default:
+        break;
+    }
+}
+
+// Handle s_waitcnt: drain pending queues and advance cycle_count as needed.
+// Instruction simm16 bits: vmcnt=[3:0], lgkmcnt=[11:8].
+// We also use the pre-decoded wait_vmcnt / wait_lgkmcnt fields.
+static void handle_waitcnt_cycles(WavefrontState& wave, const Instruction& inst) {
+    uint32_t lgkmcnt = inst.wait_lgkmcnt;
+    uint32_t vmcnt   = inst.wait_vmcnt;
+
+    std::sort(wave.lgkm_pending.begin(), wave.lgkm_pending.end());
+    while (wave.lgkm_pending.size() > lgkmcnt) {
+        wave.cycle_count = std::max(wave.cycle_count, wave.lgkm_pending.front());
+        wave.lgkm_pending.erase(wave.lgkm_pending.begin());
+    }
+
+    std::sort(wave.vm_pending.begin(), wave.vm_pending.end());
+    while (wave.vm_pending.size() > vmcnt) {
+        wave.cycle_count = std::max(wave.cycle_count, wave.vm_pending.front());
+        wave.vm_pending.erase(wave.vm_pending.begin());
+    }
+}
+
 // Run one wavefront until s_endpgm or s_barrier.
 // Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier.
 WaveStatus run_wavefront(WavefrontState& wave) {
@@ -430,6 +504,14 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         }
         if (inst.opcode == Opcode::S_BARRIER) {
             return WaveStatus::BARRIER_HIT;
+        }
+        if (wave.count_cycles) {
+            if (inst.opcode == Opcode::S_WAITCNT) {
+                handle_waitcnt_cycles(wave, inst);
+            } else {
+                wave.cycle_count += issue_cycles(wave, inst);
+                push_pending(wave, inst);
+            }
         }
         execute_instruction(wave, inst);
         if (inst.opcode == Opcode::S_ENDPGM) return WaveStatus::ENDED;

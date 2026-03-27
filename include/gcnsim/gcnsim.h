@@ -23,11 +23,15 @@ std::optional<SimFunction> module_get_function(SimModule& mod,
                                                 const std::string& name,
                                                 std::string& err);
 
-// kernel_params: array of pointers to each argument value, in order
+// kernel_params: array of pointers to each argument value, in order.
+// If total_cycles is non-null and enable_cycle_counting is set on the LaunchConfig
+// built internally, the summed wavefront cycle count is written there.
 bool launch_kernel(SimFunction& fn,
                    uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
                    uint32_t block_x, uint32_t block_y, uint32_t block_z,
                    void** kernel_params,
-                   std::string& err);
+                   std::string& err,
+                   bool enable_cycle_counting = false,
+                   uint64_t* total_cycles = nullptr);
 
 } // namespace gcnsim

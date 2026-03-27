@@ -3,6 +3,7 @@
 #include "gcnsim/isa_decoder.h"
 #include "gcnsim/kernel_descriptor.h"
 #include <cstring>
+#include <cstddef>
 #include <cmath>
 #include <memory>
 
@@ -25,7 +26,8 @@ using namespace gcnsim;
 // Helper: create a zeroed WavefrontState on the heap (too large for stack)
 static std::unique_ptr<WavefrontState> make_wave() {
     auto ws = std::make_unique<WavefrontState>();
-    memset(ws.get(), 0, sizeof(WavefrontState));
+    // Zero POD fields only; std::vector members are default-constructed by make_unique
+    memset((void*)ws.get(), 0, offsetof(WavefrontState, lgkm_pending));
     ws->exec = ~0ULL;  // all 64 lanes active
     return ws;
 }

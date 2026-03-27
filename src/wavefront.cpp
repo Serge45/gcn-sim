@@ -1,6 +1,7 @@
 #include "gcnsim/wavefront.h"
 #include "gcnsim/kernel_descriptor.h"
 #include <cstring>
+#include <cstddef>
 #include <algorithm>
 #include <cstdint>
 
@@ -18,7 +19,10 @@ void init_wavefront(WavefrontState& wave,
                     uint32_t wave_in_wg, uint32_t /*waves_per_wg*/,
                     uint32_t block_x, uint32_t block_y, uint32_t block_z)
 {
-    memset(&wave, 0, sizeof(wave));
+    // Zero POD fields manually to avoid memset on a type with std::vector members
+    memset((void*)&wave, 0, offsetof(WavefrontState, lgkm_pending));
+    wave.lgkm_pending.clear();
+    wave.vm_pending.clear();
     wave.kernarg_ptr     = kernarg_ptr;
     wave.kernel_code_ptr = code_ptr;
     wave.kernel_code_size = code_size;
