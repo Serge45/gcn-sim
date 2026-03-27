@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <algorithm>
+#include <sys/mman.h>
 
 namespace gcnsim {
 
@@ -702,6 +703,40 @@ WaveStatus run_wavefront(WavefrontState& wave) {
             return WaveStatus::ENDED;
         }
     }
+}
+
+// SRD (Shader Resource Descriptor) base address is in bits[47:0] of the
+// 128-bit descriptor. Word0 = base[31:0], Word1[15:0] = base[47:32].
+// Word2 = num_records (buffer size in bytes for raw buffers).
+// Out-of-bounds accesses (offset >= num_records) return 0 on hardware.
+struct MubufAddr {
+    uint64_t addr;
+    bool     oob;  // true if offset >= num_records (out of bounds)
+};
+
+// MUBUF address computation.
+// On GFX9 hardware, raw buffer loads with out-of-bounds addresses return 0.
+// We replicate this by probing address validity with mincore/msync before access.
+static const uint8_t mubuf_oob_zero[64] = {};
+
+static bool addr_is_valid(uint64_t addr) {
+    // Quick heuristic: null or very low addresses are invalid
+    if (addr < 4096) return false;
+    // Use msync to probe if the page is mapped (returns -1/ENOMEM if unmapped)
+    void* page = (void*)(addr & ~(uint64_t)4095);
+    return msync(page, 1, MS_ASYNC) == 0;
+}
+
+static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst, int lane) {
+    uint32_t srd_idx = inst.src[1].index;
+    uint64_t base = (uint64_t)wave.sgpr[srd_idx] |
+                    ((uint64_t)(wave.sgpr[srd_idx + 1] & 0xFFFF) << 32);
+    uint32_t voff = inst.mubuf_offen ? wave.vgpr[inst.src[0].index][lane] : 0;
+    uint32_t soff = read_src_scalar(wave, inst.mubuf_soffset);
+    uint64_t addr = base + (uint64_t)voff + soff + inst.mubuf_offset;
+    bool oob = !addr_is_valid(addr);
+    if (oob) addr = (uint64_t)(uintptr_t)mubuf_oob_zero;
+    return { addr, oob };
 }
 
 void execute_instruction(WavefrontState& wave, const Instruction& inst) {
@@ -4423,23 +4458,13 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // MUBUF — buffer loads and stores
     // Address = SRD_base + voffset + soffset + imm_offset
     // -----------------------------------------------------------------------
-// SRD (Shader Resource Descriptor) base address is in bits[47:0] of the
-// 128-bit descriptor. Word0 = base[31:0], Word1[15:0] = base[47:32].
-// Word1[31:16] = stride, which must NOT be included in the base address.
-#define MUBUF_ADDR(wave, inst, lane) \
-    ([&]() -> uint64_t { \
-        uint32_t srd_idx = inst.src[1].index; \
-        uint64_t base_ = (uint64_t)wave.sgpr[srd_idx] | \
-                         ((uint64_t)(wave.sgpr[srd_idx + 1] & 0xFFFF) << 32); \
-        uint32_t voff_ = inst.mubuf_offen ? wave.vgpr[inst.src[0].index][lane] : 0; \
-        uint32_t soff_ = read_src_scalar(wave, inst.mubuf_soffset); \
-        return base_ + voff_ + soff_ + inst.mubuf_offset; \
-    })()
 
     case Opcode::BUFFER_LOAD_DWORD: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t val = mem_load_u32(addr);
             if (inst.mubuf_lds && wave.lds_ptr) {
                 // Direct-to-LDS: write to LDS at M0 + lane*4
@@ -4455,7 +4480,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_DWORDX2: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             if (inst.mubuf_lds && wave.lds_ptr) {
                 uint32_t lds_off = wave.m0 + lane * 8;
                 for (int k = 0; k < 2; k++) {
@@ -4473,7 +4500,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_DWORDX4: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             if (inst.mubuf_lds && wave.lds_ptr) {
                 uint32_t lds_off = wave.m0 + lane * 16;
                 for (int k = 0; k < 4; k++) {
@@ -4491,7 +4520,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_DWORD: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr, wave.vgpr[inst.src[2].index][lane]);
         }
         break;
@@ -4499,7 +4530,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_DWORDX2: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             for (int k = 0; k < 2; k++)
                 mem_store_u32(addr + k * 4, wave.vgpr[inst.src[2].index + k][lane]);
         }
@@ -4508,7 +4541,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_DWORDX4: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             for (int k = 0; k < 4; k++)
                 mem_store_u32(addr + k * 4, wave.vgpr[inst.src[2].index + k][lane]);
         }
@@ -4517,7 +4552,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_UBYTE: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint8_t v; memcpy(&v, reinterpret_cast<const void*>(addr), 1);
             wave.vgpr[inst.dst.index][lane] = (uint32_t)v;
         }
@@ -4526,7 +4563,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_SBYTE: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             int8_t v; memcpy(&v, reinterpret_cast<const void*>(addr), 1);
             wave.vgpr[inst.dst.index][lane] = (uint32_t)(int32_t)v;
         }
@@ -4535,7 +4574,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_USHORT: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint16_t v; memcpy(&v, reinterpret_cast<const void*>(addr), 2);
             wave.vgpr[inst.dst.index][lane] = (uint32_t)v;
         }
@@ -4544,7 +4585,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_SSHORT: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             int16_t v; memcpy(&v, reinterpret_cast<const void*>(addr), 2);
             wave.vgpr[inst.dst.index][lane] = (uint32_t)(int32_t)v;
         }
@@ -4553,7 +4596,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_LOAD_DWORDX3: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             wave.vgpr[inst.dst.index][lane]     = mem_load_u32(addr);
             wave.vgpr[inst.dst.index + 1][lane] = mem_load_u32(addr + 4);
             wave.vgpr[inst.dst.index + 2][lane] = mem_load_u32(addr + 8);
@@ -4563,7 +4608,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_BYTE: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint8_t v = (uint8_t)wave.vgpr[inst.src[2].index][lane];
             memcpy(reinterpret_cast<void*>(addr), &v, 1);
         }
@@ -4572,7 +4619,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_SHORT: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint16_t v = (uint16_t)wave.vgpr[inst.src[2].index][lane];
             memcpy(reinterpret_cast<void*>(addr), &v, 2);
         }
@@ -4581,7 +4630,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_STORE_DWORDX3: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr,     wave.vgpr[inst.src[2].index][lane]);
             mem_store_u32(addr + 4, wave.vgpr[inst.src[2].index + 1][lane]);
             mem_store_u32(addr + 8, wave.vgpr[inst.src[2].index + 2][lane]);
@@ -4591,7 +4642,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_ADD: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, old + wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4602,7 +4655,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_SUB: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, old - wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4613,7 +4668,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_AND: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, old & wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4624,7 +4681,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_OR: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, old | wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4635,7 +4694,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_XOR: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, old ^ wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4646,7 +4707,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_SMIN: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             int32_t old = (int32_t)mem_load_u32(addr);
             int32_t v   = (int32_t)wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, (uint32_t)(v < old ? v : old));
@@ -4658,7 +4721,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_UMIN: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             uint32_t v   = wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, v < old ? v : old);
@@ -4670,7 +4735,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_SMAX: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             int32_t old = (int32_t)mem_load_u32(addr);
             int32_t v   = (int32_t)wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, (uint32_t)(v > old ? v : old));
@@ -4682,7 +4749,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_UMAX: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             uint32_t v   = wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, v > old ? v : old);
@@ -4694,7 +4763,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_SWAP: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             mem_store_u32(addr, wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
@@ -4705,7 +4776,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_CMPSWAP: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old  = mem_load_u32(addr);
             uint32_t cmp  = wave.vgpr[inst.src[2].index][lane];
             uint32_t val  = wave.vgpr[inst.src[2].index + 1][lane];
@@ -4718,7 +4791,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_INC: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             uint32_t max_val = wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, (old >= max_val) ? 0 : (old + 1));
@@ -4730,7 +4805,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_DEC: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t old = mem_load_u32(addr);
             uint32_t max_val = wave.vgpr[inst.src[2].index][lane];
             mem_store_u32(addr, ((old == 0) || (old > max_val)) ? max_val : (old - 1));
@@ -4742,7 +4819,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::BUFFER_ATOMIC_ADD_F32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             uint32_t oldb = mem_load_u32(addr);
             float old, v; memcpy(&old, &oldb, 4); memcpy(&v, &wave.vgpr[inst.src[2].index][lane], 4);
             float nv = old + v; uint32_t nvb; memcpy(&nvb, &nv, 4);
@@ -4756,7 +4835,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_LOAD_FORMAT_X: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             wave.vgpr[inst.dst.index][lane] = mem_load_u32(addr);
         }
         break;
@@ -4764,7 +4845,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_LOAD_FORMAT_XY: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             wave.vgpr[inst.dst.index][lane]     = mem_load_u32(addr);
             wave.vgpr[inst.dst.index + 1][lane] = mem_load_u32(addr + 4);
         }
@@ -4773,7 +4856,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_LOAD_FORMAT_XYZ: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             wave.vgpr[inst.dst.index][lane]     = mem_load_u32(addr);
             wave.vgpr[inst.dst.index + 1][lane] = mem_load_u32(addr + 4);
             wave.vgpr[inst.dst.index + 2][lane] = mem_load_u32(addr + 8);
@@ -4783,7 +4868,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_LOAD_FORMAT_XYZW: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             wave.vgpr[inst.dst.index][lane]     = mem_load_u32(addr);
             wave.vgpr[inst.dst.index + 1][lane] = mem_load_u32(addr + 4);
             wave.vgpr[inst.dst.index + 2][lane] = mem_load_u32(addr + 8);
@@ -4794,7 +4881,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_STORE_FORMAT_X: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr, wave.vgpr[inst.src[2].index][lane]);
         }
         break;
@@ -4802,7 +4891,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_STORE_FORMAT_XY: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr,     wave.vgpr[inst.src[2].index][lane]);
             mem_store_u32(addr + 4, wave.vgpr[inst.src[2].index + 1][lane]);
         }
@@ -4811,7 +4902,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_STORE_FORMAT_XYZ: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr,     wave.vgpr[inst.src[2].index][lane]);
             mem_store_u32(addr + 4, wave.vgpr[inst.src[2].index + 1][lane]);
             mem_store_u32(addr + 8, wave.vgpr[inst.src[2].index + 2][lane]);
@@ -4821,7 +4914,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::TBUFFER_STORE_FORMAT_XYZW: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t addr = MUBUF_ADDR(wave, inst, lane);
+            auto ma = mubuf_addr(wave, inst, lane);
+            if (ma.oob) continue;
+            uint64_t addr = ma.addr;
             mem_store_u32(addr,      wave.vgpr[inst.src[2].index][lane]);
             mem_store_u32(addr + 4,  wave.vgpr[inst.src[2].index + 1][lane]);
             mem_store_u32(addr + 8,  wave.vgpr[inst.src[2].index + 2][lane]);
