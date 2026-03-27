@@ -413,19 +413,53 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst);
 // Cycle-counting helpers
 // ---------------------------------------------------------------------------
 
-// Compute the LDS bank-conflict factor k for a DS instruction.
-// gfx90a has 32 LDS banks; bank = (addr / 4) % 32.
-// k = maximum number of active lanes hitting the same bank.
-static uint32_t ds_bank_conflict_k(const WavefrontState& wave, const Instruction& inst) {
-    uint8_t bank_count[32] = {};
-    for (int lane = 0; lane < WAVE_SIZE; lane++) {
-        if (!((wave.exec >> lane) & 1)) continue;
-        uint32_t addr = wave.vgpr[inst.src[0].index][lane] + inst.ds_offset0;
-        bank_count[(addr / 4) % 32]++;
+// Dword count per lane for a DS opcode (determines transaction grouping).
+// gfx90a LDS has 32 banks; a wavefront of 64 lanes is split into
+// (dword_count * 64 / 32) transactions, each covering (32 / dword_count) lanes.
+static uint32_t ds_dword_count(Opcode op) {
+    switch (op) {
+    case Opcode::DS_READ_B64:
+    case Opcode::DS_WRITE_B64:
+    case Opcode::DS_READ2_B64:
+    case Opcode::DS_WRITE2_B64:
+    case Opcode::DS_READ2ST64_B64:
+    case Opcode::DS_WRITE2ST64_B64:
+        return 2;
+    case Opcode::DS_READ_B128:
+    case Opcode::DS_WRITE_B128:
+        return 4;
+    default:
+        return 1;
     }
-    uint8_t k = 1;
-    for (int b = 0; b < 32; b++) k = std::max(k, bank_count[b]);
-    return k;
+}
+
+// Compute total DS issue cycles with per-transaction bank-conflict detection.
+// gfx90a has 32 LDS banks; bank = (addr / 4) % 32.
+// The wavefront is split into transaction groups based on data width:
+//   b32  → 2 transactions of 32 lanes  (dwords=1, 1*64/32=2)
+//   b64  → 4 transactions of 16 lanes  (dwords=2, 2*64/32=4)
+//   b128 → 8 transactions of  8 lanes  (dwords=4, 4*64/32=8)
+// Each transaction takes 4 base cycles + 4*(k-1) for k-way bank conflicts.
+static uint64_t ds_issue_cycles(const WavefrontState& wave, const Instruction& inst) {
+    uint32_t dwords = ds_dword_count(inst.opcode);
+    uint32_t num_txn = dwords * WAVE_SIZE / 32;
+    uint32_t lanes_per_txn = WAVE_SIZE / num_txn;
+
+    uint64_t total = 0;
+    for (uint32_t t = 0; t < num_txn; t++) {
+        uint32_t lane_start = t * lanes_per_txn;
+        uint32_t lane_end   = lane_start + lanes_per_txn;
+        uint8_t bank_count[32] = {};
+        for (uint32_t lane = lane_start; lane < lane_end; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t addr = wave.vgpr[inst.src[0].index][lane] + inst.ds_offset0;
+            bank_count[(addr / 4) % 32]++;
+        }
+        uint8_t k = 1;
+        for (int b = 0; b < 32; b++) k = std::max(k, bank_count[b]);
+        total += 4 + 4 * (k - 1);
+    }
+    return total;
 }
 
 // Issue cycles: how long the wavefront is occupied issuing this instruction.
@@ -433,16 +467,16 @@ static uint32_t ds_bank_conflict_k(const WavefrontState& wave, const Instruction
 static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst) {
     constexpr uint64_t BASE = 4;
     if (inst.format == InstFormat::DS) {
-        uint32_t k = ds_bank_conflict_k(wave, inst);
-        return BASE + 4ULL * (k - 1);
+        return ds_issue_cycles(wave, inst);
     }
     return BASE;
 }
 
 // Push a completion timestamp for in-flight memory ops.
+// SMEM latency is fixed at 20 cycles; VMEM/FLAT/GLOBAL uses the configurable
+// global_mem_latency (default 300, set from LaunchConfig).
 static void push_pending(WavefrontState& wave, const Instruction& inst) {
     constexpr uint64_t SMEM_LAT = 20;
-    constexpr uint64_t MEM_LAT  = 100;
     switch (inst.format) {
     case InstFormat::SMEM:
         wave.lgkm_pending.push_back(wave.cycle_count + SMEM_LAT);
@@ -455,7 +489,7 @@ static void push_pending(WavefrontState& wave, const Instruction& inst) {
     case InstFormat::MTBUF:
     case InstFormat::FLAT_GLOBAL:
     case InstFormat::FLAT_SCRATCH:
-        wave.vm_pending.push_back(wave.cycle_count + MEM_LAT);
+        wave.vm_pending.push_back(wave.cycle_count + wave.global_mem_latency);
         break;
     default:
         break;

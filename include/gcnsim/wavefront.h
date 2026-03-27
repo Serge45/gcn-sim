@@ -49,6 +49,7 @@ struct WavefrontState {
     // Cycle counting — optional, enabled per LaunchConfig::enable_cycle_counting
     bool     count_cycles = false;
     uint64_t cycle_count  = 0;
+    uint32_t global_mem_latency = 300;   // configurable VMEM/FLAT/GLOBAL latency
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores

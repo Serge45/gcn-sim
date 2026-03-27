@@ -121,6 +121,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->scratch_per_lane = scratch_per_lane;
 
             waves[w]->count_cycles = cfg.enable_cycle_counting;
+            waves[w]->global_mem_latency = cfg.global_mem_latency;
         }
 
         // Round-robin execution with barrier synchronization.

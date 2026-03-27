@@ -10,6 +10,7 @@ struct LaunchConfig {
     const void* kernarg;                 // pointer to kernarg buffer
     size_t      kernarg_size;
     bool enable_cycle_counting = false;  // if true, wavefronts accumulate cycle_count
+    uint32_t global_mem_latency = 300;   // VMEM/FLAT/GLOBAL completion latency in cycles
 };
 
 // Run a kernel on the CPU simulator.

@@ -37,7 +37,8 @@ bool launch_kernel(SimFunction& fn,
                    void** kernel_params,
                    std::string& err,
                    bool enable_cycle_counting,
-                   uint64_t* total_cycles)
+                   uint64_t* total_cycles,
+                   uint32_t global_mem_latency)
 {
     if (!fn.kernel) {
         err = "SimFunction has null kernel";
@@ -91,6 +92,7 @@ bool launch_kernel(SimFunction& fn,
     cfg.kernarg  = kernarg_buf.data();
     cfg.kernarg_size = kernarg_buf.size();
     cfg.enable_cycle_counting = enable_cycle_counting;
+    cfg.global_mem_latency = global_mem_latency;
 
     return launch_kernel(*fn.kernel, cfg, err, total_cycles);
 }
