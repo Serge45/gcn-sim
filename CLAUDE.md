@@ -303,7 +303,9 @@ as ground truth when adding or debugging instructions.
 - **All vector instructions** must iterate `lane` in `[0, 64)` and skip when `(wave.exec >> lane) & 1 == 0`.
 - **EXEC mask changes** (`s_and_saveexec_b64`, `s_or_saveexec_b64`) must also update `wave.scc`
   based on whether the new EXEC is non-zero.
-- **`s_waitcnt`** is a no-op — simulation memory is always synchronous.
+- **`s_waitcnt`** is a no-op for functional execution (simulation memory is synchronous),
+  but when cycle counting is enabled, it models stalls by draining the LGKM/VM pending
+  queues and advancing `cycle_count`.
 - **Branch offset** (SOPP `simm16`): value is in DWORD units. Since `wave.pc` is already advanced
   past the branch instruction before `execute_instruction` runs, apply as:
   `wave.pc += (int64_t)inst.simm16 * 4;`
@@ -340,6 +342,150 @@ mem_store_f32(addr, result);
 ```
 
 Do **not** use raw pointer casts (`*(uint32_t*)addr`) — this violates strict aliasing.
+
+---
+
+## Cycle simulation
+
+The simulator has an optional per-wavefront cycle-counting mode, enabled at runtime
+via `LaunchConfig::enable_cycle_counting = true`. When disabled, zero overhead.
+
+### Enabling
+
+```cpp
+LaunchConfig cfg;
+cfg.enable_cycle_counting = true;      // turn on cycle model
+cfg.global_mem_latency = 300;          // VMEM/FLAT/GLOBAL latency (default 300)
+cfg.trace_path = "trace.json";        // Chrome Trace output (optional, nullptr = off)
+
+uint64_t total_cycles = 0;
+launch_kernel(kernel, cfg, err, &total_cycles);
+```
+
+Public API: `launch_kernel(fn, grid, block, params, err, enable_cycle_counting,
+total_cycles_ptr, global_mem_latency, trace_path)`.
+
+### Latency model (gfx90a / CDNA2)
+
+| Instruction class | Issue cycles | Completion latency | Counter |
+|---|---|---|---|
+| VALU (VOP1/2/3/3P/VOPC) | 4 | immediate | — |
+| SALU (SOP1/2/K/C/P/SOPP) | 4 | immediate | — |
+| MFMA | 4 (issue) | 8–64 (variant-dependent, on miSIMD) | — |
+| SMEM (s_load_*) | 4 | +20 cycles | LGKM |
+| DS (LDS read/write) | 4 + 4*(k-1) per transaction | immediate | LGKM |
+| MUBUF/MTBUF | 4 | +`global_mem_latency` (default 300) | VM |
+| FLAT/GLOBAL/SCRATCH | 4 | +`global_mem_latency` (default 300) | VM |
+
+### DS bank-conflict model
+
+gfx90a LDS has **32 banks**, each 4 bytes wide. A 64-lane wavefront is split
+into transactions based on data width:
+
+| DS variant | Dwords/lane | Transactions | Lanes/txn |
+|---|---|---|---|
+| `ds_*_b32` | 1 | 2 | 32 |
+| `ds_*_b64` | 2 | 4 | 16 |
+| `ds_*_b128` | 4 | 8 | 8 |
+
+Bank conflicts are checked **per transaction group** (not whole wavefront).
+Each transaction costs `4 + 4*(k-1)` cycles where k = max lanes hitting the
+same bank within that group.
+
+Source: [AMD CK LDS bank conflict docs](https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html)
+
+### s_waitcnt stall model
+
+In-flight memory ops push completion timestamps onto per-wavefront queues:
+- `lgkm_pending` — DS and SMEM operations
+- `vm_pending` — MUBUF, MTBUF, FLAT, GLOBAL, SCRATCH operations
+
+When `s_waitcnt lgkmcnt(N)` / `vmcnt(N)` executes, the queue is sorted and
+drained until `size() <= N`, advancing `cycle_count` to `max(cycle_count,
+completion_time)` for each drained entry. This models the stall.
+
+### MFMA / VALU co-execution
+
+MFMA executes on the **miSIMD** (matrix unit), separate from the SIMD used by VALU.
+They co-execute but do **not** co-issue (each takes 4 cycles to issue).
+
+After an MFMA issues, a **shadow window** of `exec_cycles - 4` opens. Non-MFMA
+instructions issued during this window consume shadow instead of advancing
+`cycle_count`. When shadow is exhausted, normal costing resumes. A second MFMA
+stalls until `mfma_busy_until`.
+
+**MFMA execution latencies** (from [AMD matrix_calculator.py](https://github.com/ROCm/amd_matrix_instruction_calculator)):
+
+| Matrix size | Exec cycles | Opcodes |
+|---|---|---|
+| 4×4 (F32/F16/I8/BF16) | 8 | `*_4x4x1f32`, `*_4x4x4f16`, `*_4x4x4i8`, `*_4x4x2bf16`, `*_4x4x4bf16_1k` |
+| 4×4 (F64) | 16 | `*_f64_4x4x4f64` |
+| 16×16 (short K) | 32 | `*_16x16x1f32`, `*_16x16x4f32`, `*_16x16x4f16`, `*_16x16x4i8`, `*_16x16x2bf16`, `*_16x16x4bf16_1k`, `*_f64_16x16x4f64` |
+| 16×16 (long K) | 16 | `*_16x16x16f16`, `*_16x16x16i8`, `*_16x16x8bf16`, `*_16x16x16bf16_1k` |
+| 32×32 (short K) | 64 | `*_32x32x1f32`, `*_32x32x2f32`, `*_32x32x4f16`, `*_32x32x4i8`, `*_32x32x2bf16`, `*_32x32x4bf16_1k` |
+| 32×32 (long K) | 32 | `*_32x32x8f16`, `*_32x32x8i8`, `*_32x32x4bf16`, `*_32x32x8bf16_1k` |
+
+### WavefrontState cycle fields
+
+```
+count_cycles            bool      — enable flag (set from LaunchConfig)
+cycle_count             uint64_t  — accumulated simulated cycles
+global_mem_latency      uint32_t  — configurable VMEM latency (default 300)
+mfma_shadow_remaining   uint64_t  — remaining shadow from in-flight MFMA
+mfma_busy_until         uint64_t  — cycle when miSIMD becomes free
+mfma_total_exec_cycles  uint64_t  — sum of MFMA exec cycles (for utilization)
+valu_total_issue_cycles uint64_t  — sum of VALU issue cycles (for utilization)
+lgkm_pending            vector    — DS/SMEM completion timestamps
+vm_pending              vector    — MUBUF/FLAT/GLOBAL completion timestamps
+trace_file              FILE*     — Chrome Trace output file (nullptr = off)
+trace_wave_id           uint32_t  — wave index within workgroup
+trace_wg_flat_id        uint32_t  — flat workgroup index for trace pid
+```
+
+All cycle fields are placed before `lgkm_pending` in the struct so the existing
+`memset(..., offsetof(WavefrontState, lgkm_pending))` in `init_wavefront()` and
+`make_wave()` zeroes them. **Do not place non-POD fields before `lgkm_pending`.**
+
+### Chrome Trace timeline output
+
+When `trace_path` is set and cycle counting is enabled, the simulator writes a
+[Chrome Trace Event Format](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview)
+JSON file. Open in [Perfetto UI](https://ui.perfetto.dev) or `chrome://tracing`.
+
+Each wavefront gets its own row (pid=workgroup, tid=wave). The row label shows
+utilization: `wave0 (VALU 21.9% MFMA 55.8%)`.
+
+**Event categories and colors:**
+
+| Category | Instructions | Color in Perfetto |
+|---|---|---|
+| MFMA | `v_mfma_*` | purple |
+| VALU | VOP1/2/3/3P/VOPC | blue |
+| SALU | SOP1/2/K/C/P | green |
+| DS | `ds_*` | orange |
+| SMEM | `s_load_*` | cyan |
+| VMEM | MUBUF/FLAT/GLOBAL/SCRATCH | red |
+| STALL | waitcnt stalls, MFMA busy stalls | gray |
+
+**Stall events** are emitted explicitly for:
+- `stall:waitcnt` — `s_waitcnt` draining pending queues (dur = cycles stalled)
+- `stall:mfma_busy` — MFMA issued while miSIMD still busy (dur = cycles waited)
+
+**Utilization metrics** (per-wavefront):
+- **MFMA utilization** = `mfma_total_exec_cycles / cycle_count` — fraction of time
+  miSIMD is doing useful work
+- **VALU utilization** = `valu_total_issue_cycles / cycle_count` — fraction of time
+  SIMD issue port is occupied by pure VALU (excludes MFMA issue cycles)
+
+### Cycle simulation implementation files
+
+All cycle-counting logic lives in these files:
+
+| File | What |
+|---|---|
+| `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `push_pending()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, trace helpers, cycle-accounting block in `run_wavefront()` |
+| `src/execution_engine.cpp` | Opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata |
+| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `trace_path` |
 
 ---
 
@@ -479,7 +625,9 @@ Common past mistakes to watch for:
 
 ## Known limitations (do not work around silently — fix or document)
 
-- **`s_waitcnt`** is a no-op; there is no memory ordering model.
+- **`s_waitcnt`** is a no-op for functional execution (all simulation memory is
+  synchronous). When cycle counting is enabled, it models stalls via the LGKM/VM
+  pending queues.
 - **Divergent loops** with mid-loop EXEC changes across iterations are not guaranteed correct
   (re-convergence stack is not implemented).
 - The instruction safety limit in `run_wavefront()` is 1,000,000 iterations; infinite-loop kernels
@@ -492,6 +640,15 @@ Common past mistakes to watch for:
 - **MFMA lane mapping**: all MFMA shapes (F32, F16, BF16, I8, F64) now use CDNA2
   cross-lane outer-product semantics. F16/BF16/I8 results are functionally correct
   but may have minor rounding differences vs. hardware due to FMA accumulation order.
+- **Cycle model is approximate**: the cycle simulation does not model L1/L2 cache
+  hit/miss (uses a fixed configurable latency), does not model instruction fetch
+  latency, and does not model multi-wavefront CU occupancy effects. The DS
+  bank-conflict model uses per-transaction grouping (confirmed by AMD docs) with
+  a fixed 4-cycle-per-transaction base cost.
+- **Tensile GEMM kernel K limit**: the hand-written assembly kernel in
+  `tools/tensile_style_gemm/` crashes for K > 512 due to 32-bit address arithmetic
+  overflow in global load offset computation. This is a kernel limitation, not a
+  simulator bug.
 
 ---
 
@@ -500,12 +657,26 @@ Common past mistakes to watch for:
 - **Re-convergence stack**: properly handle divergent loops where EXEC changes mid-loop,
   allowing accurate simulation of branchy kernels.
 - **s_sub_i32 signed semantics** (SOP2 op 3): currently aliased to `S_SUB_U32`.
-- **Memory ordering model**: `s_waitcnt` is currently a no-op; a simple counter-based
-  model would allow detection of missing barriers in test kernels.
 - **MIMG instructions**: require texture descriptor and sampler state; currently silently skipped.
 - **DPP16/DPP8** (GFX10+ only): not relevant for gfx90a but would be needed for newer targets.
 - **Multi-tile Tensile GEMM**: the single-tile (128x256x32) Tensile SGEMM passes end-to-end;
   extending to multi-tile problems would exercise inter-workgroup correctness.
+  The current kernel's 32-bit address math limits K to ≤512.
+- **Cache simulation**: the cycle model uses a fixed latency for all global memory
+  accesses. A simple L1/L2 hit/miss model (based on address set tracking) would
+  provide more realistic latency distribution without full cache line simulation.
+- **Multi-wavefront CU occupancy**: the current cycle model is per-wavefront in
+  isolation. Real hardware interleaves 4+ wavefronts on the same SIMD to hide
+  latency. Modeling CU-level scheduling would show how occupancy affects stall time.
+- **DS read2/write2 bank conflicts**: the bank-conflict model currently only checks
+  `ds_offset0` for single-address DS ops. `ds_read2_b32`/`ds_write2_b32` access two
+  addresses per lane (via both `ds_offset0` and `ds_offset1`) and need both checked.
+- **SMEM latency refinement**: SMEM currently uses a fixed 20-cycle latency. Making
+  it configurable (like `global_mem_latency`) would allow modeling scalar cache
+  miss scenarios.
+- **Cycle model unit tests**: the cycle simulation currently has no dedicated tests.
+  Adding tests for DS bank conflicts, MFMA shadow absorption, s_waitcnt stalls,
+  and utilization calculation would prevent regressions.
 
 ---
 
