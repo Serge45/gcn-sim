@@ -176,9 +176,23 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             // else: barrier_count > 0, waves are waiting — loop resumes them
         }
 
-        if (cfg.enable_cycle_counting && total_cycles) {
-            for (uint32_t w = 0; w < waves_per_wg; w++)
-                *total_cycles += waves[w]->cycle_count;
+        if (cfg.enable_cycle_counting) {
+            uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
+                               wg_y * wg_count_x + wg_x;
+            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                if (total_cycles)
+                    *total_cycles += waves[w]->cycle_count;
+                // Emit MFMA utilization as trace metadata
+                if (trace_file && waves[w]->cycle_count > 0) {
+                    double util = (double)waves[w]->mfma_total_exec_cycles /
+                                  (double)waves[w]->cycle_count * 100.0;
+                    fprintf(trace_file,
+                        ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
+                        "\"name\":\"thread_name\","
+                        "\"args\":{\"name\":\"wave%u (MFMA %.1f%%)\"}}",
+                        wg_flat, w, w, util);
+                }
+            }
         }
     }
 

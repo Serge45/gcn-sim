@@ -671,6 +671,7 @@ WaveStatus run_wavefront(WavefrontState& wave) {
                 uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
                 wave.mfma_busy_until = wave.cycle_count + shadow;
                 wave.mfma_shadow_remaining = shadow;
+                wave.mfma_total_exec_cycles += exec;
                 trace_emit(wave, "MFMA", opcode_name(inst.opcode), issue_start, exec, pre_pc);
             } else {
                 // Non-MFMA: consume MFMA shadow if available
