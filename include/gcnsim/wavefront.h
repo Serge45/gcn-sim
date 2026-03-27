@@ -50,6 +50,9 @@ struct WavefrontState {
     bool     count_cycles = false;
     uint64_t cycle_count  = 0;
     uint32_t global_mem_latency = 300;   // configurable VMEM/FLAT/GLOBAL latency
+    // MFMA co-execution: miSIMD pipeline state
+    uint64_t mfma_shadow_remaining = 0;  // shadow cycles left from in-flight MFMA
+    uint64_t mfma_busy_until = 0;        // cycle when miSIMD becomes free
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores

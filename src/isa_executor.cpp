@@ -516,6 +516,60 @@ static void handle_waitcnt_cycles(WavefrontState& wave, const Instruction& inst)
     }
 }
 
+// MFMA execution latency on miSIMD (CDNA2, from AMD matrix_calculator.py).
+// The miSIMD is separate from SIMD — MFMA and VALU co-execute but not co-issue.
+static uint32_t mfma_exec_cycles(Opcode op) {
+    switch (op) {
+    // 4×4 variants → 8 cycles
+    case Opcode::V_MFMA_F32_4X4X1F32:
+    case Opcode::V_MFMA_F32_4X4X4F16:
+    case Opcode::V_MFMA_I32_4X4X4I8:
+    case Opcode::V_MFMA_F32_4X4X2BF16:
+    case Opcode::V_MFMA_F32_4X4X4BF16_1K:
+        return 8;
+
+    // 4×4 F64 → 16 cycles
+    case Opcode::V_MFMA_F64_4X4X4F64:
+        return 16;
+
+    // 16×16 "short K" variants → 32 cycles
+    case Opcode::V_MFMA_F32_16X16X1F32:
+    case Opcode::V_MFMA_F32_16X16X4F32:
+    case Opcode::V_MFMA_F32_16X16X4F16:
+    case Opcode::V_MFMA_I32_16X16X4I8:
+    case Opcode::V_MFMA_F32_16X16X2BF16:
+    case Opcode::V_MFMA_F32_16X16X4BF16_1K:
+    case Opcode::V_MFMA_F64_16X16X4F64:
+        return 32;
+
+    // 16×16 "long K" variants → 16 cycles
+    case Opcode::V_MFMA_F32_16X16X16F16:
+    case Opcode::V_MFMA_I32_16X16X16I8:
+    case Opcode::V_MFMA_F32_16X16X8BF16:
+    case Opcode::V_MFMA_F32_16X16X16BF16_1K:
+        return 16;
+
+    // 32×32 "short K" variants → 64 cycles
+    case Opcode::V_MFMA_F32_32X32X1F32:
+    case Opcode::V_MFMA_F32_32X32X2F32:
+    case Opcode::V_MFMA_F32_32X32X4F16:
+    case Opcode::V_MFMA_I32_32X32X4I8:
+    case Opcode::V_MFMA_F32_32X32X2BF16:
+    case Opcode::V_MFMA_F32_32X32X4BF16_1K:
+        return 64;
+
+    // 32×32 "long K" variants → 32 cycles
+    case Opcode::V_MFMA_F32_32X32X8F16:
+    case Opcode::V_MFMA_I32_32X32X8I8:
+    case Opcode::V_MFMA_F32_32X32X4BF16:
+    case Opcode::V_MFMA_F32_32X32X8BF16_1K:
+        return 32;
+
+    default:
+        return 8;
+    }
+}
+
 // Run one wavefront until s_endpgm or s_barrier.
 // Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier.
 WaveStatus run_wavefront(WavefrontState& wave) {
@@ -542,8 +596,25 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         if (wave.count_cycles) {
             if (inst.opcode == Opcode::S_WAITCNT) {
                 handle_waitcnt_cycles(wave, inst);
+            } else if (inst.format == InstFormat::MFMA) {
+                // MFMA: stall if miSIMD still busy, then issue + open shadow
+                if (wave.cycle_count < wave.mfma_busy_until)
+                    wave.cycle_count = wave.mfma_busy_until;
+                constexpr uint64_t MFMA_ISSUE = 4;
+                wave.cycle_count += MFMA_ISSUE;
+                uint32_t exec = mfma_exec_cycles(inst.opcode);
+                uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
+                wave.mfma_busy_until = wave.cycle_count + shadow;
+                wave.mfma_shadow_remaining = shadow;
             } else {
-                wave.cycle_count += issue_cycles(wave, inst);
+                // Non-MFMA: consume MFMA shadow if available
+                uint64_t cost = issue_cycles(wave, inst);
+                if (wave.mfma_shadow_remaining >= cost) {
+                    wave.mfma_shadow_remaining -= cost;
+                } else {
+                    wave.cycle_count += cost - wave.mfma_shadow_remaining;
+                    wave.mfma_shadow_remaining = 0;
+                }
                 push_pending(wave, inst);
             }
         }
