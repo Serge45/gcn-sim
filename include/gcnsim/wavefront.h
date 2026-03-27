@@ -55,6 +55,7 @@ struct WavefrontState {
     uint64_t mfma_shadow_remaining = 0;  // shadow cycles left from in-flight MFMA
     uint64_t mfma_busy_until = 0;        // cycle when miSIMD becomes free
     uint64_t mfma_total_exec_cycles = 0; // accumulated MFMA execution cycles (for utilization)
+    uint64_t valu_total_issue_cycles = 0; // accumulated VALU+MFMA issue cycles (for utilization)
     // Trace output (Chrome Trace Event Format); nullptr = no tracing
     FILE*    trace_file = nullptr;
     uint32_t trace_wave_id = 0;          // wave index within workgroup

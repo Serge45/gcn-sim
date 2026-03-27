@@ -683,6 +683,14 @@ WaveStatus run_wavefront(WavefrontState& wave) {
                     wave.cycle_count += cost - wave.mfma_shadow_remaining;
                     wave.mfma_shadow_remaining = 0;
                 }
+                // Count VALU issue cycles (VOP1/2/3/3P/VOPC)
+                switch (inst.format) {
+                case InstFormat::VOP1: case InstFormat::VOP2: case InstFormat::VOPC:
+                case InstFormat::VOP3A: case InstFormat::VOP3B: case InstFormat::VOP3P:
+                    wave.valu_total_issue_cycles += cost;
+                    break;
+                default: break;
+                }
                 push_pending(wave, inst);
                 trace_emit(wave, trace_category(inst), opcode_name(inst.opcode),
                            start, cost, pre_pc);

@@ -184,13 +184,14 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     *total_cycles += waves[w]->cycle_count;
                 // Emit MFMA utilization as trace metadata
                 if (trace_file && waves[w]->cycle_count > 0) {
-                    double util = (double)waves[w]->mfma_total_exec_cycles /
-                                  (double)waves[w]->cycle_count * 100.0;
+                    double cc = (double)waves[w]->cycle_count;
+                    double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
+                    double valu_util = (double)waves[w]->valu_total_issue_cycles / cc * 100.0;
                     fprintf(trace_file,
                         ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
                         "\"name\":\"thread_name\","
-                        "\"args\":{\"name\":\"wave%u (MFMA %.1f%%)\"}}",
-                        wg_flat, w, w, util);
+                        "\"args\":{\"name\":\"wave%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                        wg_flat, w, w, valu_util, mfma_util);
                 }
             }
         }
