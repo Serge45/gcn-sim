@@ -653,11 +653,13 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         }
         if (wave.count_cycles) {
             if (inst.opcode == Opcode::S_WAITCNT) {
+                constexpr uint64_t WAITCNT_ISSUE = 4;
                 uint64_t before = wave.cycle_count;
+                wave.cycle_count += WAITCNT_ISSUE;
                 handle_waitcnt_cycles(wave, inst);
-                uint64_t stall = wave.cycle_count - before;
-                trace_stall(wave, "stall:waitcnt", before, stall, pre_pc);
-                trace_emit(wave, "SALU", "s_waitcnt", wave.cycle_count, 0, pre_pc);
+                uint64_t stall = wave.cycle_count - before - WAITCNT_ISSUE;
+                trace_emit(wave, "SALU", "s_waitcnt", before, WAITCNT_ISSUE, pre_pc);
+                trace_stall(wave, "stall:waitcnt", before + WAITCNT_ISSUE, stall, pre_pc);
             } else if (inst.format == InstFormat::MFMA) {
                 // MFMA: stall if miSIMD still busy, then issue + open shadow
                 uint64_t before = wave.cycle_count;
