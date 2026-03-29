@@ -474,18 +474,32 @@ static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst
     return BASE;
 }
 
-// Push VMEM completion using the cache model. Probes L1/L2 for each active
-// lane's address and uses the worst-case (max) latency across all lanes.
+// Push VMEM completion using the cache model with coalescing.
+// Collects unique L1 cache lines (64B) from all lanes' addresses, probes the
+// cache once per unique line, and uses the worst-case latency.
 static void push_vmem_with_cache(WavefrontState& wave, const Instruction& inst,
                                   const uint64_t* addrs, int n_addrs) {
     if (!wave.cache || n_addrs == 0) {
         wave.vm_pending.push_back(wave.cycle_count + wave.global_mem_latency);
         return;
     }
-    CacheConfig cfg;  // only need the hit cycle values (use defaults)
-    uint64_t max_lat = 0;
+    // Coalesce: collect unique L1 cache lines (64B aligned)
+    constexpr uint64_t L1_LINE_MASK = ~(uint64_t)63;
+    uint64_t lines[WAVE_SIZE];
+    int n_lines = 0;
     for (int i = 0; i < n_addrs; i++) {
-        CacheHitLevel level = wave.cache->access(addrs[i]);
+        uint64_t line = addrs[i] & L1_LINE_MASK;
+        bool dup = false;
+        for (int j = 0; j < n_lines; j++) {
+            if (lines[j] == line) { dup = true; break; }
+        }
+        if (!dup) lines[n_lines++] = line;
+    }
+    // Probe cache for each unique line, take worst-case latency
+    CacheConfig cfg;
+    uint64_t max_lat = 0;
+    for (int i = 0; i < n_lines; i++) {
+        CacheHitLevel level = wave.cache->access(lines[i]);
         uint64_t lat;
         switch (level) {
         case CacheHitLevel::L1:  lat = cfg.l1_hit_cycles; break;
