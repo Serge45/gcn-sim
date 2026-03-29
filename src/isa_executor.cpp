@@ -464,6 +464,29 @@ static uint64_t ds_issue_cycles(const WavefrontState& wave, const Instruction& i
     return total;
 }
 
+// Map an instruction format to its issue pipe and return a reference to the
+// pipe's ready timestamp in the wavefront state.
+static uint64_t& pipe_for(WavefrontState& wave, const Instruction& inst) {
+    switch (inst.format) {
+    case InstFormat::VOP1: case InstFormat::VOP2: case InstFormat::VOPC:
+    case InstFormat::VOP3A: case InstFormat::VOP3B: case InstFormat::VOP3P:
+    case InstFormat::MFMA:
+        return wave.pipe_valu_ready;
+    case InstFormat::SOP1: case InstFormat::SOP2: case InstFormat::SOPK:
+    case InstFormat::SOPC: case InstFormat::SOPP:
+        return wave.pipe_salu_ready;
+    case InstFormat::DS:
+        return wave.pipe_lds_ready;
+    case InstFormat::SMEM:
+        return wave.pipe_smem_ready;
+    case InstFormat::MUBUF: case InstFormat::MTBUF:
+    case InstFormat::FLAT_GLOBAL: case InstFormat::FLAT_SCRATCH:
+        return wave.pipe_vmem_ready;
+    default:
+        return wave.pipe_salu_ready;
+    }
+}
+
 // Issue cycles: how long the wavefront is occupied issuing this instruction.
 // SMEM/MUBUF/FLAT latency is modeled separately via the pending queues.
 static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst) {
@@ -725,21 +748,25 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         if (wave.count_cycles) {
             if (inst.opcode == Opcode::S_WAITCNT) {
                 constexpr uint64_t WAITCNT_ISSUE = 4;
-                uint64_t before = wave.cycle_count;
+                uint64_t before = std::max(wave.cycle_count, wave.pipe_salu_ready);
+                wave.cycle_count = before;
+                wave.pipe_salu_ready = before + WAITCNT_ISSUE;
                 wave.cycle_count += WAITCNT_ISSUE;
                 handle_waitcnt_cycles(wave, inst);
                 uint64_t stall = wave.cycle_count - before - WAITCNT_ISSUE;
                 trace_emit(wave, "SALU", "s_waitcnt", before, WAITCNT_ISSUE, pre_pc);
                 trace_stall(wave, "stall:waitcnt", before + WAITCNT_ISSUE, stall, pre_pc);
             } else if (inst.format == InstFormat::MFMA) {
-                // MFMA: stall if miSIMD still busy, then issue + open shadow
-                uint64_t before = wave.cycle_count;
-                if (wave.cycle_count < wave.mfma_busy_until) {
-                    wave.cycle_count = wave.mfma_busy_until;
-                    trace_stall(wave, "stall:mfma_busy", before, wave.cycle_count - before, pre_pc);
+                // MFMA: wait for VALU pipe + miSIMD, then issue + open shadow
+                uint64_t before = std::max({wave.cycle_count, wave.pipe_valu_ready, wave.mfma_busy_until});
+                uint64_t stall_dur = before - wave.cycle_count;
+                if (stall_dur > 0) {
+                    trace_stall(wave, "stall:mfma_busy", wave.cycle_count, stall_dur, pre_pc);
+                    wave.cycle_count = before;
                 }
                 constexpr uint64_t MFMA_ISSUE = 4;
                 uint64_t issue_start = wave.cycle_count;
+                wave.pipe_valu_ready = issue_start + MFMA_ISSUE;
                 wave.cycle_count += MFMA_ISSUE;
                 uint32_t exec = mfma_exec_cycles(inst.opcode);
                 uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
@@ -748,14 +775,20 @@ WaveStatus run_wavefront(WavefrontState& wave) {
                 wave.mfma_total_exec_cycles += exec;
                 trace_emit(wave, "MFMA", opcode_name(inst.opcode), issue_start, exec, pre_pc);
             } else {
-                // Non-MFMA: consume MFMA shadow if available
+                // Non-MFMA: multi-pipe scheduling + MFMA shadow
                 uint64_t cost = issue_cycles(wave, inst);
-                uint64_t start = wave.cycle_count;
-                if (wave.mfma_shadow_remaining >= cost) {
-                    wave.mfma_shadow_remaining -= cost;
-                } else {
-                    wave.cycle_count += cost - wave.mfma_shadow_remaining;
-                    wave.mfma_shadow_remaining = 0;
+                uint64_t& pipe_ready = pipe_for(wave, inst);
+                uint64_t start = std::max(wave.cycle_count, pipe_ready);
+                pipe_ready = start + cost;
+                // Consume MFMA shadow for the effective advance
+                uint64_t advance = start + cost - wave.cycle_count;
+                if (advance > 0) {
+                    if (wave.mfma_shadow_remaining >= advance) {
+                        wave.mfma_shadow_remaining -= advance;
+                    } else {
+                        wave.cycle_count += advance - wave.mfma_shadow_remaining;
+                        wave.mfma_shadow_remaining = 0;
+                    }
                 }
                 // Count VALU issue cycles (VOP1/2/3/3P/VOPC)
                 switch (inst.format) {

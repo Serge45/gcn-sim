@@ -57,6 +57,12 @@ struct WavefrontState {
     // MFMA co-execution: miSIMD pipeline state
     uint64_t mfma_shadow_remaining = 0;  // shadow cycles left from in-flight MFMA
     uint64_t mfma_busy_until = 0;        // cycle when miSIMD becomes free
+    // Multi-pipe issue: per-pipe ready timestamps (instruction starts at max(cycle, pipe_ready))
+    uint64_t pipe_salu_ready = 0;
+    uint64_t pipe_valu_ready = 0;
+    uint64_t pipe_vmem_ready = 0;
+    uint64_t pipe_lds_ready  = 0;
+    uint64_t pipe_smem_ready = 0;
     uint64_t mfma_total_exec_cycles = 0; // accumulated MFMA execution cycles (for utilization)
     uint64_t valu_total_issue_cycles = 0; // accumulated VALU+MFMA issue cycles (for utilization)
     // Cache model (shared per-workgroup for L1, global for L2); nullptr = no cache sim
