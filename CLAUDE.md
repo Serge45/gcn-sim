@@ -654,6 +654,8 @@ Common past mistakes to watch for:
 
 ## Future work
 
+### ISA / functional simulation
+
 - **Re-convergence stack**: properly handle divergent loops where EXEC changes mid-loop,
   allowing accurate simulation of branchy kernels.
 - **s_sub_i32 signed semantics** (SOP2 op 3): currently aliased to `S_SUB_U32`.
@@ -661,19 +663,50 @@ Common past mistakes to watch for:
 - **DPP16/DPP8** (GFX10+ only): not relevant for gfx90a but would be needed for newer targets.
 - **Multi-tile Tensile GEMM**: the single-tile (128x256x32) Tensile SGEMM passes end-to-end;
   extending to multi-tile problems would exercise inter-workgroup correctness.
-  The current kernel's 32-bit address math limits K to ≤512.
-- **Cache simulation**: the cycle model uses a fixed latency for all global memory
-  accesses. A simple L1/L2 hit/miss model (based on address set tracking) would
-  provide more realistic latency distribution without full cache line simulation.
-- **Multi-wavefront CU occupancy**: the current cycle model is per-wavefront in
-  isolation. Real hardware interleaves 4+ wavefronts on the same SIMD to hide
-  latency. Modeling CU-level scheduling would show how occupancy affects stall time.
 - **DS read2/write2 bank conflicts**: the bank-conflict model currently only checks
   `ds_offset0` for single-address DS ops. `ds_read2_b32`/`ds_write2_b32` access two
   addresses per lane (via both `ds_offset0` and `ds_offset1`) and need both checked.
-- **SMEM latency refinement**: SMEM currently uses a fixed 20-cycle latency. Making
-  it configurable (like `global_mem_latency`) would allow modeling scalar cache
-  miss scenarios.
+
+### Cycle model — high impact
+
+- **L1/L2 cache hit/miss simulation**: all global/buffer loads currently pay a flat
+  configurable latency. Add a simple set-associative cache model (vL1D: 16 KB, 4-way,
+  64B lines, ~100 cycle hit; L2: 8 MB, 16-way, 128B lines, ~200 cycle hit; HBM miss:
+  ~400 cycles). Track accessed cache lines; on hit, push shorter completion timestamp
+  to `vm_pending`. **Single biggest accuracy improvement** — memory-bound kernels will
+  show realistic L1/L2 hit rates. Files: new `src/cache_model.cpp` +
+  `include/gcnsim/cache_model.h`, modify `push_pending()` in `isa_executor.cpp`.
+- **VMEM coalescing**: each lane's global load is charged independently. Real hardware
+  coalesces 64 lanes' addresses into cache-line-sized requests (64B for L1). Collect all
+  64 lanes' addresses, group into unique cache lines, and charge latency per unique line.
+  A fully coalesced 256B access = 4 lines; fully scattered = 64 lines. Accurately predicts
+  bandwidth-bound vs latency-bound behavior.
+- **Multi-wavefront CU occupancy**: the cycle model runs each wavefront in isolation —
+  all stall cycles are "paid" fully. Real hardware interleaves 4-8 wavefronts per SIMD;
+  when wave 0 stalls on memory, wave 1 runs. Simulate CU-level round-robin scheduling
+  in `execution_engine.cpp`: advance each wave by one instruction, track a shared CU
+  cycle counter, interleave waves on stalls. Shows how occupancy hides latency.
+
+### Cycle model — medium impact
+
+- **Multi-pipe issue overlap**: we serialize all instruction types. Real GFX9 CUs can
+  issue SALU + VALU + VMEM + LDS in parallel from different pipes. Track per-pipe
+  availability (salu_ready, valu_ready, vmem_ready, lds_ready); each instruction only
+  blocks its own pipe.
+- **MFMA result read latency**: after MFMA completes on miSIMD, AGPR/VGPR results need
+  ~2-4 nop cycles before they're readable (visible as compiler-inserted `s_nop 3`).
+  Track `mfma_result_ready` timestamp; instructions reading MFMA destinations stall
+  until this time.
+- **DS read-to-use latency**: DS reads are modeled as completing at end of issue. Real
+  LDS reads have ~20 cycles from issue to data available. Push DS completion as
+  `cycle_count + 20` to `lgkm_pending` instead of `cycle_count + 0`. One-line change.
+
+### Cycle model — low impact
+
+- **SMEM configurable latency**: SMEM currently uses a fixed 20-cycle latency. Making
+  it configurable (like `global_mem_latency`) would allow modeling scalar cache miss.
+- **Instruction fetch latency**: model the instruction cache (sL1I). Rare misses for
+  hot loops but could matter for large kernels with poor i-cache locality.
 - **Cycle model unit tests**: the cycle simulation currently has no dedicated tests.
   Adding tests for DS bank conflicts, MFMA shadow absorption, s_waitcnt stalls,
   and utilization calculation would prevent regressions.
