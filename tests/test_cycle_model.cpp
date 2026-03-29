@@ -171,13 +171,12 @@ TEST(CycleModel, MfmaUtilizationTracking) {
 // --- s_nop delay ---
 
 TEST(CycleModel, SNopDelayMatchesImmediate) {
-    // s_nop N should cost N+1 cycles
+    // s_nop N should cost 4*(N+1) wavefront cycles
     Instruction inst = make_inst(Opcode::S_NOP, InstFormat::SOPP);
-    inst.simm16 = 3;  // s_nop 3 -> 4 cycles
-    // We verify the opcode is correctly set up
+    inst.simm16 = 3;  // s_nop 3 -> 4*(3+1) = 16 wavefront cycles
     EXPECT_EQ(inst.opcode, Opcode::S_NOP);
-    EXPECT_EQ((uint16_t)inst.simm16 + 1, 4u);
+    EXPECT_EQ(4 * ((uint16_t)inst.simm16 + 1), 16u);
 
-    inst.simm16 = 0;  // s_nop 0 -> 1 cycle
-    EXPECT_EQ((uint16_t)inst.simm16 + 1, 1u);
+    inst.simm16 = 0;  // s_nop 0 -> 4*(0+1) = 4 wavefront cycles
+    EXPECT_EQ(4 * ((uint16_t)inst.simm16 + 1), 4u);
 }
