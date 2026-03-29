@@ -135,6 +135,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
             waves[w]->count_cycles = cfg.enable_cycle_counting;
             waves[w]->global_mem_latency = cfg.global_mem_latency;
+            waves[w]->smem_latency = cfg.smem_latency;
             waves[w]->trace_file = trace_file;
             waves[w]->trace_wave_id = w;
             waves[w]->trace_wg_flat_id =

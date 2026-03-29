@@ -11,6 +11,7 @@ struct LaunchConfig {
     size_t      kernarg_size;
     bool enable_cycle_counting = false;  // if true, wavefronts accumulate cycle_count
     uint32_t global_mem_latency = 300;   // VMEM/FLAT/GLOBAL completion latency in cycles
+    uint32_t smem_latency = 20;          // SMEM (scalar load) completion latency in cycles
     const char* trace_path = nullptr;    // if non-null, write Chrome Trace to this file
 };
 

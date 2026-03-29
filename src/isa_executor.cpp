@@ -477,15 +477,16 @@ static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst
 // SMEM latency is fixed at 20 cycles; VMEM/FLAT/GLOBAL uses the configurable
 // global_mem_latency (default 300, set from LaunchConfig).
 static void push_pending(WavefrontState& wave, const Instruction& inst) {
-    constexpr uint64_t SMEM_LAT = 20;
     switch (inst.format) {
     case InstFormat::SMEM:
-        wave.lgkm_pending.push_back(wave.cycle_count + SMEM_LAT);
+        wave.lgkm_pending.push_back(wave.cycle_count + wave.smem_latency);
         break;
-    case InstFormat::DS:
-        // DS completes at end of issue (bank-conflict cycles already counted)
-        wave.lgkm_pending.push_back(wave.cycle_count);
+    case InstFormat::DS: {
+        // DS read-to-use latency: ~20 cycles from issue to data available
+        constexpr uint64_t DS_READ_LAT = 20;
+        wave.lgkm_pending.push_back(wave.cycle_count + DS_READ_LAT);
         break;
+    }
     case InstFormat::MUBUF:
     case InstFormat::MTBUF:
     case InstFormat::FLAT_GLOBAL:
