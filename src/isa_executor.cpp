@@ -494,6 +494,10 @@ static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst
     if (inst.format == InstFormat::DS) {
         return ds_issue_cycles(wave, inst);
     }
+    // s_nop N: N+1 cycles of pipeline delay (used to avoid MFMA result hazards)
+    if (inst.opcode == Opcode::S_NOP) {
+        return (uint64_t)((uint16_t)inst.simm16) + 1;
+    }
     return BASE;
 }
 
