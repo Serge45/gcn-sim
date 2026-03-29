@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <vector>
 
+namespace gcnsim { class CacheModel; }
+
 namespace gcnsim {
 
 static constexpr int WAVE_SIZE     = 64;
@@ -57,6 +59,8 @@ struct WavefrontState {
     uint64_t mfma_busy_until = 0;        // cycle when miSIMD becomes free
     uint64_t mfma_total_exec_cycles = 0; // accumulated MFMA execution cycles (for utilization)
     uint64_t valu_total_issue_cycles = 0; // accumulated VALU+MFMA issue cycles (for utilization)
+    // Cache model (shared per-workgroup for L1, global for L2); nullptr = no cache sim
+    CacheModel* cache = nullptr;
     // Trace output (Chrome Trace Event Format); nullptr = no tracing
     FILE*    trace_file = nullptr;
     uint32_t trace_wave_id = 0;          // wave index within workgroup

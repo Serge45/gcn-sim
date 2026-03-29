@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <sys/mman.h>
+#include "gcnsim/cache_model.h"
 
 namespace gcnsim {
 
@@ -473,6 +474,29 @@ static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst
     return BASE;
 }
 
+// Push VMEM completion using the cache model. Probes L1/L2 for each active
+// lane's address and uses the worst-case (max) latency across all lanes.
+static void push_vmem_with_cache(WavefrontState& wave, const Instruction& inst,
+                                  const uint64_t* addrs, int n_addrs) {
+    if (!wave.cache || n_addrs == 0) {
+        wave.vm_pending.push_back(wave.cycle_count + wave.global_mem_latency);
+        return;
+    }
+    CacheConfig cfg;  // only need the hit cycle values (use defaults)
+    uint64_t max_lat = 0;
+    for (int i = 0; i < n_addrs; i++) {
+        CacheHitLevel level = wave.cache->access(addrs[i]);
+        uint64_t lat;
+        switch (level) {
+        case CacheHitLevel::L1:  lat = cfg.l1_hit_cycles; break;
+        case CacheHitLevel::L2:  lat = cfg.l2_hit_cycles; break;
+        default:                 lat = wave.global_mem_latency; break;
+        }
+        if (lat > max_lat) max_lat = lat;
+    }
+    wave.vm_pending.push_back(wave.cycle_count + max_lat);
+}
+
 // Push a completion timestamp for in-flight memory ops.
 // SMEM latency is fixed at 20 cycles; VMEM/FLAT/GLOBAL uses the configurable
 // global_mem_latency (default 300, set from LaunchConfig).
@@ -491,7 +515,10 @@ static void push_pending(WavefrontState& wave, const Instruction& inst) {
     case InstFormat::MTBUF:
     case InstFormat::FLAT_GLOBAL:
     case InstFormat::FLAT_SCRATCH:
-        wave.vm_pending.push_back(wave.cycle_count + wave.global_mem_latency);
+        // VMEM latency pushed by push_vmem_with_cache() in cycle-accounting
+        // block when cache model is enabled. Fallback for no-cache path:
+        if (!wave.cache)
+            wave.vm_pending.push_back(wave.cycle_count + wave.global_mem_latency);
         break;
     default:
         break;
@@ -629,6 +656,35 @@ static void trace_stall(WavefrontState& wave, const char* reason,
         (unsigned long long)pc);
 }
 
+// ---------------------------------------------------------------------------
+// MUBUF address computation with OOB protection
+// ---------------------------------------------------------------------------
+
+struct MubufAddr {
+    uint64_t addr;
+    bool     oob;
+};
+
+static const uint8_t mubuf_oob_zero[64] = {};
+
+static bool addr_is_valid(uint64_t addr) {
+    if (addr < 4096) return false;
+    void* page = (void*)(addr & ~(uint64_t)4095);
+    return msync(page, 1, MS_ASYNC) == 0;
+}
+
+static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst, int lane) {
+    uint32_t srd_idx = inst.src[1].index;
+    uint64_t base = (uint64_t)wave.sgpr[srd_idx] |
+                    ((uint64_t)(wave.sgpr[srd_idx + 1] & 0xFFFF) << 32);
+    uint32_t voff = inst.mubuf_offen ? wave.vgpr[inst.src[0].index][lane] : 0;
+    uint32_t soff = read_src_scalar(wave, inst.mubuf_soffset);
+    uint64_t addr = base + (uint64_t)voff + soff + inst.mubuf_offset;
+    bool oob = !addr_is_valid(addr);
+    if (oob) addr = (uint64_t)(uintptr_t)mubuf_oob_zero;
+    return { addr, oob };
+}
+
 // Run one wavefront until s_endpgm or s_barrier.
 // Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier.
 WaveStatus run_wavefront(WavefrontState& wave) {
@@ -695,7 +751,32 @@ WaveStatus run_wavefront(WavefrontState& wave) {
                     break;
                 default: break;
                 }
-                push_pending(wave, inst);
+                // For VMEM with cache model: collect addresses, probe cache
+                bool vmem_handled = false;
+                if (wave.cache) {
+                    bool is_vmem = (inst.format == InstFormat::MUBUF ||
+                                    inst.format == InstFormat::MTBUF ||
+                                    inst.format == InstFormat::FLAT_GLOBAL ||
+                                    inst.format == InstFormat::FLAT_SCRATCH);
+                    if (is_vmem) {
+                        uint64_t addrs[WAVE_SIZE];
+                        int n = 0;
+                        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+                            if (!((wave.exec >> lane) & 1)) continue;
+                            if (inst.format == InstFormat::MUBUF ||
+                                inst.format == InstFormat::MTBUF) {
+                                auto ma = mubuf_addr(wave, inst, lane);
+                                if (!ma.oob) addrs[n++] = ma.addr;
+                            } else {
+                                addrs[n++] = flat_addr(wave, inst, lane);
+                            }
+                        }
+                        push_vmem_with_cache(wave, inst, addrs, n);
+                        vmem_handled = true;
+                    }
+                }
+                if (!vmem_handled)
+                    push_pending(wave, inst);
                 trace_emit(wave, trace_category(inst), opcode_name(inst.opcode),
                            start, cost, pre_pc);
             }
@@ -706,40 +787,6 @@ WaveStatus run_wavefront(WavefrontState& wave) {
             return WaveStatus::ENDED;
         }
     }
-}
-
-// SRD (Shader Resource Descriptor) base address is in bits[47:0] of the
-// 128-bit descriptor. Word0 = base[31:0], Word1[15:0] = base[47:32].
-// Word2 = num_records (buffer size in bytes for raw buffers).
-// Out-of-bounds accesses (offset >= num_records) return 0 on hardware.
-struct MubufAddr {
-    uint64_t addr;
-    bool     oob;  // true if offset >= num_records (out of bounds)
-};
-
-// MUBUF address computation.
-// On GFX9 hardware, raw buffer loads with out-of-bounds addresses return 0.
-// We replicate this by probing address validity with mincore/msync before access.
-static const uint8_t mubuf_oob_zero[64] = {};
-
-static bool addr_is_valid(uint64_t addr) {
-    // Quick heuristic: null or very low addresses are invalid
-    if (addr < 4096) return false;
-    // Use msync to probe if the page is mapped (returns -1/ENOMEM if unmapped)
-    void* page = (void*)(addr & ~(uint64_t)4095);
-    return msync(page, 1, MS_ASYNC) == 0;
-}
-
-static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst, int lane) {
-    uint32_t srd_idx = inst.src[1].index;
-    uint64_t base = (uint64_t)wave.sgpr[srd_idx] |
-                    ((uint64_t)(wave.sgpr[srd_idx + 1] & 0xFFFF) << 32);
-    uint32_t voff = inst.mubuf_offen ? wave.vgpr[inst.src[0].index][lane] : 0;
-    uint32_t soff = read_src_scalar(wave, inst.mubuf_soffset);
-    uint64_t addr = base + (uint64_t)voff + soff + inst.mubuf_offset;
-    bool oob = !addr_is_valid(addr);
-    if (oob) addr = (uint64_t)(uintptr_t)mubuf_oob_zero;
-    return { addr, oob };
 }
 
 void execute_instruction(WavefrontState& wave, const Instruction& inst) {

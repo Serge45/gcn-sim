@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <cstdio>
+#include "gcnsim/cache_model.h"
 
 namespace gcnsim {
 
@@ -97,6 +98,12 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     const uint8_t* kernarg = kernarg_buf.data();
 
+    // Create shared L2 cache model (L1 is per-workgroup)
+    std::unique_ptr<CacheModel> global_cache;
+    if (cfg.enable_cycle_counting) {
+        global_cache = std::make_unique<CacheModel>(CacheConfig{});
+    }
+
     // Determine LDS size from kernel descriptor
     uint32_t lds_bytes = kernel.descriptor->group_segment_fixed_size;
 
@@ -136,6 +143,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->count_cycles = cfg.enable_cycle_counting;
             waves[w]->global_mem_latency = cfg.global_mem_latency;
             waves[w]->smem_latency = cfg.smem_latency;
+            waves[w]->cache = global_cache.get();
             waves[w]->trace_file = trace_file;
             waves[w]->trace_wave_id = w;
             waves[w]->trace_wg_flat_id =

@@ -15,7 +15,8 @@ add_library(gcnsim SHARED
     src/isa_executor.cpp
     src/wavefront.cpp
     src/execution_engine.cpp
-    src/gcnsim_api.cpp)
+    src/gcnsim_api.cpp
+    src/cache_model.cpp)
 
 target_include_directories(gcnsim
     PUBLIC  include)
