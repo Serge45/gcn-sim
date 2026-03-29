@@ -46,6 +46,11 @@ add_test(NAME test_asm_gemm COMMAND test_asm_gemm
          --hsaco ${CMAKE_BINARY_DIR}/tools/asm_gemm_mfma/asm_gemm_mfma.co)
 add_dependencies(test_asm_gemm asm_gemm_mfma_co)
 
+# test_cycle_model
+add_executable(test_cycle_model test_cycle_model.cpp)
+target_link_libraries(test_cycle_model gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_cycle_model COMMAND test_cycle_model)
+
 # test_cache_model
 add_executable(test_cache_model test_cache_model.cpp)
 target_link_libraries(test_cache_model gcnsim GTest::gtest GTest::gtest_main)
