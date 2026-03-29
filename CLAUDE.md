@@ -38,7 +38,7 @@ ctest --test-dir build -V
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ```
 
-**Expected:** 86 tests pass across 9 suites.
+**Expected:** 99 tests pass across 11 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -355,7 +355,8 @@ via `LaunchConfig::enable_cycle_counting = true`. When disabled, zero overhead.
 ```cpp
 LaunchConfig cfg;
 cfg.enable_cycle_counting = true;      // turn on cycle model
-cfg.global_mem_latency = 300;          // VMEM/FLAT/GLOBAL latency (default 300)
+cfg.global_mem_latency = 300;          // HBM miss latency (default 300); L1/L2 hits use lower values
+cfg.smem_latency = 20;                // SMEM (scalar load) latency (default 20)
 cfg.trace_path = "trace.json";        // Chrome Trace output (optional, nullptr = off)
 
 uint64_t total_cycles = 0;
@@ -371,11 +372,15 @@ total_cycles_ptr, global_mem_latency, trace_path)`.
 |---|---|---|---|
 | VALU (VOP1/2/3/3P/VOPC) | 4 | immediate | — |
 | SALU (SOP1/2/K/C/P/SOPP) | 4 | immediate | — |
+| s_nop N | 4*(N+1) | immediate | — |
 | MFMA | 4 (issue) | 8–64 (variant-dependent, on miSIMD) | — |
-| SMEM (s_load_*) | 4 | +20 cycles | LGKM |
-| DS (LDS read/write) | 4 + 4*(k-1) per transaction | immediate | LGKM |
-| MUBUF/MTBUF | 4 | +`global_mem_latency` (default 300) | VM |
-| FLAT/GLOBAL/SCRATCH | 4 | +`global_mem_latency` (default 300) | VM |
+| SMEM (s_load_*) | 4 | +`smem_latency` (default 20, configurable) | LGKM |
+| DS (LDS read/write) | 4 + 4*(k-1) per transaction | +20 (read-to-use) | LGKM |
+| MUBUF/MTBUF | 4 | L1 hit: 100, L2 hit: 200, HBM miss: `global_mem_latency` | VM |
+| FLAT/GLOBAL/SCRATCH | 4 | L1 hit: 100, L2 hit: 200, HBM miss: `global_mem_latency` | VM |
+
+**s_nop N** inserts N+1 issue slots of pipeline delay (e.g., for MFMA result hazards).
+Each issue slot = 4 wavefront cycles, so `s_nop 3` = 16 cycles.
 
 ### DS bank-conflict model
 
@@ -393,6 +398,47 @@ Each transaction costs `4 + 4*(k-1)` cycles where k = max lanes hitting the
 same bank within that group.
 
 Source: [AMD CK LDS bank conflict docs](https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html)
+
+### L1/L2 cache simulation
+
+When cycle counting is enabled, VMEM instructions (MUBUF, FLAT, GLOBAL) probe a
+two-level set-associative cache model before determining completion latency:
+
+| Cache level | Size | Associativity | Line size | Hit latency |
+|---|---|---|---|---|
+| vL1D | 16 KB | 4-way | 64 B | 100 cycles |
+| L2 | 8 MB | 16-way | 128 B | 200 cycles |
+| HBM (miss) | — | — | — | `global_mem_latency` (default 300) |
+
+- LRU eviction policy at both levels
+- Cache is created once per kernel launch and shared across all wavefronts
+- Stats tracked: `l1_hits`, `l1_misses`, `l2_hits`, `l2_misses`
+- Implementation: `include/gcnsim/cache_model.h` + `src/cache_model.cpp`
+
+### VMEM address coalescing
+
+Before probing the cache, 64 lanes' addresses are coalesced into unique L1 cache
+lines (64B aligned). A fully coalesced 256B wavefront access generates only 4 cache
+line probes instead of 64. The worst-case latency across all unique lines determines
+the VMEM completion timestamp. This accurately models bandwidth-bound vs
+latency-bound access patterns.
+
+### Multi-pipe issue overlap
+
+Real GFX9 CUs have separate issue pipes that can operate in parallel. The cycle
+model tracks per-pipe ready timestamps:
+
+| Pipe | Instruction types |
+|---|---|
+| SALU | SOP1/2/K/C/P, s_waitcnt, s_nop |
+| VALU | VOP1/2/3/3P/VOPC, MFMA |
+| VMEM | MUBUF/MTBUF/FLAT/GLOBAL/SCRATCH |
+| LDS | DS |
+| SMEM | s_load/s_buffer_load |
+
+Each instruction starts at `max(cycle_count, pipe_ready)` and blocks only its own
+pipe for `issue_cycles`. Other pipes can issue in the same cycle window. For example,
+an SALU instruction issued while the VALU pipe is busy does not stall.
 
 ### s_waitcnt stall model
 
@@ -430,16 +476,23 @@ stalls until `mfma_busy_until`.
 ```
 count_cycles            bool      — enable flag (set from LaunchConfig)
 cycle_count             uint64_t  — accumulated simulated cycles
-global_mem_latency      uint32_t  — configurable VMEM latency (default 300)
+global_mem_latency      uint32_t  — configurable HBM miss latency (default 300)
+smem_latency            uint32_t  — configurable SMEM latency (default 20)
 mfma_shadow_remaining   uint64_t  — remaining shadow from in-flight MFMA
 mfma_busy_until         uint64_t  — cycle when miSIMD becomes free
 mfma_total_exec_cycles  uint64_t  — sum of MFMA exec cycles (for utilization)
 valu_total_issue_cycles uint64_t  — sum of VALU issue cycles (for utilization)
-lgkm_pending            vector    — DS/SMEM completion timestamps
-vm_pending              vector    — MUBUF/FLAT/GLOBAL completion timestamps
+pipe_salu_ready         uint64_t  — SALU pipe ready timestamp
+pipe_valu_ready         uint64_t  — VALU pipe ready timestamp
+pipe_vmem_ready         uint64_t  — VMEM pipe ready timestamp
+pipe_lds_ready          uint64_t  — LDS pipe ready timestamp
+pipe_smem_ready         uint64_t  — SMEM pipe ready timestamp
+cache                   CacheModel* — L1/L2 cache model (nullptr = flat latency)
 trace_file              FILE*     — Chrome Trace output file (nullptr = off)
 trace_wave_id           uint32_t  — wave index within workgroup
 trace_wg_flat_id        uint32_t  — flat workgroup index for trace pid
+lgkm_pending            vector    — DS/SMEM completion timestamps
+vm_pending              vector    — MUBUF/FLAT/GLOBAL completion timestamps
 ```
 
 All cycle fields are placed before `lgkm_pending` in the struct so the existing
@@ -483,9 +536,10 @@ All cycle-counting logic lives in these files:
 
 | File | What |
 |---|---|
-| `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `push_pending()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, trace helpers, cycle-accounting block in `run_wavefront()` |
-| `src/execution_engine.cpp` | Opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata |
-| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `trace_path` |
+| `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `pipe_for()`, `push_pending()`, `push_vmem_with_cache()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, `mubuf_addr()`, trace helpers, cycle-accounting block in `run_wavefront()` |
+| `src/cache_model.cpp` | `CacheSet`, `CacheLevel`, `CacheModel` — set-associative L1/L2 cache with LRU eviction |
+| `src/execution_engine.cpp` | Creates `CacheModel`, opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata |
+| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `smem_latency`, `trace_path` |
 
 ---
 
@@ -554,6 +608,8 @@ Key assembly constraints (GFX9 constant bus rule):
 | `test_mfma_kernels` | 4 | Multi-shape MFMA integration (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
 | `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM integration |
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
+| `test_cycle_model` | 8 | MFMA shadow absorption, back-to-back MFMA stalls, s_waitcnt stalls, DS bank conflict setup, VALU/MFMA utilization tracking, s_nop delay |
+| `test_cache_model` | 5 | L1 hit on reuse, same-line hit, L2 hit after L1 eviction, sequential reuse, stats accumulation |
 
 ### Writing new tests
 
@@ -640,15 +696,14 @@ Common past mistakes to watch for:
 - **MFMA lane mapping**: all MFMA shapes (F32, F16, BF16, I8, F64) now use CDNA2
   cross-lane outer-product semantics. F16/BF16/I8 results are functionally correct
   but may have minor rounding differences vs. hardware due to FMA accumulation order.
-- **Cycle model is approximate**: the cycle simulation does not model L1/L2 cache
-  hit/miss (uses a fixed configurable latency), does not model instruction fetch
-  latency, and does not model multi-wavefront CU occupancy effects. The DS
-  bank-conflict model uses per-transaction grouping (confirmed by AMD docs) with
-  a fixed 4-cycle-per-transaction base cost.
-- **Tensile GEMM kernel K limit**: the hand-written assembly kernel in
-  `tools/tensile_style_gemm/` crashes for K > 512 due to 32-bit address arithmetic
-  overflow in global load offset computation. This is a kernel limitation, not a
-  simulator bug.
+- **Cycle model is approximate**: the cycle simulation models L1/L2 cache hit/miss
+  with set-associative caches and VMEM coalescing, but does not model instruction
+  fetch latency or multi-wavefront CU occupancy effects. The DS bank-conflict model
+  uses per-transaction grouping (confirmed by AMD docs) with a fixed
+  4-cycle-per-transaction base cost.
+- **MUBUF OOB protection**: out-of-bounds MUBUF accesses (e.g., kernel prefetch past
+  array end) are detected via `msync()` probing and return 0, matching hardware
+  behavior. This replaces the previous segfault on large-K Tensile GEMM kernels.
 
 ---
 
@@ -667,49 +722,15 @@ Common past mistakes to watch for:
   `ds_offset0` for single-address DS ops. `ds_read2_b32`/`ds_write2_b32` access two
   addresses per lane (via both `ds_offset0` and `ds_offset1`) and need both checked.
 
-### Cycle model — high impact
+### Cycle model — remaining improvements
 
-- **L1/L2 cache hit/miss simulation**: all global/buffer loads currently pay a flat
-  configurable latency. Add a simple set-associative cache model (vL1D: 16 KB, 4-way,
-  64B lines, ~100 cycle hit; L2: 8 MB, 16-way, 128B lines, ~200 cycle hit; HBM miss:
-  ~400 cycles). Track accessed cache lines; on hit, push shorter completion timestamp
-  to `vm_pending`. **Single biggest accuracy improvement** — memory-bound kernels will
-  show realistic L1/L2 hit rates. Files: new `src/cache_model.cpp` +
-  `include/gcnsim/cache_model.h`, modify `push_pending()` in `isa_executor.cpp`.
-- **VMEM coalescing**: each lane's global load is charged independently. Real hardware
-  coalesces 64 lanes' addresses into cache-line-sized requests (64B for L1). Collect all
-  64 lanes' addresses, group into unique cache lines, and charge latency per unique line.
-  A fully coalesced 256B access = 4 lines; fully scattered = 64 lines. Accurately predicts
-  bandwidth-bound vs latency-bound behavior.
 - **Multi-wavefront CU occupancy**: the cycle model runs each wavefront in isolation —
   all stall cycles are "paid" fully. Real hardware interleaves 4-8 wavefronts per SIMD;
   when wave 0 stalls on memory, wave 1 runs. Simulate CU-level round-robin scheduling
   in `execution_engine.cpp`: advance each wave by one instruction, track a shared CU
   cycle counter, interleave waves on stalls. Shows how occupancy hides latency.
-
-### Cycle model — medium impact
-
-- **Multi-pipe issue overlap**: we serialize all instruction types. Real GFX9 CUs can
-  issue SALU + VALU + VMEM + LDS in parallel from different pipes. Track per-pipe
-  availability (salu_ready, valu_ready, vmem_ready, lds_ready); each instruction only
-  blocks its own pipe.
-- **MFMA result read latency**: after MFMA completes on miSIMD, AGPR/VGPR results need
-  ~2-4 nop cycles before they're readable (visible as compiler-inserted `s_nop 3`).
-  Track `mfma_result_ready` timestamp; instructions reading MFMA destinations stall
-  until this time.
-- **DS read-to-use latency**: DS reads are modeled as completing at end of issue. Real
-  LDS reads have ~20 cycles from issue to data available. Push DS completion as
-  `cycle_count + 20` to `lgkm_pending` instead of `cycle_count + 0`. One-line change.
-
-### Cycle model — low impact
-
-- **SMEM configurable latency**: SMEM currently uses a fixed 20-cycle latency. Making
-  it configurable (like `global_mem_latency`) would allow modeling scalar cache miss.
 - **Instruction fetch latency**: model the instruction cache (sL1I). Rare misses for
   hot loops but could matter for large kernels with poor i-cache locality.
-- **Cycle model unit tests**: the cycle simulation currently has no dedicated tests.
-  Adding tests for DS bank conflicts, MFMA shadow absorption, s_waitcnt stalls,
-  and utilization calculation would prevent regressions.
 
 ---
 
