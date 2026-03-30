@@ -38,7 +38,7 @@ ctest --test-dir build -V
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ```
 
-**Expected:** 99 tests pass across 11 suites.
+**Expected:** 104 tests pass across 11 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -471,6 +471,36 @@ stalls until `mfma_busy_until`.
 | 32×32 (short K) | 64 | `*_32x32x1f32`, `*_32x32x2f32`, `*_32x32x4f16`, `*_32x32x4i8`, `*_32x32x2bf16`, `*_32x32x4bf16_1k` |
 | 32×32 (long K) | 32 | `*_32x32x8f16`, `*_32x32x8i8`, `*_32x32x4bf16`, `*_32x32x8bf16_1k` |
 
+### CU-level wavefront interleaving (per-SIMD model)
+
+gfx90a has **4 SIMDs per CU**, each 16-wide. A 64-lane wavefront occupies one SIMD
+for 4 cycles per instruction (16 lanes × 4 passes). Waves are assigned to SIMDs
+round-robin (wave `w` → SIMD `w % 4`). Interleaving only occurs **within a SIMD**
+when it has 2+ waves assigned:
+
+- **4 waves on 4 SIMDs** (1 per SIMD): no interleaving, each SIMD runs its wave
+  independently. CU wall-clock = max(individual wave times).
+- **8 waves on 4 SIMDs** (2 per SIMD): within each SIMD, when wave A stalls,
+  the SIMD switches to wave B. Stalls are hidden by occupancy.
+
+Enabled via `LaunchConfig::enable_cu_interleaving = true` (requires `enable_cycle_counting`).
+
+**Scheduling model:**
+- Waves assigned round-robin to 4 SIMDs: wave `w` → SIMD `w % 4`
+- Each SIMD has its own clock (`simd_cycle[s]`) and runs independently
+- Lockstep outer loop: each iteration tries one issue per SIMD (parallel issue)
+- Within a SIMD: round-robin across assigned waves, 4 cycles per issue slot
+- Stalled waves (cycle_count > simd_cycle) are skipped
+- When no wave on a SIMD is ready, that SIMD fast-forwards to earliest ready wave
+- Barrier sync is cross-SIMD: all active waves must hit `s_barrier` before any resume
+- CU wall-clock = max(simd_cycle[0..3])
+
+**`step_wavefront()`**: single-instruction executor extracted from `run_wavefront()`.
+Returns `WaveStatus::RUNNING` (instruction done), `BARRIER_HIT`, or `ENDED`.
+Used by the per-SIMD scheduler; `run_wavefront()` is kept for the non-interleaved path.
+
+**total_cycles**: reports CU wall-clock time = max across all 4 SIMDs.
+
 ### WavefrontState cycle fields
 
 ```
@@ -491,6 +521,7 @@ cache                   CacheModel* — L1/L2 cache model (nullptr = flat latenc
 trace_file              FILE*     — Chrome Trace output file (nullptr = off)
 trace_wave_id           uint32_t  — wave index within workgroup
 trace_wg_flat_id        uint32_t  — flat workgroup index for trace pid
+insn_count              uint64_t  — instructions executed (safety limit for step mode)
 lgkm_pending            vector    — DS/SMEM completion timestamps
 vm_pending              vector    — MUBUF/FLAT/GLOBAL completion timestamps
 ```
@@ -536,10 +567,10 @@ All cycle-counting logic lives in these files:
 
 | File | What |
 |---|---|
-| `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `pipe_for()`, `push_pending()`, `push_vmem_with_cache()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, `mubuf_addr()`, trace helpers, cycle-accounting block in `run_wavefront()` |
+| `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `pipe_for()`, `push_pending()`, `push_vmem_with_cache()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, `mubuf_addr()`, trace helpers, cycle-accounting block in `run_wavefront()`, `step_wavefront()` for CU interleaving |
 | `src/cache_model.cpp` | `CacheSet`, `CacheLevel`, `CacheModel` — set-associative L1/L2 cache with LRU eviction |
-| `src/execution_engine.cpp` | Creates `CacheModel`, opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata |
-| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `smem_latency`, `trace_path` |
+| `src/execution_engine.cpp` | Creates `CacheModel`, opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata, CU-interleaved scheduler loop |
+| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `smem_latency`, `trace_path`, `enable_cu_interleaving` |
 
 ---
 
@@ -608,7 +639,7 @@ Key assembly constraints (GFX9 constant bus rule):
 | `test_mfma_kernels` | 4 | Multi-shape MFMA integration (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
 | `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM integration |
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
-| `test_cycle_model` | 8 | MFMA shadow absorption, back-to-back MFMA stalls, s_waitcnt stalls, DS bank conflict setup, VALU/MFMA utilization tracking, s_nop delay |
+| `test_cycle_model` | 13 | MFMA shadow absorption, back-to-back MFMA stalls, s_waitcnt stalls, DS bank conflict setup, VALU/MFMA utilization tracking, s_nop delay, step_wavefront basic/compat, same-SIMD interleaving, no-interleave-1-per-SIMD, barrier |
 | `test_cache_model` | 5 | L1 hit on reuse, same-line hit, L2 hit after L1 eviction, sequential reuse, stats accumulation |
 
 ### Writing new tests
@@ -724,11 +755,9 @@ Common past mistakes to watch for:
 
 ### Cycle model — remaining improvements
 
-- **Multi-wavefront CU occupancy**: the cycle model runs each wavefront in isolation —
-  all stall cycles are "paid" fully. Real hardware interleaves 4-8 wavefronts per SIMD;
-  when wave 0 stalls on memory, wave 1 runs. Simulate CU-level round-robin scheduling
-  in `execution_engine.cpp`: advance each wave by one instruction, track a shared CU
-  cycle counter, interleave waves on stalls. Shows how occupancy hides latency.
+- **Cross-workgroup CU sharing**: currently interleaving is within a single workgroup.
+  Real hardware runs multiple workgroups on the same CU. Modeling this would require
+  managing multiple workgroups' LDS, scratch, and barriers simultaneously.
 - **Instruction fetch latency**: model the instruction cache (sL1I). Rare misses for
   hot loops but could matter for large kernels with poor i-cache locality.
 

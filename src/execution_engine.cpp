@@ -22,6 +22,7 @@ void init_wavefront(WavefrontState& wave,
                     uint32_t block_x, uint32_t block_y, uint32_t block_z);
 
 WaveStatus run_wavefront(WavefrontState& wave);
+WaveStatus step_wavefront(WavefrontState& wave);
 
 bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
                    uint64_t* total_cycles) {
@@ -150,57 +151,160 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 wg_z * wg_count_y * wg_count_x + wg_y * wg_count_x + wg_x;
         }
 
-        // Round-robin execution with barrier synchronization.
-        // Run each wavefront until it hits s_barrier or s_endpgm.
-        // When all active wavefronts have hit a barrier, resume them all.
-        bool any_active = true;
-        while (any_active) {
-            uint32_t barrier_count = 0;
-            uint32_t active_count  = 0;
+        if (cfg.enable_cu_interleaving && cfg.enable_cycle_counting) {
+            // Per-SIMD interleaved execution.
+            // gfx90a: 4 SIMDs per CU, each 16-wide. A 64-lane wavefront takes
+            // 4 cycles per instruction (16 lanes × 4 passes). Waves are assigned
+            // to SIMDs round-robin. Interleaving only occurs within a SIMD when
+            // it has 2+ waves; with 1 wave per SIMD there is no interleaving.
+            // All 4 SIMDs run in parallel (lockstep outer loop).
+            constexpr uint32_t NUM_SIMDS = 4;
 
-            for (uint32_t w = 0; w < waves_per_wg; w++) {
-                if (ended[w]) continue;
-                active_count++;
+            // Assign waves to SIMDs round-robin: wave w → SIMD (w % 4)
+            std::vector<std::vector<uint32_t>> simd_waves(NUM_SIMDS);
+            for (uint32_t w = 0; w < waves_per_wg; w++)
+                simd_waves[w % NUM_SIMDS].push_back(w);
 
-                WaveStatus status = run_wavefront(*waves[w]);
-                if (status == WaveStatus::ENDED) {
-                    ended[w] = true;
-                } else {
-                    barrier_count++;
-                }
-            }
+            uint64_t simd_cycle[NUM_SIMDS] = {};
+            uint32_t next_on_simd[NUM_SIMDS] = {};
+            std::vector<bool> at_barrier(waves_per_wg, false);
 
-            // If all active waves hit barrier, they all proceed past it
-            // If some ended and others hit barrier, the barrier is satisfied
-            // (remaining waves continue)
-            if (active_count == 0) {
-                any_active = false;
-            } else if (barrier_count == 0) {
-                // All active waves ended this round — check if any remain
-                any_active = false;
+            for (;;) {
+                // Check if any wave is still active
+                uint32_t active = 0;
+                bool all_at_barrier = true;
                 for (uint32_t w = 0; w < waves_per_wg; w++) {
-                    if (!ended[w]) { any_active = true; break; }
+                    if (ended[w]) continue;
+                    active++;
+                    if (!at_barrier[w]) all_at_barrier = false;
+                }
+                if (active == 0) break;
+
+                // Release barriers when all active waves have reached one
+                if (all_at_barrier) {
+                    for (uint32_t w = 0; w < waves_per_wg; w++)
+                        at_barrier[w] = false;
+                    continue;
+                }
+
+                // Lockstep: try to issue one instruction per SIMD
+                bool any_issued = false;
+                for (uint32_t s = 0; s < NUM_SIMDS; s++) {
+                    auto& sw = simd_waves[s];
+                    if (sw.empty()) continue;
+                    uint32_t n = (uint32_t)sw.size();
+
+                    // Scan from next_on_simd[s] for a ready wave on this SIMD
+                    bool issued = false;
+                    for (uint32_t i = 0; i < n; i++) {
+                        uint32_t idx = (next_on_simd[s] + i) % n;
+                        uint32_t w = sw[idx];
+                        if (ended[w] || at_barrier[w]) continue;
+                        if (waves[w]->cycle_count > simd_cycle[s]) continue;
+
+                        waves[w]->cycle_count = std::max(waves[w]->cycle_count, simd_cycle[s]);
+                        WaveStatus status = step_wavefront(*waves[w]);
+                        simd_cycle[s] += 4;
+                        next_on_simd[s] = (idx + 1) % n;
+
+                        if (status == WaveStatus::ENDED)
+                            ended[w] = true;
+                        else if (status == WaveStatus::BARRIER_HIT)
+                            at_barrier[w] = true;
+
+                        issued = true;
+                        any_issued = true;
+                        break;
+                    }
+
+                    if (!issued) {
+                        // Fast-forward this SIMD to its earliest ready wave
+                        uint64_t min_ready = UINT64_MAX;
+                        for (uint32_t idx = 0; idx < n; idx++) {
+                            uint32_t w = sw[idx];
+                            if (ended[w] || at_barrier[w]) continue;
+                            min_ready = std::min(min_ready, waves[w]->cycle_count);
+                        }
+                        if (min_ready != UINT64_MAX && min_ready > simd_cycle[s])
+                            simd_cycle[s] = min_ready;
+                    }
+                }
+
+                if (!any_issued) {
+                    // Check if all remaining waves are at barrier or ended
+                    bool all_done = true;
+                    for (uint32_t w = 0; w < waves_per_wg; w++) {
+                        if (!ended[w] && !at_barrier[w]) { all_done = false; break; }
+                    }
+                    if (all_done && !all_at_barrier) break;
                 }
             }
-            // else: barrier_count > 0, waves are waiting — loop resumes them
-        }
 
-        if (cfg.enable_cycle_counting) {
-            uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
-                               wg_y * wg_count_x + wg_x;
-            for (uint32_t w = 0; w < waves_per_wg; w++) {
-                if (total_cycles)
-                    *total_cycles += waves[w]->cycle_count;
-                // Emit MFMA utilization as trace metadata
-                if (trace_file && waves[w]->cycle_count > 0) {
-                    double cc = (double)waves[w]->cycle_count;
-                    double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
-                    double valu_util = (double)waves[w]->valu_total_issue_cycles / cc * 100.0;
-                    fprintf(trace_file,
-                        ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
-                        "\"name\":\"thread_name\","
-                        "\"args\":{\"name\":\"wave%u (VALU %.1f%% MFMA %.1f%%)\"}}",
-                        wg_flat, w, w, valu_util, mfma_util);
+            // CU wall-clock = max across all SIMDs
+            uint64_t cu_wall = *std::max_element(simd_cycle, simd_cycle + NUM_SIMDS);
+            if (total_cycles)
+                *total_cycles += cu_wall;
+            if (trace_file) {
+                uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
+                                   wg_y * wg_count_x + wg_x;
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    if (waves[w]->cycle_count > 0) {
+                        double cc = (double)waves[w]->cycle_count;
+                        double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
+                        double valu_util = (double)waves[w]->valu_total_issue_cycles / cc * 100.0;
+                        fprintf(trace_file,
+                            ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
+                            "\"name\":\"thread_name\","
+                            "\"args\":{\"name\":\"wave%u/SIMD%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                            wg_flat, w, w, w % NUM_SIMDS, valu_util, mfma_util);
+                    }
+                }
+            }
+        } else {
+            // Non-interleaved: run each wavefront to completion/barrier, then cycle.
+            bool any_active = true;
+            while (any_active) {
+                uint32_t barrier_count = 0;
+                uint32_t active_count  = 0;
+
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    if (ended[w]) continue;
+                    active_count++;
+
+                    WaveStatus status = run_wavefront(*waves[w]);
+                    if (status == WaveStatus::ENDED) {
+                        ended[w] = true;
+                    } else {
+                        barrier_count++;
+                    }
+                }
+
+                if (active_count == 0) {
+                    any_active = false;
+                } else if (barrier_count == 0) {
+                    any_active = false;
+                    for (uint32_t w = 0; w < waves_per_wg; w++) {
+                        if (!ended[w]) { any_active = true; break; }
+                    }
+                }
+            }
+
+            if (cfg.enable_cycle_counting) {
+                uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
+                                   wg_y * wg_count_x + wg_x;
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    if (total_cycles)
+                        *total_cycles += waves[w]->cycle_count;
+                    if (trace_file && waves[w]->cycle_count > 0) {
+                        double cc = (double)waves[w]->cycle_count;
+                        double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
+                        double valu_util = (double)waves[w]->valu_total_issue_cycles / cc * 100.0;
+                        fprintf(trace_file,
+                            ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
+                            "\"name\":\"thread_name\","
+                            "\"args\":{\"name\":\"wave%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                            wg_flat, w, w, valu_util, mfma_util);
+                    }
                 }
             }
         }

@@ -34,6 +34,7 @@ bool launch_kernel(SimFunction& fn,
                    bool enable_cycle_counting = false,
                    uint64_t* total_cycles = nullptr,
                    uint32_t global_mem_latency = 300,
-                   const char* trace_path = nullptr);
+                   const char* trace_path = nullptr,
+                   bool enable_cu_interleaving = false);
 
 } // namespace gcnsim

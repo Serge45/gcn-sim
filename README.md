@@ -431,7 +431,7 @@ ctest --test-dir build -V
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ```
 
-Expected output: **99 tests pass across 11 suites**.
+Expected output: **104 tests pass across 11 suites**.
 
 | Test suite | Count | What it covers |
 |---|---|---|
@@ -444,7 +444,7 @@ Expected output: **99 tests pass across 11 suites**.
 | `test_mfma_kernels` | 4 | Multi-shape MFMA (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
 | `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM |
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
-| `test_cycle_model` | 8 | MFMA shadow, s_waitcnt stalls, bank conflicts, utilization |
+| `test_cycle_model` | 13 | MFMA shadow, s_waitcnt stalls, bank conflicts, utilization, per-SIMD interleaving |
 | `test_cache_model` | 5 | L1/L2 cache hit/miss, eviction, stats |
 
 ---

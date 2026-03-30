@@ -17,7 +17,8 @@ static constexpr int VCC_HI_IDX    = 107;   // sgpr[107] = VCC_HI
 
 enum class WaveStatus {
     ENDED,       // s_endpgm or out-of-bounds
-    BARRIER_HIT  // s_barrier — wavefront paused until all waves sync
+    BARRIER_HIT, // s_barrier — wavefront paused until all waves sync
+    RUNNING      // one instruction executed (used by step_wavefront for CU interleaving)
 };
 
 struct WavefrontState {
@@ -71,6 +72,8 @@ struct WavefrontState {
     FILE*    trace_file = nullptr;
     uint32_t trace_wave_id = 0;          // wave index within workgroup
     uint32_t trace_wg_flat_id = 0;       // flat workgroup index
+    // Step-mode instruction counter (safety limit for CU interleaving)
+    uint64_t insn_count = 0;
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores
