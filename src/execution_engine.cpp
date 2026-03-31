@@ -151,16 +151,14 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 wg_z * wg_count_y * wg_count_x + wg_y * wg_count_x + wg_x;
         }
 
-        if (cfg.enable_cu_interleaving && cfg.enable_cycle_counting) {
-            // Per-SIMD interleaved execution.
-            // gfx90a: 4 SIMDs per CU, each 16-wide. A 64-lane wavefront takes
-            // 4 cycles per instruction (16 lanes × 4 passes). Waves are assigned
-            // to SIMDs round-robin. Interleaving only occurs within a SIMD when
-            // it has 2+ waves; with 1 wave per SIMD there is no interleaving.
-            // All 4 SIMDs run in parallel (lockstep outer loop).
-            constexpr uint32_t NUM_SIMDS = 4;
+        // Per-SIMD CU model: gfx90a has 4 SIMDs per CU, each 16-wide.
+        // Waves assigned round-robin (wave w → SIMD w%4). Each SIMD runs
+        // independently. Interleaving occurs within a SIMD with 2+ waves.
+        constexpr uint32_t NUM_SIMDS = 4;
+        bool need_interleave = cfg.enable_cycle_counting && waves_per_wg > NUM_SIMDS;
 
-            // Assign waves to SIMDs round-robin: wave w → SIMD (w % 4)
+        if (need_interleave) {
+            // >4 waves: per-SIMD lockstep scheduling with step_wavefront()
             std::vector<std::vector<uint32_t>> simd_waves(NUM_SIMDS);
             for (uint32_t w = 0; w < waves_per_wg; w++)
                 simd_waves[w % NUM_SIMDS].push_back(w);
@@ -170,7 +168,6 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             std::vector<bool> at_barrier(waves_per_wg, false);
 
             for (;;) {
-                // Check if any wave is still active
                 uint32_t active = 0;
                 bool all_at_barrier = true;
                 for (uint32_t w = 0; w < waves_per_wg; w++) {
@@ -180,21 +177,18 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 }
                 if (active == 0) break;
 
-                // Release barriers when all active waves have reached one
                 if (all_at_barrier) {
                     for (uint32_t w = 0; w < waves_per_wg; w++)
                         at_barrier[w] = false;
                     continue;
                 }
 
-                // Lockstep: try to issue one instruction per SIMD
                 bool any_issued = false;
                 for (uint32_t s = 0; s < NUM_SIMDS; s++) {
                     auto& sw = simd_waves[s];
                     if (sw.empty()) continue;
                     uint32_t n = (uint32_t)sw.size();
 
-                    // Scan from next_on_simd[s] for a ready wave on this SIMD
                     bool issued = false;
                     for (uint32_t i = 0; i < n; i++) {
                         uint32_t idx = (next_on_simd[s] + i) % n;
@@ -218,7 +212,6 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     }
 
                     if (!issued) {
-                        // Fast-forward this SIMD to its earliest ready wave
                         uint64_t min_ready = UINT64_MAX;
                         for (uint32_t idx = 0; idx < n; idx++) {
                             uint32_t w = sw[idx];
@@ -231,7 +224,6 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 }
 
                 if (!any_issued) {
-                    // Check if all remaining waves are at barrier or ended
                     bool all_done = true;
                     for (uint32_t w = 0; w < waves_per_wg; w++) {
                         if (!ended[w] && !at_barrier[w]) { all_done = false; break; }
@@ -240,7 +232,6 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 }
             }
 
-            // CU wall-clock = max across all SIMDs
             uint64_t cu_wall = *std::max_element(simd_cycle, simd_cycle + NUM_SIMDS);
             if (total_cycles)
                 *total_cycles += cu_wall;
@@ -261,7 +252,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 }
             }
         } else {
-            // Non-interleaved: run each wavefront to completion/barrier, then cycle.
+            // ≤4 waves (1 per SIMD): run each wave with run_wavefront() (fast path).
+            // SIMDs run in parallel; CU wall-clock = max(wave cycle_counts).
             bool any_active = true;
             while (any_active) {
                 uint32_t barrier_count = 0;
@@ -290,11 +282,12 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             }
 
             if (cfg.enable_cycle_counting) {
+                // CU wall-clock = max across all waves (each on its own SIMD)
+                uint64_t max_cc = 0;
                 uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
                                    wg_y * wg_count_x + wg_x;
                 for (uint32_t w = 0; w < waves_per_wg; w++) {
-                    if (total_cycles)
-                        *total_cycles += waves[w]->cycle_count;
+                    max_cc = std::max(max_cc, waves[w]->cycle_count);
                     if (trace_file && waves[w]->cycle_count > 0) {
                         double cc = (double)waves[w]->cycle_count;
                         double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
@@ -302,10 +295,12 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                         fprintf(trace_file,
                             ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
                             "\"name\":\"thread_name\","
-                            "\"args\":{\"name\":\"wave%u (VALU %.1f%% MFMA %.1f%%)\"}}",
-                            wg_flat, w, w, valu_util, mfma_util);
+                            "\"args\":{\"name\":\"wave%u/SIMD%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                            wg_flat, w, w, w % NUM_SIMDS, valu_util, mfma_util);
                     }
                 }
+                if (total_cycles)
+                    *total_cycles += max_cc;
             }
         }
     }

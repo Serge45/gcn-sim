@@ -483,7 +483,7 @@ when it has 2+ waves assigned:
 - **8 waves on 4 SIMDs** (2 per SIMD): within each SIMD, when wave A stalls,
   the SIMD switches to wave B. Stalls are hidden by occupancy.
 
-Enabled via `LaunchConfig::enable_cu_interleaving = true` (requires `enable_cycle_counting`).
+Always active when `enable_cycle_counting = true`. No separate flag needed.
 
 **Scheduling model:**
 - Waves assigned round-robin to 4 SIMDs: wave `w` → SIMD `w % 4`
@@ -570,7 +570,7 @@ All cycle-counting logic lives in these files:
 | `src/isa_executor.cpp` | `ds_bank_conflict_k()`, `ds_issue_cycles()`, `issue_cycles()`, `pipe_for()`, `push_pending()`, `push_vmem_with_cache()`, `handle_waitcnt_cycles()`, `mfma_exec_cycles()`, `mubuf_addr()`, trace helpers, cycle-accounting block in `run_wavefront()`, `step_wavefront()` for CU interleaving |
 | `src/cache_model.cpp` | `CacheSet`, `CacheLevel`, `CacheModel` — set-associative L1/L2 cache with LRU eviction |
 | `src/execution_engine.cpp` | Creates `CacheModel`, opens/closes trace file, sets cycle fields on wavefronts, accumulates `total_cycles`, writes utilization metadata, CU-interleaved scheduler loop |
-| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `smem_latency`, `trace_path`, `enable_cu_interleaving` |
+| `src/gcnsim_api.cpp` | Forwards `enable_cycle_counting`, `total_cycles`, `global_mem_latency`, `smem_latency`, `trace_path` |
 
 ---
 

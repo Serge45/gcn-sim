@@ -24,8 +24,8 @@ std::optional<SimFunction> module_get_function(SimModule& mod,
                                                 std::string& err);
 
 // kernel_params: array of pointers to each argument value, in order.
-// If total_cycles is non-null and enable_cycle_counting is set on the LaunchConfig
-// built internally, the summed wavefront cycle count is written there.
+// If total_cycles is non-null and enable_cycle_counting is true, CU wall-clock
+// time is written (per-SIMD parallel execution with interleaving when >4 waves).
 bool launch_kernel(SimFunction& fn,
                    uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
                    uint32_t block_x, uint32_t block_y, uint32_t block_z,
@@ -34,7 +34,6 @@ bool launch_kernel(SimFunction& fn,
                    bool enable_cycle_counting = false,
                    uint64_t* total_cycles = nullptr,
                    uint32_t global_mem_latency = 300,
-                   const char* trace_path = nullptr,
-                   bool enable_cu_interleaving = false);
+                   const char* trace_path = nullptr);
 
 } // namespace gcnsim
