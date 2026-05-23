@@ -520,6 +520,38 @@ int main() {
 
 ---
 
+## Seamless Integration (No Recompilation)
+
+For existing, compiled HIP applications, the simulator provides a transparent interception library (`libgcnsim_hip.so`) that hijacks HIP runtime and Driver API calls using `LD_PRELOAD`. This allows running unmodified binaries directly on the CPU simulator.
+
+### Requirements
+* The application must be dynamically linked against `libamdhip64.so` (standard for ROCm/HIP applications).
+* The runtime environment must have the compiled `libgcnsim_hip.so` library accessible.
+
+### Running an Application
+Preload the hijack library and control its routing behavior using environment variables:
+
+```bash
+# Force the entire application's HIP/ROCm API calls to run on the simulator
+GCNSIM_HIJACK=1 LD_PRELOAD=/path/to/build/libgcnsim_hip.so ./your_hip_app [args]
+```
+
+### Environment Variables
+* **`GCNSIM_HIJACK=1`**: Enables hijacking. All HIP runtime memory allocations, copies, and launches route directly to the CPU simulator.
+* **`GCNSIM_HIJACK=0`**: Bypasses hijacking. All calls are dynamically routed to the real GPU driver via `dlsym(RTLD_NEXT)`. The app runs on the actual AMD GPU as normal.
+* **`GCNSIM_HIJACK_FILTER=<kernel_name>`**: Enables selective emulation. 
+  - The specified kernel runs on the CPU simulator.
+  - All other kernels, memory allocations, and synchronization calls are forwarded to the real GPU.
+  - *Note:* In filter mode, memory copies/allocations are handled by the real GPU driver, and the simulator mirrors/copies the necessary arguments/data as needed to run the target kernel on the CPU.
+
+### How it Works Internally
+1. **Dynamic Symbol Overriding**: When preloaded via `LD_PRELOAD`, `libgcnsim_hip.so` overrides symbols like `hipMalloc`, `hipFree`, `hipMemcpy`, `hipModuleLaunchKernel`, `__hipRegisterFatBinary`, and `__hipRegisterFunction`.
+2. **Compiler fatbin Extraction**: In compiler-compiled apps, `__hipRegisterFatBinary` passes a Clang Offload Bundle wrapper (magic header `HIPF`). The interceptor parses this container to locate and extract the `gfx90a` HSACO binary code object, which it then loads into the simulator.
+3. **Driver API Interception**: In Driver API applications, symbols like `hipModuleLoad` and `hipModuleLaunchKernel` are hijacked.
+4. **Dynamic kernarg size resolution**: For handwritten assembly kernels where the compiler does not emit a fixed `kernarg_size` in the descriptor, the library automatically scans MsgPack metadata offsets to dynamically determine the correct size of kernel arguments.
+
+---
+
 ## Supported Instructions
 
 The simulator covers ~340 instruction opcodes across all major GFX9/GFX90a formats. Key categories:
