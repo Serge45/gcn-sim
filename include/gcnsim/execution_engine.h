@@ -1,6 +1,8 @@
 #pragma once
 #include "elf_loader.h"
 #include <cstdint>
+#include <functional>
+#include "wavefront.h"
 
 namespace gcnsim {
 
@@ -13,6 +15,7 @@ struct LaunchConfig {
     uint32_t global_mem_latency = 300;   // VMEM/FLAT/GLOBAL completion latency in cycles
     uint32_t smem_latency = 20;          // SMEM (scalar load) completion latency in cycles
     const char* trace_path = nullptr;    // if non-null, write Chrome Trace to this file
+    std::function<void(WavefrontState& wave)> debug_hook = nullptr; // hook callback for debugger
 };
 
 // Run a kernel on the CPU simulator.

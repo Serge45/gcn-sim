@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <vector>
+#include <functional>
 
 namespace gcnsim { class CacheModel; }
 
@@ -77,6 +78,10 @@ struct WavefrontState {
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores
+
+    // Debug hook — if non-null, called at the start of every instruction execution (before decode/execution)
+    std::function<void(WavefrontState& wave)> debug_hook = nullptr;
 };
 
 } // namespace gcnsim
+

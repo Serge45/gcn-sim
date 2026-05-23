@@ -736,6 +736,10 @@ WaveStatus step_wavefront(WavefrontState& wave) {
     if (wave.insn_count >= MAX_INSNS)
         return WaveStatus::ENDED;
 
+    if (wave.debug_hook) {
+        wave.debug_hook(wave);
+    }
+
     const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
     uint64_t pre_pc = wave.pc;
     Instruction inst = decode(wave.kernel_code_ptr + wave.pc);
@@ -843,6 +847,9 @@ WaveStatus run_wavefront(WavefrontState& wave) {
     while (true) {
         if (wave.pc >= wave.kernel_code_size) {
             return WaveStatus::ENDED;
+        }
+        if (wave.debug_hook) {
+            wave.debug_hook(wave);
         }
         uint64_t pre_pc = wave.pc;
         Instruction inst = decode(wave.kernel_code_ptr + wave.pc);

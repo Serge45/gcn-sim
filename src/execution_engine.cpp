@@ -149,6 +149,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->trace_wave_id = w;
             waves[w]->trace_wg_flat_id =
                 wg_z * wg_count_y * wg_count_x + wg_y * wg_count_x + wg_x;
+            waves[w]->debug_hook = cfg.debug_hook;
         }
 
         // Per-SIMD CU model: gfx90a has 4 SIMDs per CU, each 16-wide.

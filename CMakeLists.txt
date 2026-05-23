@@ -16,7 +16,9 @@ add_library(gcnsim SHARED
     src/wavefront.cpp
     src/execution_engine.cpp
     src/gcnsim_api.cpp
-    src/cache_model.cpp)
+    src/cache_model.cpp
+    src/dwarf_parser.cpp
+    src/gdb_mi_parser.cpp)
 
 target_include_directories(gcnsim
     PUBLIC  include)
@@ -40,6 +42,12 @@ if(GCNSIM_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Build the gcndb debugger CLI executable
+add_executable(gcndb
+    tools/gcndb/gcndb.cpp)
+target_link_libraries(gcndb PRIVATE gcnsim)
+
 
 add_subdirectory(tools/vector_add)
 add_subdirectory(tools/gemm_mfma)

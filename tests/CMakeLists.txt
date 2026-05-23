@@ -76,3 +76,8 @@ target_link_libraries(test_hijack_asm_gemm gcnsim_hip gcnsim GTest::gtest GTest:
 add_test(NAME test_hijack_asm_gemm COMMAND test_hijack_asm_gemm
          --asm-co ${CMAKE_BINARY_DIR}/tools/asm_gemm_mfma/asm_gemm_mfma.co)
 add_dependencies(test_hijack_asm_gemm gcnsim_hip asm_gemm_mfma_co)
+
+# test_debugger
+add_executable(test_debugger test_debugger.cpp)
+target_link_libraries(test_debugger gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_debugger COMMAND test_debugger)
