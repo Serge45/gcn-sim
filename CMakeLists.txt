@@ -24,6 +24,16 @@ target_include_directories(gcnsim
 target_link_libraries(gcnsim PRIVATE yaml-cpp)
 target_compile_options(gcnsim PRIVATE -Wall -Wextra)
 
+add_library(gcnsim_hip SHARED
+    src/hijack/hip_hijack.cpp)
+
+target_include_directories(gcnsim_hip
+    PUBLIC  include)
+
+target_link_libraries(gcnsim_hip PRIVATE gcnsim ${CMAKE_DL_LIBS})
+target_link_options(gcnsim_hip PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/hijack/hip.map")
+target_compile_options(gcnsim_hip PRIVATE -Wall -Wextra)
+
 option(GCNSIM_BUILD_TESTS "Build tests" ON)
 if(GCNSIM_BUILD_TESTS)
     find_package(GTest REQUIRED)

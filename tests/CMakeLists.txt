@@ -4,7 +4,7 @@ find_package(GTest REQUIRED)
 add_executable(test_elf_loader test_elf_loader.cpp)
 target_link_libraries(test_elf_loader gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_elf_loader COMMAND test_elf_loader
-         --hsaco /opt/rocm/bin/gfx90a/vector_add_memory_fault_kernels.hsaco)
+         --hsaco ${CMAKE_BINARY_DIR}/tools/vector_add/vector_add.hsaco)
 
 # test_isa_decoder
 add_executable(test_isa_decoder test_isa_decoder.cpp)
@@ -62,3 +62,17 @@ target_link_libraries(test_tensile_gemm gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_tensile_gemm COMMAND test_tensile_gemm
          --hsaco ${CMAKE_BINARY_DIR}/tools/tensile_style_gemm/tensile_style_gemm.co)
 add_dependencies(test_tensile_gemm tensile_style_gemm_co)
+
+# test_hijack_vector_add
+add_executable(test_hijack_vector_add test_hijack_vector_add.cpp)
+target_link_libraries(test_hijack_vector_add gcnsim_hip gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_hijack_vector_add COMMAND test_hijack_vector_add
+         --hsaco ${CMAKE_BINARY_DIR}/tools/vector_add/vector_add.hsaco)
+add_dependencies(test_hijack_vector_add gcnsim_hip)
+
+# test_hijack_asm_gemm
+add_executable(test_hijack_asm_gemm test_hijack_asm_gemm.cpp)
+target_link_libraries(test_hijack_asm_gemm gcnsim_hip gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_hijack_asm_gemm COMMAND test_hijack_asm_gemm
+         --asm-co ${CMAKE_BINARY_DIR}/tools/asm_gemm_mfma/asm_gemm_mfma.co)
+add_dependencies(test_hijack_asm_gemm gcnsim_hip asm_gemm_mfma_co)

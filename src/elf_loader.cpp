@@ -50,14 +50,21 @@ std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& erro
         return std::nullopt;
     }
 
-    HsacoModule mod;
-    mod.elf_data.resize((size_t)sz);
-    f.read(reinterpret_cast<char*>(mod.elf_data.data()), sz);
+    std::vector<uint8_t> buffer((size_t)sz);
+    f.read(reinterpret_cast<char*>(buffer.data()), sz);
     if (!f) {
         error_msg = "Read error: " + path;
         return std::nullopt;
     }
 
+    return load_hsaco_from_memory(buffer.data(), buffer.size(), error_msg);
+}
+
+std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, size_t memory_size, std::string& error_msg) {
+    HsacoModule mod;
+    if (memory_size > 0 && memory_data) {
+        mod.elf_data.assign(memory_data, memory_data + memory_size);
+    }
     const uint8_t* data = mod.elf_data.data();
     const size_t   data_size = mod.elf_data.size();
 

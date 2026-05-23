@@ -36,9 +36,12 @@ ctest --test-dir build -V
 ./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
 ./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
+./build/tests/test_hijack_vector_add --hsaco build/tools/vector_add/vector_add.hsaco
+./build/tests/test_hijack_asm_gemm --asm-co build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
 ```
 
-**Expected:** 104 tests pass across 11 suites.
+**Expected:** 107 tests pass across 13 suites.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
@@ -48,6 +51,7 @@ Always run the full test suite after any change to `src/` or `include/`.
 ```
 include/gcnsim/    Public headers — data structures and API declarations
 src/               Implementation — one .cpp per concern
+src/hijack/        Interception library implementing hijacked HIP runtime APIs
 tests/             GTest unit and integration tests
 tools/vector_add/       Vector-add HIP kernel (.hsaco) for integration tests
 tools/gemm_mfma/        MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
@@ -65,6 +69,7 @@ tools/tensile_style_gemm/ Tensile-style SGEMM assembly kernel (.co) for end-to-e
 | `wavefront.cpp` | `init_wavefront()` (SGPR/VGPR setup from KD) + `run_wavefront()` (returns `WaveStatus`) |
 | `execution_engine.cpp` | Grid dispatch, wavefront splitting, LDS/scratch allocation, barrier sync, hidden arg injection |
 | `gcnsim_api.cpp` | Public API wrappers: thin glue over the above |
+| `hijack/hip_hijack.cpp` | Dynamic HIP runtime & driver symbol override hooks and dynamic routing |
 
 ---
 
@@ -641,6 +646,9 @@ Key assembly constraints (GFX9 constant bus rule):
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 | `test_cycle_model` | 13 | MFMA shadow absorption, back-to-back MFMA stalls, s_waitcnt stalls, DS bank conflict setup, VALU/MFMA utilization tracking, s_nop delay, step_wavefront basic/compat, same-SIMD interleaving, no-interleave-1-per-SIMD, barrier |
 | `test_cache_model` | 5 | L1 hit on reuse, same-line hit, L2 hit after L1 eviction, sequential reuse, stats accumulation |
+| `test_hijack_vector_add` | 2 | Dynamic runtime & driver vector add interception and CPU routing |
+| `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
+| `real_rocm_app` | — | Real compiler-compiled binary dynamic interception validation |
 
 ### Writing new tests
 

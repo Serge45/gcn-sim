@@ -100,7 +100,8 @@ gcn-sim/
 │   ├── isa_decoder.h                # Instruction/Opcode/Operand types + decode()
 │   ├── wavefront.h                  # WavefrontState struct + constants
 │   ├── execution_engine.h           # LaunchConfig + internal launch_kernel()
-│   └── memory_model.h               # Inline host-memory load/store helpers
+│   ├── memory_model.h               # Inline host-memory load/store helpers
+│   └── hip_hijack.h                 # Interceptor API/Manager declarations
 │
 ├── src/
 │   ├── elf_loader.cpp               # HSACO ELF parsing (~280 lines)
@@ -109,10 +110,13 @@ gcn-sim/
 │   ├── isa_executor.cpp             # Per-instruction handlers
 │   ├── wavefront.cpp                # Wavefront init + run_wavefront()
 │   ├── execution_engine.cpp         # Grid dispatch, LDS/scratch alloc, barrier sync
-│   └── gcnsim_api.cpp               # Public API wrappers (~95 lines)
+│   ├── gcnsim_api.cpp               # Public API wrappers (~95 lines)
+│   └── hijack/
+│       └── hip_hijack.cpp           # HIP interceptor implementation
 │
 ├── tests/
 │   ├── CMakeLists.txt
+│   ├── test_hijack_vector_add.cpp   # Interception integration tests
 │   ├── test_elf_loader.cpp          # 6 tests: ELF validation, kernel discovery
 │   ├── test_isa_decoder.cpp         # 41 tests: instruction format decoding
 │   ├── test_isa_executor.cpp        # 16 tests: instruction execution
@@ -365,10 +369,26 @@ The integration test (`test_vector_add.cpp`) runs with N=1024, block=256, grid=4
 
 ---
 
+### Phase 6: HIP Interceptor & Dynamic Routing
+
+**Files:** `src/hijack/hip_hijack.cpp`, `include/gcnsim/hip_hijack.h`, `tests/test_hijack_vector_add.cpp`
+
+The HIP interceptor enables running unmodified host HIP binaries directly on the simulator:
+- **`LD_PRELOAD` Support**: Compile `libgcnsim_hip.so` and preload it using `LD_PRELOAD` to transparently capture HIP API calls.
+- **Dynamic Routing**: An environment variable `GCNSIM_HIJACK=1` enables the simulator, while `GCNSIM_HIJACK=0` delegates all calls dynamically to the real GPU drivers using `dlsym(RTLD_NEXT)`. A filter variable `GCNSIM_HIJACK_FILTER=kernel_name` allows simulating specific kernels on the CPU while other kernels execute on the GPU.
+- **Simulated Memory**: Allocation calls (`hipMalloc`/`hipFree`) and transfers (`hipMemcpy`/`hipMemcpyAsync`) route directly to CPU host memory.
+- **Execution Hooking**: Intercepts static compiler registrations (`__hipRegisterFatBinary`/`__hipRegisterFunction`) and dynamic Module API calls (`hipModuleLoad`/`hipModuleGetFunction` for assembly kernels) to map function stubs and launch them on the simulator via `gcnsim::launch_kernel`.
+- **Clang Offload Bundle Parsing**: Scans compiler-registered fat binaries (`__hipRegisterFatBinary` with `HIPF` magic) to extract the nested `gfx90a` HSACO binary and its actual size, supporting dynamically compiled apps via `hipcc` directly.
+- **Stream/Event Bypassing**: Mocks stream APIs (`hipStreamCreate`, `hipStreamSynchronize`, etc.) as synchronous host no-ops.
+
+---
+
 ## Key Design Decisions
 
-### 1. Explicit API over LD_PRELOAD
-The public API is a plain C++ library rather than a HIP runtime interceptor. This makes the simulator testable with standard `ctest`, avoids any dependency on the GPU stack, and keeps scope well-defined.
+### 1. Dual Execution Paths: Explicit API & Interceptor Library
+The simulator offers two execution interfaces:
+* **Explicit C++ API**: A clean wrapper for loading binary code and launching kernels explicitly. This is ideal for isolated testing, cycle/cache profiling, and embedded C++ use-cases.
+* **`LD_PRELOAD` Interceptor (`gcnsim_hip`)**: A transparent wrapper library that intercepts standard HIP runtime and driver API symbols. This enables running unmodified compiled host HIP binaries directly through the simulator.
 
 ### 2. Custom ISA decoder over text disassembly
 Decoding raw bytes into structured `Instruction` objects (rather than parsing `llvm-objdump` output) is required for execution — you need field values as integers, not text. It also runs orders of magnitude faster.
@@ -429,9 +449,15 @@ ctest --test-dir build -V
 ./build/tests/test_mfma_kernels --hsaco build/tools/mfma_kernels/mfma_kernels.hsaco
 ./build/tests/test_asm_gemm --hsaco build/tools/asm_gemm_mfma/asm_gemm_mfma.co
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
+./build/tests/test_hijack_vector_add --hsaco build/tools/vector_add/vector_add.hsaco
+./build/tests/test_hijack_asm_gemm --asm-co build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+
+# Run the real ROCm/hipcc compiled application through the hijack library
+GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
+
 ```
 
-Expected output: **104 tests pass across 11 suites**.
+Expected output: **107 tests pass across 13 suites**.
 
 | Test suite | Count | What it covers |
 |---|---|---|
@@ -446,6 +472,8 @@ Expected output: **104 tests pass across 11 suites**.
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 | `test_cycle_model` | 13 | MFMA shadow, s_waitcnt stalls, bank conflicts, utilization, per-SIMD interleaving |
 | `test_cache_model` | 5 | L1/L2 cache hit/miss, eviction, stats |
+| `test_hijack_vector_add` | 2 | Dynamic runtime & driver vector add interception and CPU routing |
+| `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
 
 ---
 

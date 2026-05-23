@@ -32,4 +32,8 @@ struct HsacoModule {
 // Load an HSACO ELF file. Returns nullopt on error (sets error_msg).
 std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& error_msg);
 
+// Load an HSACO ELF from an in-memory buffer. Returns nullopt on error.
+std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* data, size_t data_size, std::string& error_msg);
+
 } // namespace gcnsim
+
