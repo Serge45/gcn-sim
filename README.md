@@ -19,6 +19,8 @@ A C++ library that loads HSACO (HIP/HSA Code Object) ELF files, decodes gfx90a I
 - [Building](#building)
 - [Running Tests](#running-tests)
 - [Usage Example](#usage-example)
+- [Seamless Integration (No Recompilation)](#seamless-integration-no-recompilation)
+- [Debugging with gcndb](#debugging-with-gcndb)
 - [Supported Instructions](#supported-instructions)
 - [GCN ISA Reference Notes](#gcn-isa-reference-notes)
 - [Potential Improvements](#potential-improvements)
@@ -549,6 +551,22 @@ GCNSIM_HIJACK=1 LD_PRELOAD=/path/to/build/libgcnsim_hip.so ./your_hip_app [args]
 2. **Compiler fatbin Extraction**: In compiler-compiled apps, `__hipRegisterFatBinary` passes a Clang Offload Bundle wrapper (magic header `HIPF`). The interceptor parses this container to locate and extract the `gfx90a` HSACO binary code object, which it then loads into the simulator.
 3. **Driver API Interception**: In Driver API applications, symbols like `hipModuleLoad` and `hipModuleLaunchKernel` are hijacked.
 4. **Dynamic kernarg size resolution**: For handwritten assembly kernels where the compiler does not emit a fixed `kernarg_size` in the descriptor, the library automatically scans MsgPack metadata offsets to dynamically determine the correct size of kernel arguments.
+
+---
+
+## Debugging with gcndb
+
+The simulator includes a dedicated debugger frontend/wrapper called `gcndb` (under `tools/gcndb`). It implements both a CLI GDB-like REPL interface and a GDB/MI (Machine Interface) protocol layer. 
+
+### Key Features
+* **Symbolic Breakpoints & Source Line Stepping**: Set breakpoints on `.hip` or assembly (`.s`) lines and step through them.
+* **Variable & Registers Inspection**: Inspect standard GCN registers (SGPRs, VGPRs, AGPRs, EXEC mask) and kernel arguments.
+* **IDE Integrations**: Seamlessly debug your GPU kernels visually inside:
+  * **VS Code** via the standard C/C++ debugger extension (utilizing the MI interpreter mode).
+  * **cgdb** for a split-screen curses terminal view.
+* **Dynamically Loaded Assembly Code Objects**: Support for debugging AMDGCN assembly code objects loaded dynamically at runtime via the HIP Module API.
+
+For detailed setup instructions, commands, and VS Code configuration examples, please refer to the [gcndb Debugger Usage Guide](file:///home/serge45/Documents/projects/gcn-sim/docs/gcndb_usage_guide.md).
 
 ---
 

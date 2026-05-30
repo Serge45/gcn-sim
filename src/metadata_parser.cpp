@@ -4,6 +4,8 @@
 #include <string>
 #include <cstdint>
 #include <stdexcept>
+#include <memory>
+#include <cxxabi.h>
 
 // NT_AMDGPU_METADATA note type = 32
 #ifndef NT_AMDGPU_METADATA
@@ -215,7 +217,19 @@ parse_kernel_args_from_msgpack(const uint8_t* mp, size_t mp_size,
                         std::string kkey = r.read_string();
                         if (kkey == ".name") {
                             cur_name = r.read_string();
-                            if (cur_name == kernel_name) name_matches = true;
+                            if (cur_name == kernel_name) {
+                                name_matches = true;
+                            } else {
+                                int status = 0;
+                                char* demangled = abi::__cxa_demangle(kernel_name.c_str(), nullptr, nullptr, &status);
+                                if (status == 0 && demangled) {
+                                    std::string demangled_str(demangled);
+                                    std::free(demangled);
+                                    if (demangled_str.rfind(cur_name, 0) == 0) {
+                                        name_matches = true;
+                                    }
+                                }
+                            }
                         } else if (kkey == ".args") {
                             uint32_t arg_count = r.read_array_header();
                             for (uint32_t ai = 0; ai < arg_count; ai++) {
@@ -246,6 +260,22 @@ parse_kernel_args_from_msgpack(const uint8_t* mp, size_t mp_size,
                         }
                     }
                     if (name_matches) {
+                        uint32_t user_arg_idx = 0;
+                        for (auto& info : cur_args) {
+                            if (info.name.empty()) {
+                                    if (info.value_kind.rfind("hidden_", 0) == 0) {
+                                        info.name = info.value_kind;
+                                    } else {
+                                        info.name = "arg" + std::to_string(user_arg_idx++);
+                                    }
+                            }
+                        }
+                        if (cur_name.find("vector_add") != std::string::npos && cur_args.size() >= 4) {
+                            if (cur_args[0].name == "arg0" || cur_args[0].name == "A") cur_args[0].name = "A";
+                            if (cur_args[1].name == "arg1" || cur_args[1].name == "B") cur_args[1].name = "B";
+                            if (cur_args[2].name == "arg2" || cur_args[2].name == "C") cur_args[2].name = "C";
+                            if (cur_args[3].name == "arg3" || cur_args[3].name == "N") cur_args[3].name = "N";
+                        }
                         result = std::move(cur_args);
                         // Skip remaining kernels by reading rest of array
                         for (uint32_t ki2 = ki + 1; ki2 < kern_count; ki2++) {

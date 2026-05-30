@@ -18,7 +18,8 @@ add_library(gcnsim SHARED
     src/gcnsim_api.cpp
     src/cache_model.cpp
     src/dwarf_parser.cpp
-    src/gdb_mi_parser.cpp)
+    src/gdb_mi_parser.cpp
+    src/debugger_core.cpp)
 
 target_include_directories(gcnsim
     PUBLIC  include)

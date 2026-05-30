@@ -12,7 +12,7 @@ add_custom_command(
     OUTPUT  ${ASM_OBJ}
     COMMAND ${AMDGPU_CLANG} -x assembler -target amdgcn-amd-amdhsa
             -mcode-object-version=4 -mcpu=gfx90a -mwavefrontsize64
-            -c -o ${ASM_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/tensile_style_gemm.s
+            -g -c -o ${ASM_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/tensile_style_gemm.s
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tensile_style_gemm.s
     COMMENT "Assembling tensile_style_gemm.s for gfx90a"
 )

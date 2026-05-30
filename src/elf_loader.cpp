@@ -268,8 +268,11 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
         ki.name       = kernel_name;
         ki.descriptor = kd;
         ki.code_ptr   = code_ptr;
+        ki.code_vma   = code_vma;
         ki.code_size  = code_size;
         ki.args       = std::move(args);
+        ki.hsaco_data = data;
+        ki.hsaco_size = data_size;
 
         mod.kernels.push_back(std::move(ki));
     }

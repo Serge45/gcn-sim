@@ -10,7 +10,7 @@ set(HSACO_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vector_add.hsaco)
 add_custom_command(
     OUTPUT  ${HSACO_OUTPUT}
     COMMAND ${AMDGPU_CLANG} -x hip --cuda-device-only --offload-arch=gfx90a
-            --no-gpu-bundle-output -O2 -c
+            --no-gpu-bundle-output -O2 -g -gdwarf-4 -gz=none -c
             -o ${HSACO_OUTPUT} ${CMAKE_CURRENT_SOURCE_DIR}/vector_add.hip
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/vector_add.hip
     COMMENT "Compiling vector_add.hip → vector_add.hsaco"

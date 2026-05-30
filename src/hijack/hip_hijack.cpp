@@ -10,7 +10,7 @@
 #include <iostream>
 #include "gcnsim/hip_hijack.h"
 #include "gcnsim/gcnsim.h"
-
+#include "gcnsim/debugger_core.h"
 
 
 // Helper to resolve the original symbol from the next library in the link order (or via dlopen fallback)
@@ -24,6 +24,66 @@ static FuncPtr get_real_symbol(const char* name) {
         }
     }
     return reinterpret_cast<FuncPtr>(symbol);
+}
+
+// ---------------------------------------------------------------------------
+// Internal Debugger Integration
+// ---------------------------------------------------------------------------
+
+static bool attach_debugger_if_needed(const gcnsim::KernelInfo* ki, const gcnsim::LaunchConfig& cfg) {
+    if (std::getenv("GCNSIM_DEBUG")) {
+        gcnsim::Debugger db;
+        db.kernel = *ki;
+        db.cfg = cfg;
+        db.mi_mode = (std::getenv("GCNSIM_MI_MODE") != nullptr);
+        db.dwarf.load_from_elf(ki->hsaco_data, ki->hsaco_size);
+        
+        // Try to find a path for symbols
+        if (ki->hsaco_data) {
+            // Find which module this belongs to and if it has a file path
+            // For now, use a simple heuristic or the host exe
+            char buf[1024];
+            ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf)-1);
+            if (len != -1) {
+                buf[len] = '\0';
+                db.hsaco_path = buf;
+            }
+        }
+
+        const char* state = std::getenv("GCNSIM_DB_STATE");
+        if (state) db.deserialize_state(state);
+
+        if (db.mi_mode) {
+            const char* mi_fd_env = std::getenv("GCNSIM_MI_FD");
+            if (mi_fd_env) {
+                int mi_fd = std::stoi(mi_fd_env);
+                db.set_output_fd(mi_fd);
+            } else {
+                // Isolate MI stream: dup stdout and redirect host stdout to stderr
+                int mi_fd = dup(STDOUT_FILENO);
+                dup2(STDERR_FILENO, STDOUT_FILENO);
+                db.set_output_fd(mi_fd);
+            }
+            // In wrapper mode, the wrapper already sent the added group record.
+            // But if we are running standalone, we need it.
+            // frontend usually handles duplicates gracefully.
+            db.mi_printf("=thread-group-added,id=\"i1\"\n");
+            db.mi_printf("=thread-group-started,id=\"i1\",pid=\"%d\"\n", (int)getpid());
+            db.mi_printf("=thread-created,id=\"1\",group-id=\"i1\"\n");
+            db.mi_printf("*thread-selected,id=\"1\"\n");
+        } else {
+            std::cerr << "[gcnsim_hip] Debugger attached to kernel: " << ki->name << std::endl;
+        }
+
+        gcnsim::set_global_debugger(&db);
+        db.cfg.debug_hook = gcnsim::global_debug_hook;
+        db.single_stepping = true; // start paused
+        
+        std::string err;
+        gcnsim::launch_kernel(*ki, db.cfg, err);
+        return true;
+    }
+    return false;
 }
 
 // --- Dynamic Hijack Interception Symbols ---
@@ -294,7 +354,28 @@ gcnsim::hipError_t hipLaunchKernel(
     std::vector<uint8_t> kernarg_buffer(kernarg_size, 0);
     size_t param_idx = 0;
     for (const auto& arg : ki->args) {
-        if (arg.value_kind.rfind("hidden_", 0) == 0) continue;
+        if (arg.value_kind.rfind("hidden_", 0) == 0) {
+            if (arg.value_kind == "hidden_block_count_x") {
+                uint32_t val = numBlocks.x;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            } else if (arg.value_kind == "hidden_block_count_y") {
+                uint32_t val = numBlocks.y;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            } else if (arg.value_kind == "hidden_block_count_z") {
+                uint32_t val = numBlocks.z;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            } else if (arg.value_kind == "hidden_group_size_x") {
+                uint16_t val = dimBlocks.x;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            } else if (arg.value_kind == "hidden_group_size_y") {
+                uint16_t val = dimBlocks.y;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            } else if (arg.value_kind == "hidden_group_size_z") {
+                uint16_t val = dimBlocks.z;
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+            }
+            continue;
+        }
         if (args && args[param_idx]) {
             std::memcpy(kernarg_buffer.data() + arg.offset, args[param_idx], arg.size);
         }
@@ -311,6 +392,10 @@ gcnsim::hipError_t hipLaunchKernel(
     cfg.block_z = dimBlocks.z;
     cfg.kernarg = kernarg_buffer.data();
     cfg.kernarg_size = kernarg_buffer.size();
+
+    if (attach_debugger_if_needed(ki, cfg)) {
+        return gcnsim::hipSuccess;
+    }
 
     std::string err;
     bool ok = gcnsim::launch_kernel(*ki, cfg, err);
@@ -401,7 +486,28 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         unpacked_buffer.assign(kernarg_size, 0);
         size_t param_idx = 0;
         for (const auto& arg : ki->args) {
-            if (arg.value_kind.rfind("hidden_", 0) == 0) continue;
+            if (arg.value_kind.rfind("hidden_", 0) == 0) {
+                if (arg.value_kind == "hidden_block_count_x") {
+                    uint32_t val = globalWorkSizeX / localWorkSizeX;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                } else if (arg.value_kind == "hidden_block_count_y") {
+                    uint32_t val = globalWorkSizeY / localWorkSizeY;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                } else if (arg.value_kind == "hidden_block_count_z") {
+                    uint32_t val = globalWorkSizeZ / localWorkSizeZ;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                } else if (arg.value_kind == "hidden_group_size_x") {
+                    uint16_t val = localWorkSizeX;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                } else if (arg.value_kind == "hidden_group_size_y") {
+                    uint16_t val = localWorkSizeY;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                } else if (arg.value_kind == "hidden_group_size_z") {
+                    uint16_t val = localWorkSizeZ;
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                }
+                continue;
+            }
             if (kernelParams[param_idx]) {
                 std::memcpy(unpacked_buffer.data() + arg.offset, kernelParams[param_idx], arg.size);
             }
@@ -431,6 +537,10 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         return gcnsim::hipErrorInvalidValue;
     }
 
+    if (attach_debugger_if_needed(ki, cfg)) {
+        return gcnsim::hipSuccess;
+    }
+
     std::string err;
     bool ok = gcnsim::launch_kernel(*ki, cfg, err);
     if (!ok) {
@@ -450,7 +560,21 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
     if (!module || !fname) return gcnsim::hipErrorInvalidValue;
 
     std::string err;
-    auto mod = gcnsim::load_hsaco(fname, err);
+    std::string path_to_load = fname;
+    auto mod = gcnsim::load_hsaco(path_to_load, err);
+    if (!mod && !path_to_load.empty() && path_to_load[0] != '/') {
+        std::string err2;
+        std::string try_path = "../" + path_to_load;
+        mod = gcnsim::load_hsaco(try_path, err2);
+        if (!mod) {
+            try_path = "../../" + path_to_load;
+            mod = gcnsim::load_hsaco(try_path, err2);
+        }
+        if (mod) {
+            path_to_load = try_path;
+        }
+    }
+
     if (!mod) {
         std::cerr << "[gcnsim_hip] hipModuleLoad failed to load " << fname << ": " << err << std::endl;
         return gcnsim::hipErrorNotFound;

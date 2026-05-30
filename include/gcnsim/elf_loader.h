@@ -19,8 +19,11 @@ struct KernelInfo {
     std::string            name;
     const KernelDescriptor* descriptor;    // points into elf_data
     const uint8_t*          code_ptr;      // first instruction
+    uint64_t                code_vma;      // absolute Virtual Memory Address (from ELF)
     size_t                  code_size;     // bytes in .text after entry
     std::vector<KernelArgInfo> args;
+    const uint8_t*          hsaco_data = nullptr; // pointer to start of HSACO ELF
+    size_t                  hsaco_size = 0;       // total size of HSACO ELF
 };
 
 struct HsacoModule {
@@ -36,4 +39,3 @@ std::optional<HsacoModule> load_hsaco(const std::string& path, std::string& erro
 std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* data, size_t data_size, std::string& error_msg);
 
 } // namespace gcnsim
-

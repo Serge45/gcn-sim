@@ -12,7 +12,7 @@ add_custom_command(
     OUTPUT  ${ASM_OBJ}
     COMMAND ${AMDGPU_CLANG} -x assembler -target amdgcn-amd-amdhsa
             -mcode-object-version=4 -mcpu=gfx90a:xnack- -mwavefrontsize64
-            -c -o ${ASM_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/asm_gemm_mfma.s
+            -g -c -o ${ASM_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/asm_gemm_mfma.s
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/asm_gemm_mfma.s
     COMMENT "Assembling asm_gemm_mfma.s for gfx90a"
 )

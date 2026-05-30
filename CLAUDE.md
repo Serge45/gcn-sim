@@ -58,6 +58,7 @@ tools/gemm_mfma/        MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
 tools/mfma_kernels/     Multi-shape MFMA kernels (.hsaco) for integration tests
 tools/asm_gemm_mfma/    Hand-written GFX90A assembly MFMA GEMM (.co)
 tools/tensile_style_gemm/ Tensile-style SGEMM assembly kernel (.co) for end-to-end GEMM test
+tools/gcndb/            GCN GPU ISA debugger wrapper and GDB/MI frontend (`gcndb`)
 ```
 
 | File | Responsibility |
@@ -70,6 +71,10 @@ tools/tensile_style_gemm/ Tensile-style SGEMM assembly kernel (.co) for end-to-e
 | `execution_engine.cpp` | Grid dispatch, wavefront splitting, LDS/scratch allocation, barrier sync, hidden arg injection |
 | `gcnsim_api.cpp` | Public API wrappers: thin glue over the above |
 | `hijack/hip_hijack.cpp` | Dynamic HIP runtime & driver symbol override hooks and dynamic routing |
+| `debugger_core.cpp` | Debugger core: tracks breakpoints, handles stepping/running, registers query, and GDB/MI protocol |
+| `dwarf_parser.cpp` | DWARF symbol parsing: locates addresses, maps PC to source lines, and supports suffix matching |
+| `gdb_mi_parser.cpp` | Parses incoming GDB/MI commands and tokens |
+| `cache_model.cpp` | L1/L2 associative cache simulation with LRU eviction |
 
 ---
 
