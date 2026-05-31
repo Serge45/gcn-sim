@@ -566,7 +566,7 @@ The simulator includes a dedicated debugger frontend/wrapper called `gcndb` (und
   * **cgdb** for a split-screen curses terminal view.
 * **Dynamically Loaded Assembly Code Objects**: Support for debugging AMDGCN assembly code objects loaded dynamically at runtime via the HIP Module API.
 
-For detailed setup instructions, commands, and VS Code configuration examples, please refer to the [gcndb Debugger Usage Guide](file:///home/serge45/Documents/projects/gcn-sim/docs/gcndb_usage_guide.md).
+For detailed setup instructions, commands, and VS Code configuration examples, please refer to the [gcndb Debugger Usage Guide](docs/gcndb_usage_guide.md).
 
 ---
 
