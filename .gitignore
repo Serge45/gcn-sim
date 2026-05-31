@@ -37,3 +37,12 @@ perf.data.old
 # OS
 .DS_Store
 Thumbs.db
+
+# Debugger / proxy logs
+gcnsim_mi.log
+gdb_in.log
+gdb_out.log
+
+# Tool state
+.antigravitycli/
+
