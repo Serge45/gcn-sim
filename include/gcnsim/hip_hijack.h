@@ -47,6 +47,92 @@ enum hipMemcpyKind {
     hipMemcpyDefault = 4
 };
 
+enum hipMemoryType {
+    hipMemoryTypeHost = 1,
+    hipMemoryTypeDevice = 2,
+    hipMemoryTypeArray = 3,
+    hipMemoryTypeUnified = 4
+};
+
+struct hipPointerAttribute_t {
+    hipMemoryType memoryType;
+    int device;
+    void* devicePointer;
+    void* hostPointer;
+    int isManaged;
+    unsigned allocationID;
+};
+
+struct hipDeviceProp_t {
+    char name[256];
+    size_t totalGlobalMem;
+    size_t sharedMemPerBlock;
+    int regsPerBlock;
+    int warpSize;
+    int maxThreadsPerBlock;
+    int maxThreadsDim[3];
+    int maxGridSize[3];
+    int clockRate;
+    int memoryClockRate;
+    int memoryBusWidth;
+    size_t totalConstMem;
+    int major;
+    int minor;
+    int multiProcessorCount;
+    int l2CacheSize;
+    int maxThreadsPerMultiProcessor;
+    int computeMode;
+    int clockInstructionRate;
+    int arch[2];
+    int concurrentKernels;
+    int pciDomainID;
+    int pciBusID;
+    int pciDeviceID;
+    size_t maxSharedMemoryPerMultiProcessor;
+    int isMultiGpuBoard;
+    int canMapHostMemory;
+    char gcnArchName[256];
+    int integrated;
+    int cooperativeLaunch;
+    int cooperativeMultiDeviceLaunch;
+    size_t sharedMemPerBlockOptin;
+    int pageableMemoryAccess;
+    int pageableMemoryAccessUsesHostPageTables;
+    int directMode;
+    char reserved[512];
+};
+
+enum hipDeviceAttribute_t {
+    hipDeviceAttributeMaxThreadsPerBlock = 1,
+    hipDeviceAttributeMaxBlockDimX = 2,
+    hipDeviceAttributeMaxBlockDimY = 3,
+    hipDeviceAttributeMaxBlockDimZ = 4,
+    hipDeviceAttributeMaxGridDimX = 5,
+    hipDeviceAttributeMaxGridDimY = 6,
+    hipDeviceAttributeMaxGridDimZ = 7,
+    hipDeviceAttributeMaxSharedMemoryPerBlock = 8,
+    hipDeviceAttributeTotalConstantMemory = 9,
+    hipDeviceAttributeWarpSize = 10,
+    hipDeviceAttributeMaxRegistersPerBlock = 12,
+    hipDeviceAttributeClockRate = 13,
+    hipDeviceAttributeMemoryClockRate = 14,
+    hipDeviceAttributeMemoryBusWidth = 15,
+    hipDeviceAttributeMultiprocessorCount = 16,
+    hipDeviceAttributeComputeMode = 20,
+    hipDeviceAttributeL2CacheSize = 21,
+    hipDeviceAttributeMaxThreadsPerMultiProcessor = 22,
+    hipDeviceAttributeComputeCapabilityMajor = 23,
+    hipDeviceAttributeComputeCapabilityMinor = 24,
+    hipDeviceAttributeConcurrentKernels = 31,
+    hipDeviceAttributePciBusId = 33,
+    hipDeviceAttributePciDeviceId = 34,
+    hipDeviceAttributeMaxSharedMemoryPerMultiprocessor = 81,
+    hipDeviceAttributeIsMultiGpuBoard = 83,
+    hipDeviceAttributeIntegrated = 84,
+    hipDeviceAttributeCooperativeLaunch = 85,
+    hipDeviceAttributeCooperativeMultiDeviceLaunch = 86,
+};
+
 // Struct layout used by Clang/HIP for fat binaries
 struct FatBinaryHeader {
     uint32_t magic;
@@ -274,6 +360,57 @@ private:
 #define HIP_LAUNCH_PARAM_BUFFER_SIZE     ((void*)0x02)
 
 extern "C" {
+gcnsim::hipError_t hipMalloc(void** devPtr, size_t size);
+gcnsim::hipError_t hipFree(void* devPtr);
+gcnsim::hipError_t hipMemcpy(void* dst, const void* src, size_t size, gcnsim::hipMemcpyKind kind);
+gcnsim::hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+
+gcnsim::hipError_t hipStreamCreate(gcnsim::hipStream_t* stream);
+gcnsim::hipError_t hipStreamCreateWithFlags(gcnsim::hipStream_t* stream, unsigned int flags);
+gcnsim::hipError_t hipStreamDestroy(gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipStreamSynchronize(gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipDeviceSynchronize();
+gcnsim::hipError_t hipGetLastError(void);
+
+gcnsim::hipError_t hipGetDeviceCount(int* count);
+gcnsim::hipError_t hipSetDevice(int device);
+gcnsim::hipError_t hipGetDevice(int* device);
+gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int deviceId);
+gcnsim::hipError_t hipDeviceGetAttribute(int* pi, gcnsim::hipDeviceAttribute_t attr, int deviceId);
+gcnsim::hipError_t hipDeviceCanAccessPeer(int* canAccessPeer, int deviceId, int peerDeviceId);
+gcnsim::hipError_t hipDeviceEnablePeerAccess(int peerDeviceId, unsigned int flags);
+gcnsim::hipError_t hipDeviceDisablePeerAccess(int peerDeviceId);
+
+gcnsim::hipError_t hipEventCreate(gcnsim::hipEvent_t* event);
+gcnsim::hipError_t hipEventCreateWithFlags(gcnsim::hipEvent_t* event, unsigned int flags);
+gcnsim::hipError_t hipEventRecord(gcnsim::hipEvent_t event, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipEventSynchronize(gcnsim::hipEvent_t event);
+gcnsim::hipError_t hipEventElapsedTime(float* ms, gcnsim::hipEvent_t start, gcnsim::hipEvent_t stop);
+gcnsim::hipError_t hipEventDestroy(gcnsim::hipEvent_t event);
+gcnsim::hipError_t hipEventQuery(gcnsim::hipEvent_t event);
+
+gcnsim::hipError_t hipStreamWaitEvent(gcnsim::hipStream_t stream, gcnsim::hipEvent_t event, unsigned int flags);
+gcnsim::hipError_t hipStreamQuery(gcnsim::hipStream_t stream);
+
+gcnsim::hipError_t hipMemset(void* devPtr, int value, size_t count);
+gcnsim::hipError_t hipMemsetAsync(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemsetD8(void* devPtr, unsigned char value, size_t count);
+gcnsim::hipError_t hipMemsetD16(void* devPtr, unsigned short value, size_t count);
+gcnsim::hipError_t hipMemsetD32(void* devPtr, int value, size_t count);
+gcnsim::hipError_t hipMemsetD8Async(void* devPtr, unsigned char value, size_t count, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemsetD16Async(void* devPtr, unsigned short value, size_t count, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemsetD32Async(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream);
+
+gcnsim::hipError_t hipHostAlloc(void** ptr, size_t size, unsigned int flags);
+gcnsim::hipError_t hipHostFree(void* ptr);
+gcnsim::hipError_t hipHostGetDevicePointer(void** devPtr, void* hstPtr, unsigned int flags);
+gcnsim::hipError_t hipPointerGetAttributes(gcnsim::hipPointerAttribute_t* attributes, const void* ptr);
+
+gcnsim::hipError_t hipMemcpyPeer(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size);
+gcnsim::hipError_t hipMemcpyPeerAsync(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpy2D(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind);
+gcnsim::hipError_t hipMemcpy2DAsync(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+
 gcnsim::hipError_t hipExtModuleLaunchKernel(
     gcnsim::hipFunction_t f,
     uint32_t globalWorkSizeX, uint32_t globalWorkSizeY, uint32_t globalWorkSizeZ,

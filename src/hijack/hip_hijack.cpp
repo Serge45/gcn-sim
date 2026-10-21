@@ -8,6 +8,8 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <chrono>
+#include <algorithm>
 #include "gcnsim/hip_hijack.h"
 #include "gcnsim/gcnsim.h"
 #include "gcnsim/debugger_core.h"
@@ -220,7 +222,15 @@ gcnsim::hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size, gcnsi
     return hipMemcpy(dst, src, size, kind);
 }
 
-// Stream and Event Mocks (Bypassed)
+static thread_local int g_current_device = 0;
+
+struct EventInternal {
+    bool recorded = false;
+    uint32_t flags = 0;
+    std::chrono::steady_clock::time_point time_point;
+};
+
+// Stream Interceptors
 gcnsim::hipError_t hipStreamCreate(gcnsim::hipStream_t* stream) {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipStream_t*)>("hipStreamCreate");
@@ -260,6 +270,16 @@ gcnsim::hipError_t hipStreamSynchronize(gcnsim::hipStream_t stream) {
     return gcnsim::hipSuccess;
 }
 
+gcnsim::hipError_t hipStreamQuery(gcnsim::hipStream_t stream) {
+    (void)stream;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipStreamWaitEvent(gcnsim::hipStream_t stream, gcnsim::hipEvent_t event, unsigned int flags) {
+    (void)stream; (void)event; (void)flags;
+    return gcnsim::hipSuccess;
+}
+
 gcnsim::hipError_t hipDeviceSynchronize() {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)()>("hipDeviceSynchronize");
@@ -269,7 +289,89 @@ gcnsim::hipError_t hipDeviceSynchronize() {
     return gcnsim::hipSuccess;
 }
 
-// Device Properties Interceptors
+// Event Interceptors
+gcnsim::hipError_t hipEventCreate(gcnsim::hipEvent_t* event) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipEvent_t*)>("hipEventCreate");
+        if (real_func) return real_func(event);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!event) return gcnsim::hipErrorInvalidValue;
+    auto* ev = new EventInternal();
+    *event = reinterpret_cast<gcnsim::hipEvent_t>(ev);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventCreateWithFlags(gcnsim::hipEvent_t* event, unsigned int flags) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipEvent_t*, unsigned int)>("hipEventCreateWithFlags");
+        if (real_func) return real_func(event, flags);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!event) return gcnsim::hipErrorInvalidValue;
+    auto* ev = new EventInternal();
+    ev->flags = flags;
+    *event = reinterpret_cast<gcnsim::hipEvent_t>(ev);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventRecord(gcnsim::hipEvent_t event, gcnsim::hipStream_t stream) {
+    (void)stream;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipEvent_t, gcnsim::hipStream_t)>("hipEventRecord");
+        if (real_func) return real_func(event, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!event) return gcnsim::hipErrorInvalidValue;
+    auto* ev = reinterpret_cast<EventInternal*>(event);
+    ev->recorded = true;
+    ev->time_point = std::chrono::steady_clock::now();
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventSynchronize(gcnsim::hipEvent_t event) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipEvent_t)>("hipEventSynchronize");
+        if (real_func) return real_func(event);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!event) return gcnsim::hipErrorInvalidValue;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventElapsedTime(float* ms, gcnsim::hipEvent_t start, gcnsim::hipEvent_t stop) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(float*, gcnsim::hipEvent_t, gcnsim::hipEvent_t)>("hipEventElapsedTime");
+        if (real_func) return real_func(ms, start, stop);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!ms || !start || !stop) return gcnsim::hipErrorInvalidValue;
+    auto* ev_start = reinterpret_cast<EventInternal*>(start);
+    auto* ev_stop = reinterpret_cast<EventInternal*>(stop);
+    if (!ev_start->recorded || !ev_stop->recorded) return gcnsim::hipErrorInvalidValue;
+    auto dur = std::chrono::duration_cast<std::chrono::microseconds>(ev_stop->time_point - ev_start->time_point);
+    *ms = static_cast<float>(dur.count()) / 1000.0f;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventDestroy(gcnsim::hipEvent_t event) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipEvent_t)>("hipEventDestroy");
+        if (real_func) return real_func(event);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (event) {
+        delete reinterpret_cast<EventInternal*>(event);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipEventQuery(gcnsim::hipEvent_t event) {
+    (void)event;
+    return gcnsim::hipSuccess;
+}
+
+// Device Properties & Multi-GPU Interceptors
 gcnsim::hipError_t hipGetDeviceCount(int* count) {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*)>("hipGetDeviceCount");
@@ -277,7 +379,8 @@ gcnsim::hipError_t hipGetDeviceCount(int* count) {
         return gcnsim::hipErrorLaunchFailure;
     }
     if (!count) return gcnsim::hipErrorInvalidValue;
-    *count = 1;
+    const char* env_count = std::getenv("GCNSIM_DEVICE_COUNT");
+    *count = env_count ? std::max(1, std::atoi(env_count)) : 2;
     return gcnsim::hipSuccess;
 }
 
@@ -287,6 +390,12 @@ gcnsim::hipError_t hipSetDevice(int device) {
         if (real_func) return real_func(device);
         return gcnsim::hipErrorLaunchFailure;
     }
+    if (device < 0) return gcnsim::hipErrorInvalidValue;
+    int max_dev = 2;
+    const char* env_count = std::getenv("GCNSIM_DEVICE_COUNT");
+    if (env_count) max_dev = std::max(1, std::atoi(env_count));
+    if (device >= max_dev) return gcnsim::hipErrorInvalidValue;
+    g_current_device = device;
     return gcnsim::hipSuccess;
 }
 
@@ -297,8 +406,227 @@ gcnsim::hipError_t hipGetDevice(int* device) {
         return gcnsim::hipErrorLaunchFailure;
     }
     if (!device) return gcnsim::hipErrorInvalidValue;
-    *device = 0;
+    *device = g_current_device;
     return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int deviceId) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipDeviceProp_t*, int)>("hipGetDeviceProperties");
+        if (real_func) return real_func(prop, deviceId);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!prop) return gcnsim::hipErrorInvalidValue;
+    int max_dev = 2;
+    const char* env_count = std::getenv("GCNSIM_DEVICE_COUNT");
+    if (env_count) max_dev = std::max(1, std::atoi(env_count));
+    if (deviceId < 0 || deviceId >= max_dev) return gcnsim::hipErrorInvalidValue;
+
+    std::memset(prop, 0, sizeof(*prop));
+    std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
+    std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
+    prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e per GCD
+    prop->sharedMemPerBlock = 65536; // 64 KB
+    prop->regsPerBlock = 65536;
+    prop->warpSize = 64;
+    prop->maxThreadsPerBlock = 1024;
+    prop->maxThreadsDim[0] = 1024;
+    prop->maxThreadsDim[1] = 1024;
+    prop->maxThreadsDim[2] = 1024;
+    prop->maxGridSize[0] = 2147483647;
+    prop->maxGridSize[1] = 65535;
+    prop->maxGridSize[2] = 65535;
+    prop->clockRate = 1700000;       // 1.7 GHz in kHz
+    prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
+    prop->memoryBusWidth = 8192;     // 8192-bit HBM2e
+    prop->totalConstMem = 2147483647;
+    prop->major = 9;
+    prop->minor = 0;
+    prop->multiProcessorCount = 110; // 110 CUs per GCD
+    prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 per GCD
+    prop->maxThreadsPerMultiProcessor = 2048;
+    prop->computeMode = 0;
+    prop->concurrentKernels = 1;
+    prop->pciDomainID = 0;
+    prop->pciBusID = 3;
+    prop->pciDeviceID = deviceId;
+    prop->maxSharedMemoryPerMultiProcessor = 65536;
+    prop->isMultiGpuBoard = 1;
+    prop->canMapHostMemory = 1;
+    prop->integrated = 0;
+    prop->cooperativeLaunch = 1;
+    prop->cooperativeMultiDeviceLaunch = 1;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceGetAttribute(int* pi, gcnsim::hipDeviceAttribute_t attr, int deviceId) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*, gcnsim::hipDeviceAttribute_t, int)>("hipDeviceGetAttribute");
+        if (real_func) return real_func(pi, attr, deviceId);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!pi) return gcnsim::hipErrorInvalidValue;
+    int max_dev = 2;
+    const char* env_count = std::getenv("GCNSIM_DEVICE_COUNT");
+    if (env_count) max_dev = std::max(1, std::atoi(env_count));
+    if (deviceId < 0 || deviceId >= max_dev) return gcnsim::hipErrorInvalidValue;
+
+    switch (attr) {
+        case gcnsim::hipDeviceAttributeMaxThreadsPerBlock: *pi = 1024; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimX: *pi = 1024; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimY: *pi = 1024; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimZ: *pi = 1024; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimX: *pi = 2147483647; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimY: *pi = 65535; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimZ: *pi = 65535; break;
+        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerBlock: *pi = 65536; break;
+        case gcnsim::hipDeviceAttributeTotalConstantMemory: *pi = 2147483647; break;
+        case gcnsim::hipDeviceAttributeWarpSize: *pi = 64; break;
+        case gcnsim::hipDeviceAttributeMaxRegistersPerBlock: *pi = 65536; break;
+        case gcnsim::hipDeviceAttributeClockRate: *pi = 1700000; break;
+        case gcnsim::hipDeviceAttributeMemoryClockRate: *pi = 1600000; break;
+        case gcnsim::hipDeviceAttributeMemoryBusWidth: *pi = 8192; break;
+        case gcnsim::hipDeviceAttributeMultiprocessorCount: *pi = 110; break;
+        case gcnsim::hipDeviceAttributeComputeMode: *pi = 0; break;
+        case gcnsim::hipDeviceAttributeL2CacheSize: *pi = 8 * 1024 * 1024; break;
+        case gcnsim::hipDeviceAttributeMaxThreadsPerMultiProcessor: *pi = 2048; break;
+        case gcnsim::hipDeviceAttributeComputeCapabilityMajor: *pi = 9; break;
+        case gcnsim::hipDeviceAttributeComputeCapabilityMinor: *pi = 0; break;
+        case gcnsim::hipDeviceAttributeConcurrentKernels: *pi = 1; break;
+        case gcnsim::hipDeviceAttributePciBusId: *pi = 3; break;
+        case gcnsim::hipDeviceAttributePciDeviceId: *pi = deviceId; break;
+        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerMultiprocessor: *pi = 65536; break;
+        case gcnsim::hipDeviceAttributeIsMultiGpuBoard: *pi = 1; break;
+        case gcnsim::hipDeviceAttributeIntegrated: *pi = 0; break;
+        case gcnsim::hipDeviceAttributeCooperativeLaunch: *pi = 1; break;
+        case gcnsim::hipDeviceAttributeCooperativeMultiDeviceLaunch: *pi = 1; break;
+        default: *pi = 0; break;
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceCanAccessPeer(int* canAccessPeer, int deviceId, int peerDeviceId) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*, int, int)>("hipDeviceCanAccessPeer");
+        if (real_func) return real_func(canAccessPeer, deviceId, peerDeviceId);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!canAccessPeer) return gcnsim::hipErrorInvalidValue;
+    *canAccessPeer = (deviceId != peerDeviceId) ? 1 : 0;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceEnablePeerAccess(int peerDeviceId, unsigned int flags) {
+    (void)peerDeviceId; (void)flags;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceDisablePeerAccess(int peerDeviceId) {
+    (void)peerDeviceId;
+    return gcnsim::hipSuccess;
+}
+
+// Memory Operations (Memset, HostAlloc, PeerMemcpy, 2D)
+gcnsim::hipError_t hipMemset(void* devPtr, int value, size_t count) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, size_t)>("hipMemset");
+        if (real_func) return real_func(devPtr, value, count);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (count > 0) {
+        if (!devPtr) return gcnsim::hipErrorInvalidValue;
+        std::memset(devPtr, value, count);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemsetAsync(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemset(devPtr, value, count);
+}
+
+gcnsim::hipError_t hipMemsetD8(void* devPtr, unsigned char value, size_t count) {
+    return hipMemset(devPtr, value, count);
+}
+
+gcnsim::hipError_t hipMemsetD16(void* devPtr, unsigned short value, size_t count) {
+    if (!devPtr) return gcnsim::hipErrorInvalidValue;
+    unsigned short* p = reinterpret_cast<unsigned short*>(devPtr);
+    for (size_t i = 0; i < count; i++) p[i] = value;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemsetD32(void* devPtr, int value, size_t count) {
+    if (!devPtr) return gcnsim::hipErrorInvalidValue;
+    int* p = reinterpret_cast<int*>(devPtr);
+    for (size_t i = 0; i < count; i++) p[i] = value;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemsetD8Async(void* devPtr, unsigned char value, size_t count, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemsetD8(devPtr, value, count);
+}
+
+gcnsim::hipError_t hipMemsetD16Async(void* devPtr, unsigned short value, size_t count, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemsetD16(devPtr, value, count);
+}
+
+gcnsim::hipError_t hipMemsetD32Async(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemsetD32(devPtr, value, count);
+}
+
+gcnsim::hipError_t hipHostAlloc(void** ptr, size_t size, unsigned int flags) {
+    (void)flags;
+    return hipMalloc(ptr, size);
+}
+
+gcnsim::hipError_t hipHostFree(void* ptr) {
+    return hipFree(ptr);
+}
+
+gcnsim::hipError_t hipHostGetDevicePointer(void** devPtr, void* hstPtr, unsigned int flags) {
+    (void)flags;
+    if (!devPtr || !hstPtr) return gcnsim::hipErrorInvalidValue;
+    *devPtr = hstPtr;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipPointerGetAttributes(gcnsim::hipPointerAttribute_t* attributes, const void* ptr) {
+    if (!attributes || !ptr) return gcnsim::hipErrorInvalidValue;
+    attributes->memoryType = gcnsim::hipMemoryTypeDevice;
+    attributes->device = g_current_device;
+    attributes->devicePointer = const_cast<void*>(ptr);
+    attributes->hostPointer = const_cast<void*>(ptr);
+    attributes->isManaged = 0;
+    attributes->allocationID = 1;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemcpyPeer(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size) {
+    (void)dstDeviceId; (void)srcDeviceId;
+    return hipMemcpy(dst, src, size, gcnsim::hipMemcpyDeviceToDevice);
+}
+
+gcnsim::hipError_t hipMemcpyPeerAsync(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size, gcnsim::hipStream_t stream) {
+    (void)dstDeviceId; (void)srcDeviceId; (void)stream;
+    return hipMemcpy(dst, src, size, gcnsim::hipMemcpyDeviceToDevice);
+}
+
+gcnsim::hipError_t hipMemcpy2D(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind) {
+    (void)kind;
+    if (!dst || !src) return gcnsim::hipErrorInvalidValue;
+    for (size_t y = 0; y < height; y++) {
+        std::memcpy(static_cast<char*>(dst) + y * dpitch, static_cast<const char*>(src) + y * spitch, width);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemcpy2DAsync(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemcpy2D(dst, dpitch, src, spitch, width, height, kind);
 }
 
 gcnsim::hipError_t hipGetLastError(void) {

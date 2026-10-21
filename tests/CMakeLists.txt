@@ -88,3 +88,9 @@ target_link_libraries(test_cov5 gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_cov5 COMMAND test_cov5
          --hsaco ${CMAKE_BINARY_DIR}/tools/cov5_kernel/cov5_kernel.hsaco)
 add_dependencies(test_cov5 cov5_kernel_hsaco)
+
+# test_hip_runtime (HIP Runtime Expansion & Dual-GCD MI200)
+add_executable(test_hip_runtime test_hip_runtime.cpp)
+target_link_libraries(test_hip_runtime gcnsim_hip gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_hip_runtime COMMAND test_hip_runtime)
+add_dependencies(test_hip_runtime gcnsim_hip)
