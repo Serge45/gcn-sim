@@ -8,6 +8,7 @@
 #include <memory>
 #include <cstdio>
 #include "gcnsim/cache_model.h"
+#include "gcnsim/memory_model.h"
 
 namespace gcnsim {
 
@@ -112,9 +113,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
     uint32_t scratch_per_wave = scratch_per_lane * WAVE_SIZE;
 
-    for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
-    for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
-    for (uint32_t wg_x = 0; wg_x < wg_count_x; wg_x++) {
+    try {
+        for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
+        for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
+        for (uint32_t wg_x = 0; wg_x < wg_count_x; wg_x++) {
         // Allocate per-workgroup LDS buffer; shared across all waves in the workgroup
         std::vector<uint8_t> lds_buf(lds_bytes, 0);
         uint8_t* lds_ptr = lds_bytes > 0 ? lds_buf.data() : nullptr;
@@ -304,6 +306,15 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     *total_cycles += max_cc;
             }
         }
+    }
+    } catch (const MemoryFaultException& ex) {
+        error_msg = ex.what();
+        if (trace_file) fclose(trace_file);
+        return false;
+    } catch (const std::exception& ex) {
+        error_msg = ex.what();
+        if (trace_file) fclose(trace_file);
+        return false;
     }
 
     if (trace_file) {

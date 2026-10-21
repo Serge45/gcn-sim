@@ -468,6 +468,140 @@ TEST(ISAExecutor, VMulF32_NoMod) {
     }
 }
 
+// ===== M0 Register Read/Write =====
+TEST(ISAExecutor, M0_ReadWrite) {
+    auto ws = make_wave();
+    ws->sgpr[0] = 0x12345678;
+    ws->m0 = 0;
+
+    // s_mov_b32 m0, s0
+    Instruction mov_to_m0 = make_inst(Opcode::S_MOV_B32, InstFormat::SOP1);
+    mov_to_m0.dst.kind = Operand::Kind::M0;
+    mov_to_m0.src[0].kind = Operand::Kind::SGPR;
+    mov_to_m0.src[0].index = 0;
+    execute_instruction(*ws, mov_to_m0);
+    EXPECT_EQ(ws->m0, 0x12345678u);
+
+    // s_mov_b32 s1, m0
+    Instruction mov_from_m0 = make_inst(Opcode::S_MOV_B32, InstFormat::SOP1);
+    mov_from_m0.dst.kind = Operand::Kind::SGPR;
+    mov_from_m0.dst.index = 1;
+    mov_from_m0.src[0].kind = Operand::Kind::M0;
+    execute_instruction(*ws, mov_from_m0);
+    EXPECT_EQ(ws->sgpr[1], 0x12345678u);
+
+    // v_mov_b32 v0, m0
+    Instruction vmov = make_inst(Opcode::V_MOV_B32, InstFormat::VOP1);
+    vmov.dst.kind = Operand::Kind::VGPR;
+    vmov.dst.index = 0;
+    vmov.src[0].kind = Operand::Kind::M0;
+    execute_instruction(*ws, vmov);
+    EXPECT_EQ(ws->vgpr[0][0], 0x12345678u);
+    EXPECT_EQ(ws->vgpr[0][63], 0x12345678u);
+}
+
+// ===== S_SWAPPC_B64 Call / Return =====
+TEST(ISAExecutor, S_SWAPPC_B64_CallReturn) {
+    auto ws = make_wave();
+    ws->pc = 0x1000;
+    ws->sgpr[0] = 0x5000; // Target func PC (low)
+    ws->sgpr[1] = 0x0000; // Target func PC (high)
+
+    // s_swappc_b64 s[2:3], s[0:1]
+    Instruction swappc = make_inst(Opcode::S_SWAPPC_B64, InstFormat::SOP1);
+    swappc.dst.kind = Operand::Kind::SGPR;
+    swappc.dst.index = 2; // Return PC destination
+    swappc.src[0].kind = Operand::Kind::SGPR;
+    swappc.src[0].index = 0; // Target PC source
+
+    execute_instruction(*ws, swappc);
+
+    EXPECT_EQ(ws->pc, 0x5000u) << "PC should jump to target";
+    EXPECT_EQ(ws->sgpr[2], 0x1000u) << "Return address saved into s[2]";
+    EXPECT_EQ(ws->sgpr[3], 0x0000u) << "Return address high saved into s[3]";
+
+    // Return: s_setpc_b64 s[2:3]
+    Instruction setpc = make_inst(Opcode::S_SETPC_B64, InstFormat::SOP1);
+    setpc.src[0].kind = Operand::Kind::SGPR;
+    setpc.src[0].index = 2;
+
+    execute_instruction(*ws, setpc);
+    EXPECT_EQ(ws->pc, 0x1000u) << "PC should return to saved address";
+}
+
+// ===== GLOBAL_ATOMIC_ADD_F64 =====
+TEST(ISAExecutor, GLOBAL_ATOMIC_ADD_F64) {
+    auto ws = make_wave();
+    double mem_val = 100.5;
+    uint64_t mem_addr = reinterpret_cast<uint64_t>(&mem_val);
+
+    // Setup lane 0 to add 25.25 with return value (glc)
+    ws->exec = 1ULL; // Lane 0 active only
+    ws->vgpr[0][0] = (uint32_t)(mem_addr & 0xFFFFFFFF);
+    ws->vgpr[1][0] = (uint32_t)(mem_addr >> 32);
+
+    double add_val = 25.25;
+    uint64_t add_bits;
+    std::memcpy(&add_bits, &add_val, sizeof(add_bits));
+    ws->vgpr[2][0] = (uint32_t)(add_bits & 0xFFFFFFFF);
+    ws->vgpr[3][0] = (uint32_t)(add_bits >> 32);
+
+    Instruction atomic_add{};
+    atomic_add.opcode = Opcode::GLOBAL_ATOMIC_ADD_F64;
+    atomic_add.format = InstFormat::FLAT_GLOBAL;
+    atomic_add.size_bytes = 8;
+    atomic_add.src[0].kind = Operand::Kind::VGPR;
+    atomic_add.src[0].index = 0; // v[0:1] = addr
+    atomic_add.src[1].kind = Operand::Kind::NONE; // saddr = off
+    atomic_add.src[2].kind = Operand::Kind::VGPR;
+    atomic_add.src[2].index = 2; // v[2:3] = data
+    atomic_add.dst.kind = Operand::Kind::VGPR;
+    atomic_add.dst.index = 4; // v[4:5] = return old val
+
+    execute_instruction(*ws, atomic_add);
+
+    EXPECT_DOUBLE_EQ(mem_val, 125.75);
+
+    // Verify old value returned in v[4:5]
+    uint64_t ret_bits = ((uint64_t)ws->vgpr[5][0] << 32) | ws->vgpr[4][0];
+    double ret_val;
+    std::memcpy(&ret_val, &ret_bits, sizeof(ret_val));
+    EXPECT_DOUBLE_EQ(ret_val, 100.5);
+}
+
+// ===== GLOBAL_ATOMIC_ADD_X2 =====
+TEST(ISAExecutor, GLOBAL_ATOMIC_ADD_X2) {
+    auto ws = make_wave();
+    uint64_t mem_val = 0x1000000000000000ULL;
+    uint64_t mem_addr = reinterpret_cast<uint64_t>(&mem_val);
+
+    ws->exec = 1ULL; // Lane 0 active
+    ws->vgpr[0][0] = (uint32_t)(mem_addr & 0xFFFFFFFF);
+    ws->vgpr[1][0] = (uint32_t)(mem_addr >> 32);
+
+    uint64_t add_val = 0x000000000000002AULL; // 42
+    ws->vgpr[2][0] = (uint32_t)(add_val & 0xFFFFFFFF);
+    ws->vgpr[3][0] = (uint32_t)(add_val >> 32);
+
+    Instruction atomic_add{};
+    atomic_add.opcode = Opcode::GLOBAL_ATOMIC_ADD_X2;
+    atomic_add.format = InstFormat::FLAT_GLOBAL;
+    atomic_add.size_bytes = 8;
+    atomic_add.src[0].kind = Operand::Kind::VGPR;
+    atomic_add.src[0].index = 0;
+    atomic_add.src[1].kind = Operand::Kind::NONE;
+    atomic_add.src[2].kind = Operand::Kind::VGPR;
+    atomic_add.src[2].index = 2;
+    atomic_add.dst.kind = Operand::Kind::VGPR;
+    atomic_add.dst.index = 4;
+
+    execute_instruction(*ws, atomic_add);
+
+    EXPECT_EQ(mem_val, 0x100000000000002AULL);
+    uint64_t ret_val = ((uint64_t)ws->vgpr[5][0] << 32) | ws->vgpr[4][0];
+    EXPECT_EQ(ret_val, 0x1000000000000000ULL);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

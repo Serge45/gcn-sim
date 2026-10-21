@@ -659,6 +659,8 @@ enum class Opcode {
     GLOBAL_ATOMIC_SMAX,
     GLOBAL_ATOMIC_UMAX,
     GLOBAL_ATOMIC_ADD_F32,
+    GLOBAL_ATOMIC_ADD_F64,
+    GLOBAL_ATOMIC_ADD_X2,
     FLAT_LOAD_UBYTE,
     FLAT_LOAD_SBYTE,
     FLAT_LOAD_USHORT,
@@ -732,6 +734,11 @@ struct Operand {
         EXEC_LO,
         EXEC_HI,
         SCC,
+        M0,
+        SRC_SHARED_BASE,
+        SRC_SHARED_LIMIT,
+        SRC_PRIVATE_BASE,
+        SRC_PRIVATE_LIMIT,
         NONE
     };
     Kind     kind  = Kind::NONE;

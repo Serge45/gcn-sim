@@ -81,3 +81,10 @@ add_dependencies(test_hijack_asm_gemm gcnsim_hip asm_gemm_mfma_co)
 add_executable(test_debugger test_debugger.cpp)
 target_link_libraries(test_debugger gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_debugger COMMAND test_debugger)
+
+# test_cov5 (Code Object Version 5 & Memory Fault Handling)
+add_executable(test_cov5 test_cov5.cpp)
+target_link_libraries(test_cov5 gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_cov5 COMMAND test_cov5
+         --hsaco ${CMAKE_BINARY_DIR}/tools/cov5_kernel/cov5_kernel.hsaco)
+add_dependencies(test_cov5 cov5_kernel_hsaco)

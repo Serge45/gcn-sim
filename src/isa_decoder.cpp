@@ -23,9 +23,7 @@ static Operand decode_src(uint32_t enc, const uint8_t* pc_next4) {
     } else if (enc == 107) {
         op.kind = Operand::Kind::VCC_HI;
     } else if (enc == 124) {
-        // M0 — treat as inline 0 for now
-        op.kind = Operand::Kind::INLINE_CONST;
-        op.imm = 0;
+        op.kind = Operand::Kind::M0;
     } else if (enc == 126) {
         op.kind = Operand::Kind::EXEC_LO;
     } else if (enc == 127) {
@@ -40,6 +38,14 @@ static Operand decode_src(uint32_t enc, const uint8_t* pc_next4) {
         // negative inline consts: -1..-16
         op.kind = Operand::Kind::INLINE_CONST;
         op.imm = (uint64_t)(int64_t)(-(int32_t)(enc - 192));
+    } else if (enc == 235) {
+        op.kind = Operand::Kind::SRC_SHARED_BASE;
+    } else if (enc == 236) {
+        op.kind = Operand::Kind::SRC_SHARED_LIMIT;
+    } else if (enc == 237) {
+        op.kind = Operand::Kind::SRC_PRIVATE_BASE;
+    } else if (enc == 238) {
+        op.kind = Operand::Kind::SRC_PRIVATE_LIMIT;
     } else if (enc == 240) { // 0.5
         op.kind = Operand::Kind::INLINE_CONST;
         op.imm = 0x3F000000;
@@ -96,6 +102,8 @@ static Operand decode_sdst(uint32_t enc) {
         op.kind = Operand::Kind::VCC_LO;
     } else if (enc == 107) {
         op.kind = Operand::Kind::VCC_HI;
+    } else if (enc == 124) {
+        op.kind = Operand::Kind::M0;
     } else if (enc == 126) {
         op.kind = Operand::Kind::EXEC_LO;
     } else if (enc == 127) {
@@ -711,6 +719,9 @@ static Opcode flat_opcode(uint32_t op, bool is_global, bool is_scratch) {
             case 0x4A: return Opcode::GLOBAL_ATOMIC_XOR;
             case 0x4B: return Opcode::GLOBAL_ATOMIC_INC;
             case 0x4C: return Opcode::GLOBAL_ATOMIC_DEC;
+            case 0x4D: return Opcode::GLOBAL_ATOMIC_ADD_F32;
+            case 0x4F: return Opcode::GLOBAL_ATOMIC_ADD_F64;
+            case 0x62: return Opcode::GLOBAL_ATOMIC_ADD_X2;
             // Legacy
             case 0x0C: return Opcode::GLOBAL_LOAD_DWORD;
             case 0x0D: return Opcode::GLOBAL_LOAD_DWORDX2;
@@ -1132,7 +1143,48 @@ Instruction decode(const uint8_t* pc) {
             default: break;
         }
 
-        if (!is_store) {
+        bool is_atomic = false;
+        switch (inst.opcode) {
+            case Opcode::GLOBAL_ATOMIC_SWAP:
+            case Opcode::GLOBAL_ATOMIC_CMPSWAP:
+            case Opcode::GLOBAL_ATOMIC_ADD:
+            case Opcode::GLOBAL_ATOMIC_SUB:
+            case Opcode::GLOBAL_ATOMIC_SMIN:
+            case Opcode::GLOBAL_ATOMIC_UMIN:
+            case Opcode::GLOBAL_ATOMIC_SMAX:
+            case Opcode::GLOBAL_ATOMIC_UMAX:
+            case Opcode::GLOBAL_ATOMIC_AND:
+            case Opcode::GLOBAL_ATOMIC_OR:
+            case Opcode::GLOBAL_ATOMIC_XOR:
+            case Opcode::GLOBAL_ATOMIC_INC:
+            case Opcode::GLOBAL_ATOMIC_DEC:
+            case Opcode::GLOBAL_ATOMIC_ADD_F32:
+            case Opcode::GLOBAL_ATOMIC_ADD_F64:
+            case Opcode::GLOBAL_ATOMIC_ADD_X2:
+                is_atomic = true;
+                break;
+            default: break;
+        }
+
+        if (is_atomic) {
+            inst.src[0].kind  = Operand::Kind::VGPR;
+            inst.src[0].index = vaddr;
+            if (saddr == 0x7F) {
+                inst.src[1].kind = Operand::Kind::NONE;
+            } else {
+                inst.src[1].kind  = Operand::Kind::SGPR;
+                inst.src[1].index = saddr * 2;
+            }
+            inst.src[2].kind  = Operand::Kind::VGPR;
+            inst.src[2].index = vdata;
+            bool glc = (w0 >> 16) & 1;
+            if (glc) {
+                inst.dst.kind  = Operand::Kind::VGPR;
+                inst.dst.index = vdst;
+            } else {
+                inst.dst.kind  = Operand::Kind::NONE;
+            }
+        } else if (!is_store) {
             inst.dst.kind  = Operand::Kind::VGPR;
             inst.dst.index = vdst;
             inst.src[0].kind  = Operand::Kind::VGPR;
@@ -1329,6 +1381,7 @@ Instruction decode(const uint8_t* pc) {
                 inst.dst.index = vdst;
                 inst.src[0] = decode_src(src0, nullptr);
                 inst.src[1] = decode_src(src1, nullptr);
+                inst.op_sel = (w0 >> 11) & 0x3;
                 return inst;
             }
             // Try MFMA: MFMA ops occupy the 10-bit op range 960..1023
@@ -1758,6 +1811,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_STORE_DWORDX4:        return "s_store_dwordx4";
         case Opcode::S_ATOMIC_ADD:           return "s_atomic_add";
         case Opcode::V_MOV_B32:              return "v_mov_b32";
+        case Opcode::V_PK_MOV_B32:           return "v_pk_mov_b32";
         case Opcode::V_READFIRSTLANE_B32:    return "v_readfirstlane_b32";
         case Opcode::V_CVT_F32_I32:          return "v_cvt_f32_i32";
         case Opcode::V_CVT_F32_U32:          return "v_cvt_f32_u32";
@@ -1872,6 +1926,8 @@ const char* opcode_name(Opcode op) {
         case Opcode::GLOBAL_STORE_DWORDX3:   return "global_store_dwordx3";
         case Opcode::GLOBAL_STORE_DWORDX4:   return "global_store_dwordx4";
         case Opcode::GLOBAL_ATOMIC_ADD:      return "global_atomic_add";
+        case Opcode::GLOBAL_ATOMIC_ADD_F64:  return "global_atomic_add_f64";
+        case Opcode::GLOBAL_ATOMIC_ADD_X2:   return "global_atomic_add_x2";
         case Opcode::GLOBAL_ATOMIC_SUB:      return "global_atomic_sub";
         case Opcode::FLAT_LOAD_DWORD:        return "flat_load_dword";
         case Opcode::FLAT_LOAD_DWORDX2:      return "flat_load_dwordx2";

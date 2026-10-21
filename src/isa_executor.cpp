@@ -11,6 +11,11 @@
 
 namespace gcnsim {
 
+static constexpr uint64_t PRIVATE_APERTURE_BASE  = 0x0002000000000000ULL;
+static constexpr uint64_t PRIVATE_APERTURE_LIMIT = 0x00020000FFFFFFFFULL;
+static constexpr uint64_t SHARED_APERTURE_BASE   = 0x0001000000000000ULL;
+static constexpr uint64_t SHARED_APERTURE_LIMIT  = 0x000100000000FFFFULL;
+
 // ---------------------------------------------------------------------------
 // Helpers: read scalar / vector sources
 // ---------------------------------------------------------------------------
@@ -25,6 +30,11 @@ static uint32_t read_src_scalar(const WavefrontState& w, const Operand& op) {
         case Operand::Kind::EXEC_LO:   return (uint32_t)(w.exec & 0xFFFFFFFFULL);
         case Operand::Kind::EXEC_HI:   return (uint32_t)(w.exec >> 32);
         case Operand::Kind::SCC:       return w.scc;
+        case Operand::Kind::M0:        return w.m0;
+        case Operand::Kind::SRC_PRIVATE_BASE:  return (uint32_t)(PRIVATE_APERTURE_BASE & 0xFFFFFFFF);
+        case Operand::Kind::SRC_PRIVATE_LIMIT: return (uint32_t)(PRIVATE_APERTURE_LIMIT & 0xFFFFFFFF);
+        case Operand::Kind::SRC_SHARED_BASE:   return (uint32_t)(SHARED_APERTURE_BASE & 0xFFFFFFFF);
+        case Operand::Kind::SRC_SHARED_LIMIT:  return (uint32_t)(SHARED_APERTURE_LIMIT & 0xFFFFFFFF);
         case Operand::Kind::INLINE_CONST:
         case Operand::Kind::LITERAL:   return (uint32_t)op.imm;
         default:                       return 0;
@@ -41,6 +51,10 @@ static uint64_t read_src_scalar64(const WavefrontState& w, const Operand& op) {
     if (op.kind == Operand::Kind::EXEC || op.kind == Operand::Kind::EXEC_LO) {
         return w.exec;
     }
+    if (op.kind == Operand::Kind::SRC_PRIVATE_BASE)  return PRIVATE_APERTURE_BASE;
+    if (op.kind == Operand::Kind::SRC_PRIVATE_LIMIT) return PRIVATE_APERTURE_LIMIT;
+    if (op.kind == Operand::Kind::SRC_SHARED_BASE)   return SHARED_APERTURE_BASE;
+    if (op.kind == Operand::Kind::SRC_SHARED_LIMIT)  return SHARED_APERTURE_LIMIT;
     // For inline constants and literals, sign-extend the 32-bit value to 64 bits
     // so that -1 (0xFFFFFFFF) becomes 0xFFFFFFFFFFFFFFFF for B64 operations.
     if (op.kind == Operand::Kind::INLINE_CONST ||
@@ -62,6 +76,12 @@ static uint32_t read_vsrc(const WavefrontState& w, const Operand& op, int lane) 
         case Operand::Kind::EXEC:
         case Operand::Kind::EXEC_LO:
             return ((w.exec >> lane) & 1) ? 1 : 0;
+        case Operand::Kind::M0:
+            return w.m0;
+        case Operand::Kind::SRC_PRIVATE_BASE:  return (uint32_t)(PRIVATE_APERTURE_BASE & 0xFFFFFFFF);
+        case Operand::Kind::SRC_PRIVATE_LIMIT: return (uint32_t)(PRIVATE_APERTURE_LIMIT & 0xFFFFFFFF);
+        case Operand::Kind::SRC_SHARED_BASE:   return (uint32_t)(SHARED_APERTURE_BASE & 0xFFFFFFFF);
+        case Operand::Kind::SRC_SHARED_LIMIT:  return (uint32_t)(SHARED_APERTURE_LIMIT & 0xFFFFFFFF);
         case Operand::Kind::INLINE_CONST:
         case Operand::Kind::LITERAL:
             return (uint32_t)op.imm;
@@ -86,6 +106,12 @@ static void write_sdst(WavefrontState& w, const Operand& op, uint32_t val) {
         case Operand::Kind::EXEC:
         case Operand::Kind::EXEC_LO:
             w.exec = (w.exec & ~0xFFFFFFFFULL) | val;
+            break;
+        case Operand::Kind::EXEC_HI:
+            w.exec = (w.exec & 0xFFFFFFFFULL) | ((uint64_t)val << 32);
+            break;
+        case Operand::Kind::M0:
+            w.m0 = val;
             break;
         default: break;
     }
@@ -402,7 +428,25 @@ static uint64_t flat_addr(const WavefrontState& w, const Instruction& inst, int 
     }
     uint64_t addr = ((uint64_t)w.vgpr[inst.src[0].index+1][lane] << 32) |
                      w.vgpr[inst.src[0].index][lane];
-    return addr + inst.flat_offset;
+    addr += inst.flat_offset;
+
+    // Check Apertures for generic FLAT:
+    uint32_t addr_hi = (uint32_t)(addr >> 32);
+    if (addr_hi == (uint32_t)(PRIVATE_APERTURE_BASE >> 32)) {
+        if (w.scratch_ptr) {
+            uint32_t scratch_off = (uint32_t)(addr & 0xFFFFFFFFULL);
+            return (uint64_t)(uintptr_t)w.scratch_ptr +
+                   (uint64_t)lane * w.scratch_per_lane +
+                   scratch_off;
+        }
+    } else if (addr_hi == (uint32_t)(SHARED_APERTURE_BASE >> 32)) {
+        if (w.lds_ptr) {
+            uint32_t lds_off = (uint32_t)(addr & 0xFFFFFFFFULL);
+            return (uint64_t)(uintptr_t)w.lds_ptr + lds_off;
+        }
+    }
+
+    return addr;
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,8 +1714,13 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     case Opcode::S_SETPC_B64: {
-        // Set PC to value in SGPR pair — treat as no-op in simulation
-        // (used for indirect calls/returns)
+        wave.pc = read_src_scalar64(wave, inst.src[0]);
+        break;
+    }
+    case Opcode::S_SWAPPC_B64: {
+        uint64_t target = read_src_scalar64(wave, inst.src[0]);
+        write_sdst64(wave, inst.dst, wave.pc);
+        wave.pc = target;
         break;
     }
 
@@ -3239,6 +3288,58 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             mem_store_u32(addr, old + wave.vgpr[inst.src[2].index][lane]);
             if (inst.dst.kind == Operand::Kind::VGPR)
                 wave.vgpr[inst.dst.index][lane] = old;
+        }
+        break;
+    }
+    case Opcode::GLOBAL_ATOMIC_ADD_F64: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint64_t addr;
+            if (inst.src[1].kind == Operand::Kind::SGPR) {
+                uint64_t base = read_src_scalar64(wave, inst.src[1]);
+                addr = base + (int64_t)(int32_t)wave.vgpr[inst.src[0].index][lane] + inst.flat_offset;
+            } else {
+                addr = ((uint64_t)wave.vgpr[inst.src[0].index+1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
+                addr += inst.flat_offset;
+            }
+            uint64_t old_bits = mem_load_u64(addr);
+            double old_val;
+            std::memcpy(&old_val, &old_bits, sizeof(old_val));
+
+            uint64_t add_bits = ((uint64_t)wave.vgpr[inst.src[2].index + 1][lane] << 32) | wave.vgpr[inst.src[2].index][lane];
+            double add_val;
+            std::memcpy(&add_val, &add_bits, sizeof(add_val));
+
+            double new_val = old_val + add_val;
+            uint64_t new_bits;
+            std::memcpy(&new_bits, &new_val, sizeof(new_bits));
+            mem_store_u64(addr, new_bits);
+
+            if (inst.dst.kind == Operand::Kind::VGPR) {
+                wave.vgpr[inst.dst.index][lane]     = (uint32_t)(old_bits & 0xFFFFFFFF);
+                wave.vgpr[inst.dst.index + 1][lane] = (uint32_t)(old_bits >> 32);
+            }
+        }
+        break;
+    }
+    case Opcode::GLOBAL_ATOMIC_ADD_X2: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint64_t addr;
+            if (inst.src[1].kind == Operand::Kind::SGPR) {
+                uint64_t base = read_src_scalar64(wave, inst.src[1]);
+                addr = base + (int64_t)(int32_t)wave.vgpr[inst.src[0].index][lane] + inst.flat_offset;
+            } else {
+                addr = ((uint64_t)wave.vgpr[inst.src[0].index+1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
+                addr += inst.flat_offset;
+            }
+            uint64_t old = mem_load_u64(addr);
+            uint64_t add = ((uint64_t)wave.vgpr[inst.src[2].index + 1][lane] << 32) | wave.vgpr[inst.src[2].index][lane];
+            mem_store_u64(addr, old + add);
+            if (inst.dst.kind == Operand::Kind::VGPR) {
+                wave.vgpr[inst.dst.index][lane]     = (uint32_t)(old & 0xFFFFFFFF);
+                wave.vgpr[inst.dst.index + 1][lane] = (uint32_t)(old >> 32);
+            }
         }
         break;
     }
@@ -5866,11 +5967,31 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // VOP3P (packed 16-bit) — stubs
     // -----------------------------------------------------------------------
     case Opcode::V_PK_MOV_B32: {
-        // Move VGPR pair: dst[0] = src0, dst[1] = src1 (ignores op_sel)
+        // Move 32-bit values into VGPR pair: dst[0] from src0, dst[1] from src1 with op_sel
+        bool op_sel0 = (inst.op_sel & 1) != 0;
+        bool op_sel1 = (inst.op_sel & 2) != 0;
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            wave.vgpr[inst.dst.index][lane]     = read_vsrc(wave, inst.src[0], lane);
-            wave.vgpr[inst.dst.index + 1][lane] = read_vsrc(wave, inst.src[1], lane);
+            uint32_t val0 = 0;
+            if (inst.src[0].kind == Operand::Kind::VGPR) {
+                val0 = wave.vgpr[inst.src[0].index + (op_sel0 ? 1 : 0)][lane];
+            } else if (inst.src[0].kind == Operand::Kind::SGPR) {
+                val0 = wave.sgpr[inst.src[0].index + (op_sel0 ? 1 : 0)];
+            } else {
+                val0 = read_vsrc(wave, inst.src[0], lane);
+            }
+
+            uint32_t val1 = 0;
+            if (inst.src[1].kind == Operand::Kind::VGPR) {
+                val1 = wave.vgpr[inst.src[1].index + (op_sel1 ? 1 : 0)][lane];
+            } else if (inst.src[1].kind == Operand::Kind::SGPR) {
+                val1 = wave.sgpr[inst.src[1].index + (op_sel1 ? 1 : 0)];
+            } else {
+                val1 = read_vsrc(wave, inst.src[1], lane);
+            }
+
+            wave.vgpr[inst.dst.index][lane]     = val0;
+            wave.vgpr[inst.dst.index + 1][lane] = val1;
         }
         break;
     }
