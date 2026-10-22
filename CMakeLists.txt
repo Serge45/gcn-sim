@@ -37,6 +37,16 @@ target_link_libraries(gcnsim_hip PRIVATE gcnsim ${CMAKE_DL_LIBS})
 target_link_options(gcnsim_hip PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/hijack/hip.map")
 target_compile_options(gcnsim_hip PRIVATE -Wall -Wextra)
 
+set_target_properties(gcnsim_hip PROPERTIES
+    OUTPUT_NAME "amdhip64"
+    SOVERSION 6
+    VERSION 6.1.300
+)
+
+add_custom_command(TARGET gcnsim_hip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gcnsim_hip> ${CMAKE_BINARY_DIR}/libgcnsim_hip.so
+)
+
 option(GCNSIM_BUILD_TESTS "Build tests" ON)
 if(GCNSIM_BUILD_TESTS)
     find_package(GTest REQUIRED)

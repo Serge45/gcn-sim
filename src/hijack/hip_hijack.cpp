@@ -10,6 +10,7 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <elf.h>
 #include "gcnsim/hip_hijack.h"
 #include "gcnsim/gcnsim.h"
 #include "gcnsim/debugger_core.h"
@@ -171,6 +172,49 @@ void __hipUnregisterFatBinary(void** doublePtr) {
     if (real_func) {
         real_func(doublePtr);
     }
+}
+
+void __hipRegisterVar(
+    void** fatBinHandle,
+    char* hostVar,
+    char* deviceVar,
+    const char* deviceName,
+    int ext,
+    size_t size,
+    int constant,
+    int global
+) {
+    if (gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        gcnsim::HijackManager::Get().RegisterVar(fatBinHandle, hostVar, deviceVar, deviceName, ext, size, constant, global);
+        return;
+    }
+    static auto real_func = get_real_symbol<void(*)(void**, char*, char*, const char*, int, size_t, int, int)>("__hipRegisterVar");
+    if (real_func) {
+        real_func(fatBinHandle, hostVar, deviceVar, deviceName, ext, size, constant, global);
+    }
+}
+
+void __hipRegisterTexture(
+    void** fatBinHandle,
+    const void* hostVar,
+    const void* deviceVar,
+    const char* deviceName,
+    int type,
+    int norm,
+    int ext
+) {
+    (void)fatBinHandle; (void)hostVar; (void)deviceVar; (void)deviceName; (void)type; (void)norm; (void)ext;
+}
+
+void __hipRegisterSurface(
+    void** fatBinHandle,
+    const void* hostVar,
+    const void* deviceVar,
+    const char* deviceName,
+    int type,
+    int ext
+) {
+    (void)fatBinHandle; (void)hostVar; (void)deviceVar; (void)deviceName; (void)type; (void)ext;
 }
 
 // Memory Allocation Interceptors
@@ -629,6 +673,91 @@ gcnsim::hipError_t hipMemcpy2DAsync(void* dst, size_t dpitch, const void* src, s
     return hipMemcpy2D(dst, dpitch, src, spitch, width, height, kind);
 }
 
+gcnsim::hipError_t hipGetSymbolAddress(void** devPtr, const void* symbol) {
+    if (!devPtr || !symbol) return gcnsim::hipErrorInvalidValue;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void**, const void*)>("hipGetSymbolAddress");
+        if (real_func) return real_func(devPtr, symbol);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
+    if (var && var->dev_ptr) {
+        *devPtr = var->dev_ptr;
+    } else {
+        *devPtr = const_cast<void*>(symbol);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGetSymbolSize(size_t* size, const void* symbol) {
+    if (!size || !symbol) return gcnsim::hipErrorInvalidValue;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(size_t*, const void*)>("hipGetSymbolSize");
+        if (real_func) return real_func(size, symbol);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
+    if (var) {
+        *size = var->size;
+        return gcnsim::hipSuccess;
+    }
+    return gcnsim::hipErrorInvalidSymbol;
+}
+
+gcnsim::hipError_t hipMemcpyToSymbol(const void* symbol, const void* src, size_t count, size_t offset, gcnsim::hipMemcpyKind kind) {
+    (void)kind;
+    if (!symbol || !src) return gcnsim::hipErrorInvalidValue;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(const void*, const void*, size_t, size_t, gcnsim::hipMemcpyKind)>("hipMemcpyToSymbol");
+        if (real_func) return real_func(symbol, src, count, offset, kind);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
+    void* dst_target = nullptr;
+    if (var && var->dev_ptr) {
+        if (offset + count > var->size) return gcnsim::hipErrorInvalidValue;
+        dst_target = static_cast<char*>(var->dev_ptr) + offset;
+        std::memcpy(dst_target, src, count);
+        if (var->host_var) {
+            std::memcpy(static_cast<char*>(const_cast<void*>(var->host_var)) + offset, src, count);
+        }
+    } else {
+        dst_target = static_cast<char*>(const_cast<void*>(symbol)) + offset;
+        std::memcpy(dst_target, src, count);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemcpyToSymbolAsync(const void* symbol, const void* src, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemcpyToSymbol(symbol, src, count, offset, kind);
+}
+
+gcnsim::hipError_t hipMemcpyFromSymbol(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind) {
+    (void)kind;
+    if (!dst || !symbol) return gcnsim::hipErrorInvalidValue;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, const void*, size_t, size_t, gcnsim::hipMemcpyKind)>("hipMemcpyFromSymbol");
+        if (real_func) return real_func(dst, symbol, count, offset, kind);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
+    const void* src_target = nullptr;
+    if (var && var->dev_ptr) {
+        if (offset + count > var->size) return gcnsim::hipErrorInvalidValue;
+        src_target = static_cast<const char*>(var->dev_ptr) + offset;
+    } else {
+        src_target = static_cast<const char*>(symbol) + offset;
+    }
+    std::memcpy(dst, src_target, count);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemcpyFromSymbolAsync(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream) {
+    (void)stream;
+    return hipMemcpyFromSymbol(dst, symbol, count, offset, kind);
+}
+
 gcnsim::hipError_t hipGetLastError(void) {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void)>("hipGetLastError");
@@ -911,6 +1040,63 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
     auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
     *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
     return gcnsim::hipSuccess;
+}
+
+static size_t get_inmemory_elf_size(const void* image) {
+    if (!image) return 0;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(image);
+    if (bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') {
+        return 0;
+    }
+    const Elf64_Ehdr* ehdr = reinterpret_cast<const Elf64_Ehdr*>(image);
+    size_t max_size = sizeof(Elf64_Ehdr);
+    if (ehdr->e_phoff > 0) {
+        max_size = std::max(max_size, (size_t)(ehdr->e_phoff + ehdr->e_phentsize * ehdr->e_phnum));
+    }
+    if (ehdr->e_shoff > 0) {
+        max_size = std::max(max_size, (size_t)(ehdr->e_shoff + ehdr->e_shentsize * ehdr->e_shnum));
+        const Elf64_Shdr* shdrs = reinterpret_cast<const Elf64_Shdr*>(bytes + ehdr->e_shoff);
+        for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
+            if (shdrs[i].sh_type != SHT_NOBITS) {
+                max_size = std::max(max_size, (size_t)(shdrs[i].sh_offset + shdrs[i].sh_size));
+            }
+        }
+    }
+    return max_size;
+}
+
+gcnsim::hipError_t hipModuleLoadData(gcnsim::hipModule_t* module, const void* image) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipModule_t*, const void*)>("hipModuleLoadData");
+        if (real_func) return real_func(module, image);
+        return gcnsim::hipErrorLaunchFailure;
+    }
+    if (!module || !image) return gcnsim::hipErrorInvalidValue;
+
+    size_t size = get_inmemory_elf_size(image);
+    if (size == 0) return gcnsim::hipErrorInvalidImage;
+
+    std::string err;
+    auto mod = gcnsim::load_hsaco_from_memory(reinterpret_cast<const uint8_t*>(image), size, err);
+    if (!mod) {
+        std::cerr << "[gcnsim_hip] hipModuleLoadData failed: " << err << std::endl;
+        return gcnsim::hipErrorInvalidImage;
+    }
+
+    auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
+    *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipModuleLoadDataEx(
+    gcnsim::hipModule_t* module,
+    const void* image,
+    unsigned int numOptions,
+    gcnsim::hipJitOption* options,
+    void** optionValues
+) {
+    (void)numOptions; (void)options; (void)optionValues;
+    return hipModuleLoadData(module, image);
 }
 
 gcnsim::hipError_t hipModuleGetFunction(gcnsim::hipFunction_t* function, gcnsim::hipModule_t module, const char* name) {

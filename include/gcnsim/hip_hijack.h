@@ -22,6 +22,7 @@ enum hipError_t {
     hipErrorOutOfMemory = 2,
     hipErrorMemoryAllocation = 2,
     hipErrorInvalidDeviceFunction = 8,
+    hipErrorInvalidSymbol = 13,
     hipErrorLaunchFailure = 901,
     hipErrorNotFound = 300,
     hipErrorInvalidImage = 200,
@@ -133,6 +134,27 @@ enum hipDeviceAttribute_t {
     hipDeviceAttributeCooperativeMultiDeviceLaunch = 86,
 };
 
+enum hipJitOption {
+    hipJitOptionMaxRegisters = 0,
+    hipJitOptionThreadsPerBlock,
+    hipJitOptionWallTime,
+    hipJitOptionInfoLogBuffer,
+    hipJitOptionInfoLogBufferSizeBytes,
+    hipJitOptionErrorLogBuffer,
+    hipJitOptionErrorLogBufferSizeBytes,
+    hipJitOptionOptimizationLevel,
+    hipJitOptionTargetFromContext,
+    hipJitOptionTarget,
+    hipJitOptionFallbackStrategy,
+    hipJitOptionGenerateDebugInfo,
+    hipJitOptionLogVerbose,
+    hipJitOptionGenerateLineInfo,
+    hipJitOptionCacheMode,
+    hipJitOptionSm3xOpt,
+    hipJitOptionFastCompile,
+    hipJitOptionNumOptions
+};
+
 // Struct layout used by Clang/HIP for fat binaries
 struct FatBinaryHeader {
     uint32_t magic;
@@ -151,6 +173,15 @@ struct RegisteredKernel {
     // Cached parsed kernel information
     mutable std::optional<HsacoModule> loaded_module;
     mutable const KernelInfo* cached_kernel_info = nullptr;
+};
+
+struct RegisteredVar {
+    const void* host_var;
+    std::string name;
+    size_t size;
+    bool is_constant;
+    bool is_global;
+    void* dev_ptr;
 };
 
 class HijackManager {
@@ -289,6 +320,49 @@ public:
         return nullptr;
     }
 
+    void RegisterVar(
+        void** fatBinHandle,
+        char* hostVar,
+        char* deviceVar,
+        const char* deviceName,
+        int ext,
+        size_t size,
+        int constant,
+        int global
+    ) {
+        (void)fatBinHandle; (void)deviceVar; (void)ext;
+        void* dev_alloc = std::malloc(size);
+        if (hostVar && dev_alloc) {
+            std::memcpy(dev_alloc, hostVar, size);
+        }
+        RegisteredVar rv{
+            .host_var = hostVar,
+            .name = deviceName ? deviceName : "",
+            .size = size,
+            .is_constant = (constant != 0),
+            .is_global = (global != 0),
+            .dev_ptr = dev_alloc
+        };
+        registered_vars_[hostVar] = rv;
+        if (deviceName && std::strlen(deviceName) > 0) {
+            registered_vars_by_name_[deviceName] = hostVar;
+        }
+    }
+
+    const RegisteredVar* FindRegisteredVar(const void* symbol) const {
+        if (!symbol) return nullptr;
+        auto it = registered_vars_.find(symbol);
+        if (it != registered_vars_.end()) {
+            return &it->second;
+        }
+        for (const auto& pair : registered_vars_) {
+            if (pair.second.name == reinterpret_cast<const char*>(symbol)) {
+                return &pair.second;
+            }
+        }
+        return nullptr;
+    }
+
     const KernelInfo* ResolveKernelInfo(const RegisteredKernel& reg) const {
         if (reg.cached_kernel_info) {
             return reg.cached_kernel_info;
@@ -350,6 +424,10 @@ private:
     
     // Mapping of host stub pointers to kernels
     std::unordered_map<const void*, RegisteredKernel> registered_kernels_;
+    
+    // Mapping of global/constant variables
+    std::unordered_map<const void*, RegisteredVar> registered_vars_;
+    std::unordered_map<std::string, const void*> registered_vars_by_name_;
 };
 
 } // namespace gcnsim
@@ -421,6 +499,43 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     uint32_t flags
 );
 gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname);
+gcnsim::hipError_t hipModuleLoadData(gcnsim::hipModule_t* module, const void* image);
+gcnsim::hipError_t hipModuleLoadDataEx(gcnsim::hipModule_t* module, const void* image, unsigned int numOptions, gcnsim::hipJitOption* options, void** optionValues);
 gcnsim::hipError_t hipModuleGetFunction(gcnsim::hipFunction_t* function, gcnsim::hipModule_t module, const char* name);
 gcnsim::hipError_t hipModuleUnload(gcnsim::hipModule_t module);
+
+void __hipRegisterVar(
+    void** fatBinHandle,
+    char* hostVar,
+    char* deviceVar,
+    const char* deviceName,
+    int ext,
+    size_t size,
+    int constant,
+    int global
+);
+void __hipRegisterTexture(
+    void** fatBinHandle,
+    const void* hostVar,
+    const void* deviceVar,
+    const char* deviceName,
+    int type,
+    int norm,
+    int ext
+);
+void __hipRegisterSurface(
+    void** fatBinHandle,
+    const void* hostVar,
+    const void* deviceVar,
+    const char* deviceName,
+    int type,
+    int ext
+);
+
+gcnsim::hipError_t hipGetSymbolAddress(void** devPtr, const void* symbol);
+gcnsim::hipError_t hipGetSymbolSize(size_t* size, const void* symbol);
+gcnsim::hipError_t hipMemcpyToSymbol(const void* symbol, const void* src, size_t count, size_t offset, gcnsim::hipMemcpyKind kind);
+gcnsim::hipError_t hipMemcpyToSymbolAsync(const void* symbol, const void* src, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpyFromSymbol(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind);
+gcnsim::hipError_t hipMemcpyFromSymbolAsync(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
 }

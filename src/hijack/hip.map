@@ -54,6 +54,47 @@ hip_4.2 {
         hipMemcpyPeerAsync;
         hipMemcpy2D;
         hipMemcpy2DAsync;
+        __hipRegisterVar;
+        __hipRegisterTexture;
+        __hipRegisterSurface;
+        hipGetSymbolAddress;
+        hipGetSymbolSize;
+        hipMemcpyToSymbol;
+        hipMemcpyToSymbolAsync;
+        hipMemcpyFromSymbol;
+        hipMemcpyFromSymbolAsync;
+        hipModuleLoadData;
+        hipModuleLoadDataEx;
     local:
         *;
 };
+
+hip_4.3 {
+} hip_4.2;
+
+hip_4.4 {
+} hip_4.3;
+
+hip_4.5 {
+} hip_4.4;
+
+hip_5.0 {
+} hip_4.5;
+
+hip_5.1 {
+} hip_5.0;
+
+hip_5.2 {
+} hip_5.1;
+
+hip_5.3 {
+} hip_5.2;
+
+hip_5.5 {
+} hip_5.3;
+
+hip_5.6 {
+} hip_5.5;
+
+hip_6.0 {
+} hip_5.6;
