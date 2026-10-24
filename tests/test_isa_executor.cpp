@@ -602,6 +602,133 @@ TEST(ISAExecutor, GLOBAL_ATOMIC_ADD_X2) {
     EXPECT_EQ(ret_val, 0x1000000000000000ULL);
 }
 
+// ===== V_PERMLANE16_B32 & V_PERMLANEX16_B32 =====
+TEST(ISAExecutor, V_PERMLANE16_B32) {
+    auto ws = make_wave();
+    for (int i = 0; i < 64; i++) {
+        ws->vgpr[0][i] = 100 + i;
+    }
+
+    // Selector to reverse order within each 16-lane row:
+    // Lane 0 selects 15, lane 1 selects 14 ... lane 7 selects 8 -> s0 = 0x89ABCDEF
+    // Lane 8 selects 7 ... lane 15 selects 0 -> s1 = 0x01234567
+    ws->sgpr[0] = 0x89ABCDEFu;
+    ws->sgpr[1] = 0x01234567u;
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_PERMLANE16_B32;
+    inst.format = InstFormat::VOP3A;
+    inst.size_bytes = 8;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::SGPR;
+    inst.src[1].index = 0;
+    inst.src[2].kind = Operand::Kind::SGPR;
+    inst.src[2].index = 1;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 1;
+
+    execute_instruction(*ws, inst);
+
+    // Row 0 (0..15)
+    EXPECT_EQ(ws->vgpr[1][0], 115u);
+    EXPECT_EQ(ws->vgpr[1][1], 114u);
+    EXPECT_EQ(ws->vgpr[1][15], 100u);
+
+    // Row 1 (16..31)
+    EXPECT_EQ(ws->vgpr[1][16], 131u);
+    EXPECT_EQ(ws->vgpr[1][31], 116u);
+}
+
+TEST(ISAExecutor, V_PERMLANEX16_B32) {
+    auto ws = make_wave();
+    for (int i = 0; i < 64; i++) {
+        ws->vgpr[0][i] = 100 + i;
+    }
+
+    // Invert within row:
+    ws->sgpr[0] = 0x89ABCDEFu;
+    ws->sgpr[1] = 0x01234567u;
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_PERMLANEX16_B32;
+    inst.format = InstFormat::VOP3A;
+    inst.size_bytes = 8;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::SGPR;
+    inst.src[1].index = 0;
+    inst.src[2].kind = Operand::Kind::SGPR;
+    inst.src[2].index = 1;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 1;
+
+    execute_instruction(*ws, inst);
+
+    // Row 0 reads from Row 1 (lanes 16..31)
+    EXPECT_EQ(ws->vgpr[1][0], 131u); // 100 + 16 + 15
+    EXPECT_EQ(ws->vgpr[1][15], 116u); // 100 + 16 + 0
+
+    // Row 1 reads from Row 0 (lanes 0..15)
+    EXPECT_EQ(ws->vgpr[1][16], 115u); // 100 + 0 + 15
+    EXPECT_EQ(ws->vgpr[1][31], 100u); // 100 + 0 + 0
+}
+
+TEST(ISAExecutor, V_CVT_PKRTZ_F16_F32) {
+    auto ws = make_wave();
+    float f0 = 1.5f;
+    float f1 = 2.5f;
+    for (int i = 0; i < 64; i++) {
+        std::memcpy(&ws->vgpr[0][i], &f0, 4);
+        std::memcpy(&ws->vgpr[1][i], &f1, 4);
+    }
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_CVT_PKRTZ_F16_F32;
+    inst.format = InstFormat::VOP3A;
+    inst.size_bytes = 8;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::VGPR;
+    inst.src[1].index = 1;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 2;
+
+    execute_instruction(*ws, inst);
+
+    uint32_t packed = ws->vgpr[2][0];
+    uint16_t h0 = packed & 0xFFFF;
+    uint16_t h1 = packed >> 16;
+    EXPECT_EQ(h0, 0x3E00u); // 1.5 in IEEE fp16
+    EXPECT_EQ(h1, 0x4100u); // 2.5 in IEEE fp16
+}
+
+TEST(ISAExecutor, DS_SWIZZLE_B32) {
+    auto ws = make_wave();
+    for (int i = 0; i < 64; i++) {
+        ws->vgpr[0][i] = 100 + i;
+    }
+
+    // Quad-Permute mode: swap adjacent pairs (1, 0, 3, 2)
+    // pattern = 0x8000 | (1 << 0) | (0 << 2) | (3 << 4) | (2 << 6) = 0x8000 | 1 | 0 | 48 | 128 = 0x80B1
+    Instruction inst{};
+    inst.opcode = Opcode::DS_SWIZZLE_B32;
+    inst.format = InstFormat::DS;
+    inst.size_bytes = 8;
+    inst.ds_offset0 = 0x80B1u;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 1;
+
+    execute_instruction(*ws, inst);
+
+    EXPECT_EQ(ws->vgpr[1][0], 101u);
+    EXPECT_EQ(ws->vgpr[1][1], 100u);
+    EXPECT_EQ(ws->vgpr[1][2], 103u);
+    EXPECT_EQ(ws->vgpr[1][3], 102u);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

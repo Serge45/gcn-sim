@@ -1691,6 +1691,20 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
     }
+    case Opcode::S_BUFFER_LOAD_DWORDX8: {
+        uint64_t base = read_src_scalar64(wave, inst.src[0]);
+        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        for (int i = 0; i < 8; i++)
+            wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        break;
+    }
+    case Opcode::S_BUFFER_LOAD_DWORDX16: {
+        uint64_t base = read_src_scalar64(wave, inst.src[0]);
+        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        for (int i = 0; i < 16; i++)
+            wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        break;
+    }
     case Opcode::S_AND_SAVEEXEC_B64: {
         uint64_t old_exec = wave.exec;
         uint64_t src = read_src_scalar64(wave, inst.src[0]);
@@ -3238,6 +3252,58 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
+    case Opcode::V_PERMLANE16_B32: {
+        uint32_t s0_vals[WAVE_SIZE];
+        for (int l = 0; l < WAVE_SIZE; l++) {
+            s0_vals[l] = read_vsrc(wave, inst.src[0], l);
+        }
+        uint64_t s1 = (inst.src[1].kind == Operand::Kind::VGPR) ? wave.vgpr[inst.src[1].index][0] : read_src_scalar(wave, inst.src[1]);
+        uint64_t s2 = (inst.src[2].kind == Operand::Kind::VGPR) ? wave.vgpr[inst.src[2].index][0] : read_src_scalar(wave, inst.src[2]);
+        uint64_t lanesel = (s2 << 32) | (s1 & 0xFFFFFFFFULL);
+
+        for (int row = 0; row < 4; row++) {
+            for (int i = 0; i < 16; i++) {
+                int lane = row * 16 + i;
+                if (!((wave.exec >> lane) & 1)) continue;
+                int src_offset = (lanesel >> (i * 4)) & 0xF;
+                int src_lane = row * 16 + src_offset;
+                wave.vgpr[inst.dst.index][lane] = s0_vals[src_lane];
+            }
+        }
+        break;
+    }
+    case Opcode::V_PERMLANEX16_B32: {
+        uint32_t s0_vals[WAVE_SIZE];
+        for (int l = 0; l < WAVE_SIZE; l++) {
+            s0_vals[l] = read_vsrc(wave, inst.src[0], l);
+        }
+        uint64_t s1 = (inst.src[1].kind == Operand::Kind::VGPR) ? wave.vgpr[inst.src[1].index][0] : read_src_scalar(wave, inst.src[1]);
+        uint64_t s2 = (inst.src[2].kind == Operand::Kind::VGPR) ? wave.vgpr[inst.src[2].index][0] : read_src_scalar(wave, inst.src[2]);
+        uint64_t lanesel = (s2 << 32) | (s1 & 0xFFFFFFFFULL);
+
+        for (int row = 0; row < 4; row++) {
+            int altrow = row ^ 1;
+            for (int i = 0; i < 16; i++) {
+                int lane = row * 16 + i;
+                if (!((wave.exec >> lane) & 1)) continue;
+                int src_offset = (lanesel >> (i * 4)) & 0xF;
+                int src_lane = altrow * 16 + src_offset;
+                wave.vgpr[inst.dst.index][lane] = s0_vals[src_lane];
+            }
+        }
+        break;
+    }
+    case Opcode::V_CVT_PKRTZ_F16_F32: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            float s0 = read_vsrc_f32_mod(wave, inst, 0, lane);
+            float s1 = read_vsrc_f32_mod(wave, inst, 1, lane);
+            uint16_t h0 = f32_to_f16(s0);
+            uint16_t h1 = f32_to_f16(s1);
+            wave.vgpr[inst.dst.index][lane] = ((uint32_t)h1 << 16) | h0;
+        }
+        break;
+    }
     // -----------------------------------------------------------------------
     // Global flat memory — additional widths and atomics
     // -----------------------------------------------------------------------
@@ -3984,8 +4050,37 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     case Opcode::DS_NOP:
+        break;
     case Opcode::DS_SWIZZLE_B32: {
-        // No-op or unsimulated swizzle
+        uint16_t pattern = inst.ds_offset0;
+        uint32_t tmp[WAVE_SIZE];
+        for (int l = 0; l < WAVE_SIZE; l++) {
+            tmp[l] = wave.vgpr[inst.src[0].index][l];
+        }
+        if (pattern & 0x8000) {
+            // Quad-Permute Mode
+            for (int lane = 0; lane < WAVE_SIZE; lane++) {
+                if (!((wave.exec >> lane) & 1)) continue;
+                int quad_id = lane & ~3;
+                int lane_in_quad = lane & 3;
+                int src_offset = (pattern >> (2 * lane_in_quad)) & 3;
+                int src_lane = quad_id + src_offset;
+                wave.vgpr[inst.dst.index][lane] = tmp[src_lane];
+            }
+        } else {
+            // Bitmask-Permute Mode
+            uint8_t and_mask = pattern & 0x1F;
+            uint8_t or_mask  = (pattern >> 5) & 0x1F;
+            uint8_t xor_mask = (pattern >> 10) & 0x1F;
+            for (int lane = 0; lane < WAVE_SIZE; lane++) {
+                if (!((wave.exec >> lane) & 1)) continue;
+                int half_wave = lane & ~31;
+                int lane5 = lane & 31;
+                int target_lane5 = ((lane5 & and_mask) ^ xor_mask) | or_mask;
+                int src_lane = half_wave + (target_lane5 & 31);
+                wave.vgpr[inst.dst.index][lane] = tmp[src_lane];
+            }
+        }
         break;
     }
     // -----------------------------------------------------------------------

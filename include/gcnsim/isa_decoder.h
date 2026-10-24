@@ -428,6 +428,8 @@ enum class Opcode {
     V_CVT_PK_U16_U32,
     V_CVT_PK_I16_I32,
     V_PERM_B32,
+    V_PERMLANE16_B32,
+    V_PERMLANEX16_B32,
     V_XAD_U32,
     V_MIN3_F16,
     V_MIN3_I16,

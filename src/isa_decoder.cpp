@@ -603,6 +603,8 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x277: return Opcode::V_AND_OR_B32;
         case 0x278: return Opcode::V_OR3_B32;
         case 0x2F5: return Opcode::V_MAD_F32;
+        case 0x25B: return Opcode::V_PERMLANE16_B32;
+        case 0x25C: return Opcode::V_PERMLANEX16_B32;
         case 0x2EC: return Opcode::V_PERM_B32;
         case 0x2EE: return Opcode::V_XAD_U32;
         // VOP3B carry-chain
@@ -1941,6 +1943,10 @@ const char* opcode_name(Opcode op) {
         case Opcode::DS_ADD_RTN_U32:         return "ds_add_rtn_u32";
         case Opcode::DS_BPERMUTE_B32:        return "ds_bpermute_b32";
         case Opcode::DS_PERMUTE_B32:         return "ds_permute_b32";
+        case Opcode::V_PERMLANE16_B32:       return "v_permlane16_b32";
+        case Opcode::V_PERMLANEX16_B32:      return "v_permlanex16_b32";
+        case Opcode::V_PERM_B32:             return "v_perm_b32";
+        case Opcode::V_CVT_PKRTZ_F16_F32:    return "v_cvt_pkrtz_f16_f32";
         case Opcode::BUFFER_LOAD_DWORD:      return "buffer_load_dword";
         case Opcode::BUFFER_LOAD_DWORDX2:    return "buffer_load_dwordx2";
         case Opcode::BUFFER_LOAD_DWORDX4:    return "buffer_load_dwordx4";
