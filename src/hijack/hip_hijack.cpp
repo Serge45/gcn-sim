@@ -503,6 +503,28 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
     return gcnsim::hipSuccess;
 }
 
+gcnsim::hipError_t hipGetDevicePropertiesR0600(gcnsim::hipDeviceProp_t* prop, int deviceId) {
+    return hipGetDeviceProperties(prop, deviceId);
+}
+
+gcnsim::hipError_t hipGetDevicePropertiesR0000(gcnsim::hipDeviceProp_t* prop, int deviceId) {
+    return hipGetDeviceProperties(prop, deviceId);
+}
+
+const char* hipGetErrorString(gcnsim::hipError_t hip_error) {
+    switch (hip_error) {
+        case gcnsim::hipSuccess: return "hipSuccess";
+        case gcnsim::hipErrorInvalidValue: return "hipErrorInvalidValue";
+        case gcnsim::hipErrorOutOfMemory: return "hipErrorOutOfMemory";
+        case gcnsim::hipErrorInvalidDeviceFunction: return "hipErrorInvalidDeviceFunction";
+        case gcnsim::hipErrorLaunchFailure: return "hipErrorLaunchFailure";
+        case gcnsim::hipErrorNotFound: return "hipErrorNotFound";
+        case gcnsim::hipErrorInvalidImage: return "hipErrorInvalidImage";
+        case gcnsim::hipErrorInvalidSymbol: return "hipErrorInvalidSymbol";
+        default: return "hipErrorUnknown";
+    }
+}
+
 gcnsim::hipError_t hipDeviceGetAttribute(int* pi, gcnsim::hipDeviceAttribute_t attr, int deviceId) {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*, gcnsim::hipDeviceAttribute_t, int)>("hipDeviceGetAttribute");

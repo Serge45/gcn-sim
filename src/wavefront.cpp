@@ -57,15 +57,19 @@ void init_wavefront(WavefrontState& wave,
         wave.workitem_id[lane][2] = flat_id / (block_x * block_y);
     }
 
-    // VGPR0 = workitem_id.x (always provided by hardware)
-    for (int lane = 0; lane < WAVE_SIZE; lane++)
-        wave.vgpr[0][lane] = wave.workitem_id[lane][0];
-
-    // VGPR1 = workitem_id.y, VGPR2 = workitem_id.z (if enabled by kernel descriptor)
-    // enable_vgpr_workitem_id is bits [1:0] of compute_pgm_rsrc2[11:12]
-    // Actually: RSRC2 bits [12:11] = enable_vgpr_workitem_id
-    // 0 = only X, 1 = X and Y, 2 = X, Y, and Z
+    // VGPR0 = packed work-item IDs (GFX90A / FeaturePackedTID):
+    //   Bits [9:0]   = workitem_id.x (always initialized)
+    //   Bits [19:10] = workitem_id.y (if enable_vgpr_workitem_id >= 1)
+    //   Bits [29:20] = workitem_id.z (if enable_vgpr_workitem_id >= 2)
     uint32_t enable_vgpr_workitem_id = (kd.compute_pgm_rsrc2 >> 11) & 0x3;
+    for (int lane = 0; lane < WAVE_SIZE; lane++) {
+        uint32_t tid_x = wave.workitem_id[lane][0] & 0x3ff;
+        uint32_t tid_y = (enable_vgpr_workitem_id >= 1) ? (wave.workitem_id[lane][1] & 0x3ff) : 0;
+        uint32_t tid_z = (enable_vgpr_workitem_id >= 2) ? (wave.workitem_id[lane][2] & 0x3ff) : 0;
+        wave.vgpr[0][lane] = tid_x | (tid_y << 10) | (tid_z << 20);
+    }
+
+    // VGPR1 = workitem_id.y, VGPR2 = workitem_id.z (for unpacked ABI compatibility)
     if (enable_vgpr_workitem_id >= 1) {
         for (int lane = 0; lane < WAVE_SIZE; lane++)
             wave.vgpr[1][lane] = wave.workitem_id[lane][1];

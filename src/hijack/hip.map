@@ -65,6 +65,8 @@ hip_4.2 {
         hipMemcpyFromSymbolAsync;
         hipModuleLoadData;
         hipModuleLoadDataEx;
+        hipGetDevicePropertiesR0000;
+        hipGetErrorString;
     local:
         *;
 };
@@ -97,4 +99,6 @@ hip_5.6 {
 } hip_5.5;
 
 hip_6.0 {
+    global:
+        hipGetDevicePropertiesR0600;
 } hip_5.6;

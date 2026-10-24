@@ -563,12 +563,31 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x201: return Opcode::V_AND_OR_B32;    // gfx90a encoding (was 0x277 on Vega)
         case 0x202: return Opcode::V_OR3_B32;       // gfx90a encoding (was 0x278 on Vega)
         case 0x204: return Opcode::UNKNOWN;         // v_cubeid_f32 (graphics)
-        case 0x209: return Opcode::V_BFE_U32;
-        case 0x20A: return Opcode::V_BFE_I32;
-        case 0x20B: return Opcode::V_BFI_B32;
-        case 0x1CB: return Opcode::V_FMA_F32;    // gfx90a encoding
-        case 0x20C: return Opcode::V_FMA_F32;    // Vega encoding
-        case 0x20D: return Opcode::V_FMA_F64;
+        case 0x1C8: return Opcode::V_BFE_U32;       // gfx90a encoding
+        case 0x1C9: return Opcode::V_BFE_I32;       // gfx90a encoding
+        case 0x1CA: return Opcode::V_BFI_B32;       // gfx90a encoding
+        case 0x1CB: return Opcode::V_FMA_F32;       // gfx90a encoding
+        case 0x1CC: return Opcode::V_FMA_F64;       // gfx90a encoding
+        case 0x1CE: return Opcode::V_ALIGNBIT_B32;  // gfx90a encoding
+        case 0x1CF: return Opcode::V_ALIGNBYTE_B32; // gfx90a encoding
+        case 0x1D0: return Opcode::V_MIN3_F32;      // gfx90a encoding
+        case 0x1D1: return Opcode::V_MIN3_I32;      // gfx90a encoding
+        case 0x1D2: return Opcode::V_MIN3_U32;      // gfx90a encoding
+        case 0x1D3: return Opcode::V_MAX3_F32;      // gfx90a encoding
+        case 0x1D4: return Opcode::V_MAX3_I32;      // gfx90a encoding
+        case 0x1D5: return Opcode::V_MAX3_U32;      // gfx90a encoding
+        case 0x1D6: return Opcode::V_MED3_F32;      // gfx90a encoding
+        case 0x1D7: return Opcode::V_MED3_I32;      // gfx90a encoding
+        case 0x1D8: return Opcode::V_MED3_U32;      // gfx90a encoding
+        case 0x1D9: return Opcode::V_SAD_U8;        // gfx90a encoding
+        case 0x1DA: return Opcode::V_SAD_HI_U8;     // gfx90a encoding
+        case 0x1DB: return Opcode::V_SAD_U16;       // gfx90a encoding
+        case 0x1DC: return Opcode::V_SAD_U32;       // gfx90a encoding
+        case 0x209: return Opcode::V_BFE_U32;       // Vega encoding
+        case 0x20A: return Opcode::V_BFE_I32;       // Vega encoding
+        case 0x20B: return Opcode::V_BFI_B32;       // Vega encoding
+        case 0x20C: return Opcode::V_FMA_F32;       // Vega encoding
+        case 0x20D: return Opcode::V_FMA_F64;       // Vega encoding
         case 0x20E: return Opcode::UNKNOWN;         // v_lerp_u8
         case 0x20F: return Opcode::V_ALIGNBIT_B32;
         case 0x210: return Opcode::V_ALIGNBYTE_B32;
@@ -591,6 +610,11 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x221: return Opcode::V_CVT_PKRTZ_F16_F32;
         case 0x222: return Opcode::V_CVT_PK_U16_U32;
         case 0x223: return Opcode::V_CVT_PK_I16_I32;
+        case 0x294: return Opcode::V_CVT_PKNORM_I16_F32; // gfx90a encoding
+        case 0x295: return Opcode::V_CVT_PKNORM_U16_F32; // gfx90a encoding
+        case 0x296: return Opcode::V_CVT_PKRTZ_F16_F32;  // gfx90a encoding
+        case 0x297: return Opcode::V_CVT_PK_U16_U32;     // gfx90a encoding
+        case 0x298: return Opcode::V_CVT_PK_I16_I32;     // gfx90a encoding
         case 0x1E8: return Opcode::V_MAD_U64_U32;
         case 0x1E9: return Opcode::V_MAD_I64_I32;
         case 0x228: return Opcode::V_MAD_U64_U32;
@@ -1175,7 +1199,7 @@ Instruction decode(const uint8_t* pc) {
                 inst.src[1].kind = Operand::Kind::NONE;
             } else {
                 inst.src[1].kind  = Operand::Kind::SGPR;
-                inst.src[1].index = saddr * 2;
+                inst.src[1].index = saddr;
             }
             inst.src[2].kind  = Operand::Kind::VGPR;
             inst.src[2].index = vdata;
@@ -1195,7 +1219,7 @@ Instruction decode(const uint8_t* pc) {
                 inst.src[1].kind = Operand::Kind::NONE;
             } else {
                 inst.src[1].kind  = Operand::Kind::SGPR;
-                inst.src[1].index = saddr * 2;
+                inst.src[1].index = saddr;
             }
         } else {
             inst.src[0].kind  = Operand::Kind::VGPR;
@@ -1204,7 +1228,7 @@ Instruction decode(const uint8_t* pc) {
                 inst.src[1].kind = Operand::Kind::NONE;
             } else {
                 inst.src[1].kind  = Operand::Kind::SGPR;
-                inst.src[1].index = saddr * 2;
+                inst.src[1].index = saddr;
             }
             inst.src[2].kind  = Operand::Kind::VGPR;
             inst.src[2].index = vdata;
