@@ -1,440 +1,167 @@
-# CDNA2 (GFX90A) MFMA Lane Layout Reference
+# AMD CDNA2 Matrix Core (MFMA) Lane & Register Layout Guide
 
-This document explains the lane-to-register mapping for every MFMA instruction
-variant supported by gcn-sim.  It is intended for developers writing or
-debugging kernel code that uses MFMA, and for simulator engineers maintaining
-`isa_executor.cpp`.
+The **AMD CDNA2 (MI200 / GFX90a)** architecture introduces second-generation Matrix Cores (**MFMA** — Matrix Fused Multiply-Add) to accelerate dense linear algebra, GEMMs, and deep learning primitives.
 
----
+Unlike conventional Vector ALUs (VALU) where each lane operates independently in SIMD fashion, **MFMA instructions operate cooperatively across all 64 lanes of a Wavefront**. The 64 lanes collectively hold fragments of input matrices $A$ and $B$, broadcast them across an internal cross-lane systolic interconnect, and accumulate outer products into **Accumulator VGPRs (AGPRs)**.
 
-## Background: What is MFMA?
-
-MFMA (Matrix-Fused-Multiply-Add) is a wavefront-wide instruction family on
-AMD CDNA2 (MI-200 / GFX90A) GPUs.  A single MFMA instruction causes all 64
-lanes of a wavefront to cooperate in computing a small dense matrix product:
-
-```
-D = A * B + C
-```
-
-where A, B, C, D are sub-tiles of the full matrices, and the dimensions of
-those tiles are encoded in the instruction name (e.g. `16x16x1` means
-M=16, N=16, K=1 per call).
-
-Key properties:
-
-- **MFMA ignores EXEC.**  All 64 lanes participate unconditionally.
-- **Cross-lane reads.**  The hardware reads src0/src1 values from other lanes
-  within the same "block" (see below).  A compiler cannot treat MFMA like an
-  ordinary per-lane arithmetic instruction.
-- **Accumulator registers (AGPRs).**  Output is accumulated into AGPRs
-  (`a0`, `a1`, …).  On GFX90A the compiler may also use VGPRs for the
-  accumulator when the register pressure allows.
-- **One call, one K-slice.**  For the `K>1` variants (e.g. `16x16x4f32`) a
-  single instruction covers `K` consecutive rows/columns of A and B.  The
-  kernel loops over the full K dimension by calling the instruction multiple
-  times, re-using the same accumulator.
+`gcn-sim` implements bit-accurate functional emulation of all CDNA2 MFMA instructions, cross-lane fragment broadcasting, and cycle-approximate pipeline timing.
 
 ---
 
-## Terminology
+## 1. Architectural Overview & Wavefront Mapping
 
-| Term | Meaning |
-|---|---|
-| **lane** | One of the 64 threads in the wavefront (0–63) |
-| **block** | A contiguous group of lanes that form one MFMA sub-unit |
-| **block_base** | First lane index of the block that contains `lane` |
-| **t** | Lane's position within its block (`lane % block_size`) |
-| **K-group (kg)** | One of the sub-groups that each provide one K-slice of A and B |
-| **gpr** | Register index offset from the base register (0, 1, 2, …) |
-| **AGPR** | Accumulator register (`a[N]` in GCN assembly) |
-| **src0, src1, src2** | MFMA instruction source operands |
-| **dst** | MFMA instruction destination (also used as accumulator input) |
+<div align="center">
 
-In the equations below:
+![MFMA Lane Layout Architecture](images/mfma_lane_layout.png)
 
-- `A[row][k]` is read from `src0` of lane `block_base + row`
-- `B[k][col]` is read from `src1` of lane `block_base + col`
-- `D[row][col]` is written to `(a/v)[dst.index + gpr][lane]`
+</div>
+
+### Key Architectural Concepts
+1. **Wavefront Size = 64 Lanes**:
+   All 64 threads (`lane = 0 .. 63`) in the wavefront collaborate to compute a matrix tile.
+2. **EXEC Mask Bypass**:
+   Per AMD CDNA ISA specifications, **MFMA instructions bypass the 64-bit `EXEC` mask**. Even if a lane is disabled by conditional branching, it participates in matrix outer products to guarantee correct accumulation.
+3. **Dedicated Accumulator Storage (AGPRs)**:
+   GFX90a provides 256 standard Vector General-Purpose Registers (`v[0:255]`) and 256 Accumulator Registers (`a[0:255]`).
+   - GEMM kernels accumulate directly into `a[...]` without occupying standard vector registers.
+   - This enables perfect double-buffering: global/LDS memory prefetches load into `v[...]` while the Matrix Cores compute on `a[...]` in parallel.
 
 ---
 
-## F32 Input Variants (Exact Cross-Lane Semantics)
+## 2. Instruction Matrix Formats & Lane Layouts
 
-These five variants have correct CDNA2 cross-lane outer-product behavior in
-the simulator.
+### A. `v_mfma_f32_32x32x1f32` (Single-Precision Outer Product, $K=1$)
+
+Computes a $32 \times 32$ matrix multiply with $K=1$:
+$$\mathbf{D}_{32 \times 32} = \mathbf{A}_{32 \times 1} \times \mathbf{B}_{1 \times 32} + \mathbf{C}_{32 \times 32}$$
+
+- **Input Fragments**:
+  - `src0` (Matrix $A$): 1 float per lane (32 unique rows across block).
+  - `src1` (Matrix $B$): 1 float per lane (32 unique columns across block).
+- **Output Storage**:
+  - 1024 output elements total ($32 \times 32$).
+  - Distributed across **64 lanes $\times$ 16 registers = 1024 elements** (`a[0:15]` or `v[0:15]`).
+
+#### Block & Lane Partitioning
+The 64-lane wavefront is split into **2 blocks of 32 lanes**:
+- **Block 0 (Lanes 0–31)**: Computes matrix rows $0 \dots 15$.
+- **Block 1 (Lanes 32–63)**: Computes matrix rows $16 \dots 31$.
+
+```mermaid
+flowchart TD
+    subgraph Wavefront["64-Lane Wavefront"]
+        subgraph B0["Block 0 (Lanes 0..31)"]
+            L0["Lane 0: col 0"]
+            L1["Lane 1: col 1"]
+            L31["Lane 31: col 31"]
+        end
+        subgraph B1["Block 1 (Lanes 32..63)"]
+            L32["Lane 32: col 0"]
+            L33["Lane 33: col 1"]
+            L63["Lane 63: col 31"]
+        end
+    end
+
+    subgraph OutputTile["32x32 Output Tile D (1024 Elements)"]
+        R0["Rows 0..15: 16 GPRs x 32 Lanes (Block 0)"]
+        R1["Rows 16..31: 16 GPRs x 32 Lanes (Block 1)"]
+    end
+
+    B0 --> R0
+    B1 --> R1
+```
+
+#### Mapping Equations:
+For lane $L \in [0, 63]$ and register index $g \in [0, 15]$:
+$$\text{block} = \lfloor L / 32 \rfloor \in \{0, 1\}$$
+$$\text{col} = L \pmod{32}$$
+$$\text{row} = \text{block} \times 16 + g$$
+$$\mathbf{D}[\text{row}][\text{col}] \leftarrow \mathbf{a}[g][L]$$
+
+- **Matrix $A$ Broadcast**: $A[\text{row}][0]$ resides in `src0` of Lane $(\text{block} \times 32 + g)$. The Matrix Core broadcasts this scalar to all 32 lanes in the block.
+- **Matrix $B$ Vector**: $B[0][\text{col}]$ resides in `src1` of Lane $L$.
 
 ---
 
-### `v_mfma_f32_4x4x1f32`
+### B. `v_mfma_f32_32x32x2f32` (Unrolled Step, $K=2$)
 
-**Matrix tile:** 4 × 4, one K-slice per call
-**Wavefront partitioning:** 16 independent blocks of 4 lanes
-**Output GPRs per lane:** 4
-**Accumulator type:** AGPR or VGPR (compiler decides)
+Computes a $32 \times 32$ matrix multiply accumulating over $K=2$:
+$$\mathbf{D}_{32 \times 32} = \sum_{k=0}^{1} \mathbf{A}_{32 \times 1}^{(k)} \times \mathbf{B}_{1 \times 32}^{(k)} + \mathbf{C}_{32 \times 32}$$
 
-#### Lane-to-tile mapping
+This instruction is the workhorse of AMD Tensile and rocBLAS FP32 GEMMs.
 
-```
-block_id   = lane / 4
-t          = lane % 4          (row index within the 4×4 tile)
-block_base = block_id * 4
-
-src0[lane] = A[t][k]           (this lane's own A row element)
-src1[lane] = B[k][t]           (this lane's own B column element)
-
-Output register dst[gpr][lane] = D[row=t][col=gpr]
-  where gpr ∈ {0,1,2,3}
-
-B[k][col=gpr] is src1 of lane (block_base + gpr)   ← cross-lane read
-```
-
-#### What the hardware computes (per block, per K call):
+#### K-Group Partitioning
+The 64 lanes are partitioned into **two K-groups**:
+- **K-group 0 (Lanes 0–31)**: Holds $A[:, 0]$ and $B[0, :]$.
+- **K-group 1 (Lanes 32–63)**: Holds $A[:, 1]$ and $B[1, :]$.
 
 ```
-for col in 0..3:
-    D[row][col] += A[row][k] * B[k][col]
+Lane Index (0..63):
+┌───────────────────────────────┬───────────────────────────────┐
+│     K-group 0 (Lanes 0..31)   │    K-group 1 (Lanes 32..63)   │
+│       Processes K = 0         │        Processes K = 1        │
+└───────────────────────────────┴───────────────────────────────┘
 ```
 
-Both `A[row][k]` and `B[k][col]` are sourced from lanes within the same block.
-The hardware broadcast is: lane `block_base+t` provides its `src1` value as
-`B[k][t]` to all other lanes in the block.
-
-#### Visual for one 4×4 block (lanes 0–3):
+#### Register & Matrix Coordinate Mapping:
+For lane $L$ ($lane\_hi = \lfloor L / 32 \rfloor$, $col = L \pmod{32}$) and GPR $g \in [0, 15]$:
+$$\text{row} = 8 \times \lfloor g / 4 \rfloor + 4 \times lane\_hi + (g \pmod 4)$$
 
 ```
-Lane 0: src0=A[0][k], src1=B[k][0] → writes D[0][0..3]
-Lane 1: src0=A[1][k], src1=B[k][1] → writes D[1][0..3]
-Lane 2: src0=A[2][k], src1=B[k][2] → writes D[2][0..3]
-Lane 3: src0=A[3][k], src1=B[k][3] → writes D[3][0..3]
-
-dst[0][lane 0] = D[0][0],  dst[1][lane 0] = D[0][1],
-dst[2][lane 0] = D[0][2],  dst[3][lane 0] = D[0][3]
-
-B[k][col=1] used by lane 0 comes from src1 of lane 1  ← cross-lane
+GPR Mapping Matrix (Row Index vs GPR g and Lane Group):
+┌───────────┬───────────────┬───────────────┐
+│ GPR Index │ Lane 0..31    │ Lane 32..63   │
+│           │ (lane_hi = 0) │ (lane_hi = 1) │
+├───────────┼───────────────┼───────────────┤
+│ g = 0..3  │ Rows 0..3     │ Rows 4..7     │
+│ g = 4..7  │ Rows 8..11    │ Rows 12..15   │
+│ g = 8..11 │ Rows 16..19   │ Rows 20..23   │
+│ g = 12..15│ Rows 24..27   │ Rows 28..31   │
+└───────────┴───────────────┴───────────────┘
 ```
+
+- Each lane computes all 16 rows assigned to its column across both $K=0$ and $K=1$ in a single hardware cycle burst.
 
 ---
 
-### `v_mfma_f32_16x16x1f32`
+### C. `v_mfma_f32_16x16x4f32` (Compact Tile, $K=4$)
 
-**Matrix tile:** 16 × 16, one K-slice per call
-**Wavefront partitioning:** 4 independent blocks of 16 lanes
-**Output GPRs per lane:** 16 (AGPRs: `a[base+0]`…`a[base+15]`)
-**Accumulator type:** AGPR or VGPR
+Computes a $16 \times 16$ matrix multiply accumulating over $K=4$:
+$$\mathbf{D}_{16 \times 16} = \sum_{k=0}^{3} \mathbf{A}_{16 \times 1}^{(k)} \times \mathbf{B}_{1 \times 16}^{(k)} + \mathbf{C}_{16 \times 16}$$
 
-#### Lane-to-tile mapping
-
-```
-block_id   = lane / 16
-t          = lane % 16
-block_base = block_id * 16
-
-src0[lane] = A[t][k]
-src1[lane] = B[k][t]
-
-dst[gpr][lane] = D[row=t][col=gpr],  gpr ∈ {0..15}
-
-B[k][col=gpr] comes from src1 of lane (block_base + gpr)  ← cross-lane
-```
-
-Each of the 4 blocks independently computes a 16×16 tile.  In a typical GEMM
-kernel a single workgroup spans exactly one block (16 threads), and the four
-blocks of the wavefront happen to process different tiles (depending on how
-the compiler assigns work).
+- **Tile Size**: $16 \times 16 = 256$ elements.
+- **Output Storage**: 64 lanes $\times$ 4 registers (`a[0:3]`) = 256 elements.
+- **Four K-groups of 16 lanes**:
+  - $kg = \lfloor L / 16 \rfloor \in \{0, 1, 2, 3\}$.
+  - Lane $L$ contributes to:
+    $$\text{col} = L \pmod{16}$$
+    $$\text{row} = \lfloor L / 16 \rfloor \times 4 + g \quad (g \in [0, 3])$$
 
 ---
 
-### `v_mfma_f32_16x16x4f32`
+## 3. Supported MFMA Instruction Summary
 
-**Matrix tile:** 16 × 16, four K-slices per call
-**Wavefront partitioning:** 1 block of 64 lanes split into 4 K-groups of 16
-**Output GPRs per lane:** 4 (AGPRs)
-**Accumulator type:** AGPR or VGPR
-
-#### Lane-to-tile mapping
-
-```
-kg_out     = lane / 16          (K-group index: 0..3)
-col        = lane % 16          (output column index)
-
-For gpr ∈ {0..3}:
-    row = kg_out * 4 + gpr      (output row index)
-    dst[gpr][lane] = D[row][col]
-
-For each K-group kg ∈ {0..3}:
-    A[kg*4+gpr][k_base+kg] comes from src0 of lane (kg*16 + gpr)
-    B[k_base+kg][col]      comes from src1 of lane (kg*16 + col)
-```
-
-All four K-groups cooperate to produce the full 16×16 output tile in a single
-instruction call.  Each lane accumulates across all four K-groups into its
-4 GPRs.
-
-#### Visual (one instruction call covers K = k_base..k_base+3):
-
-```
-Lanes 0..15  (kg=0): provide A[0..3][k0] in src0, B[k0][0..15] in src1
-Lanes 16..31 (kg=1): provide A[4..7][k1] in src0, B[k1][0..15] in src1
-Lanes 32..47 (kg=2): provide A[8..11][k2] in src0, B[k2][0..15] in src1
-Lanes 48..63 (kg=3): provide A[12..15][k3] in src0, B[k3][0..15] in src1
-
-Lane 0  (kg=0, col=0): dst[0]=D[0][0], dst[1]=D[1][0], dst[2]=D[2][0], dst[3]=D[3][0]
-Lane 16 (kg=1, col=0): dst[0]=D[4][0], dst[1]=D[5][0], dst[2]=D[6][0], dst[3]=D[7][0]
-```
+| Opcode | Input Types | Output Type | Tile Size ($M \times N \times K$) | Output GPRs / Lane | Total Elements |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `v_mfma_f32_32x32x1f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 1$ | 16 (`a[0:15]`) | 1024 |
+| `v_mfma_f32_32x32x2f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 2$ | 16 (`a[0:15]`) | 1024 |
+| `v_mfma_f32_16x16x1f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 1$ | 16 (`a[0:15]`) | 256 (x4 blocks) |
+| `v_mfma_f32_16x16x4f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
+| `v_mfma_f32_4x4x1f32` | FP32 $\times$ FP32 | FP32 | $4 \times 4 \times 1$ | 4 (`a[0:3]`) | 16 (x16 blocks) |
+| `v_mfma_f32_32x32x4f16` | FP16 $\times$ FP16 | FP32 | $32 \times 32 \times 4$ | 16 (`a[0:15]`) | 1024 |
+| `v_mfma_f32_16x16x4f16` | FP16 $\times$ FP16 | FP32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
+| `v_mfma_i32_32x32x4i8` | INT8 $\times$ INT8 | INT32 | $32 \times 32 \times 4$ | 16 (`a[0:15]`) | 1024 |
+| `v_mfma_i32_16x16x4i8` | INT8 $\times$ INT8 | INT32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
+| `v_mfma_f64_16x16x4f64` | FP64 $\times$ FP64 | FP64 | $16 \times 16 \times 4$ | 8 (`a[0:7]` pairs) | 256 |
 
 ---
 
-### `v_mfma_f32_32x32x1f32`
-
-**Matrix tile:** 32 × 32, one K-slice per call
-**Wavefront partitioning:** 2 independent blocks of 32 lanes
-**Output GPRs per lane:** 16 (AGPRs `a[base+0]`…`a[base+15]`)
-**Accumulator type:** AGPR or VGPR
-
-#### Lane-to-tile mapping
-
-```
-block_id   = lane / 32
-t          = lane % 32
-block_base = block_id * 32
-
-src0[lane] = A[block_id*16 + (t % 16)][k]  (only t < 16 contribute new A rows)
-src1[lane] = B[k][t]                         (column = t)
-
-For gpr ∈ {0..15}:
-    dst[gpr][lane] = D[block_id*16 + gpr][col=t]
-
-A[block_id*16+gpr][k] comes from src0 of lane (block_base + gpr)  ← cross-lane
-```
-
-The 32-lane block produces a 16×32 sub-tile.  Lanes 0..15 and 16..31 within
-a block redundantly hold A rows 0..15 (i.e. `t%16` gives the A row index
-within the block), but only GPRs 0..15 are meaningful output — not 16..31.
-
-#### Visual for block 0 (lanes 0–31):
-
-```
-Lane  0: src0=A[0][k],  src1=B[k][0]  → writes D[0..15][0]   via dst[0..15][lane 0]
-Lane  1: src0=A[1][k],  src1=B[k][1]  → writes D[0..15][1]   via dst[0..15][lane 1]
-…
-Lane 15: src0=A[15][k], src1=B[k][15] → writes D[0..15][15]  via dst[0..15][lane 15]
-Lane 16: src0=A[0][k],  src1=B[k][16] → writes D[0..15][16]  via dst[0..15][lane 16]
-…
-Lane 31: src0=A[15][k], src1=B[k][31] → writes D[0..15][31]  via dst[0..15][lane 31]
-```
-
-Cross-lane: `A[gpr][k]` for each gpr is read from `src0` of `lane = block_base+gpr`.
-
----
-
-### `v_mfma_f32_32x32x2f32`
-
-**Matrix tile:** 32 × 32, two K-slices per call
-**Wavefront partitioning:** 1 block of 64 lanes split into 2 K-groups of 32
-**Output GPRs per lane:** 16 (AGPRs)
-**Accumulator type:** AGPR or VGPR
-
-#### Lane-to-tile mapping
-
-```
-kg_out     = lane / 32        (K-group index: 0 or 1)
-col        = lane % 32        (output column)
-
-For gpr ∈ {0..15}:
-    row = kg_out * 16 + gpr
-    dst[gpr][lane] = D[row][col]
-
-For each K-group kg ∈ {0,1}:
-    A[kg*16+gpr][k_base+kg] comes from src0 of lane (kg*32 + gpr)
-    B[k_base+kg][col]       comes from src1 of lane (kg*32 + col)
-```
-
-This is the multi-K analogue of 32×32×1.  Each instruction call contributes
-K = 2 columns of A and rows of B.
-
----
-
-## F16 Input Variants (Simplified Per-Lane Model)
-
-> **Simulator note:** These variants use a simplified per-lane model in
-> `isa_executor.cpp`, not exact CDNA2 cross-lane semantics.  They accumulate
-> the dot product of the two packed F16 values in each lane's src0/src1 into
-> the accumulator, without cross-lane outer-product.  Results are not
-> bitwise-identical to hardware for real GEMM kernels.
-
-### `v_mfma_f32_4x4x4f16`
-
-**Matrix tile:** 4 × 4, K=4 per call (two f16 in src0, two f16 in src1)
-**Output GPRs per lane:** 1 (AGPR)
-**Simulator model:** `acc[lane] += dot(a[0:1], b[0:1])` (per lane)
-
-### `v_mfma_f32_16x16x4f16` / `v_mfma_f32_16x16x16f16`
-
-**Matrix tile:** 16 × 16
-**Output GPRs per lane:** 1 (AGPR)
-**Simulator model:** per-lane dot product of packed f16 operands
-
-### `v_mfma_f32_32x32x4f16` / `v_mfma_f32_32x32x8f16`
-
-**Matrix tile:** 32 × 32
-**Output GPRs per lane:** 16 (AGPRs), but all 16 receive the same per-lane dot
-**Simulator model:** simplified — not a true 32×32 cross-lane outer product
-
----
-
-## BF16 Input Variants (Simplified Per-Lane Model)
-
-Same simplified model as F16.  BF16 values are stored as the upper 16 bits of
-a float32 word (i.e. bfloat16 = f32 with mantissa zeroed to 7 bits).
-
-### `v_mfma_f32_4x4x2bf16` / `v_mfma_f32_4x4x4bf16_1k`
-
-**Output GPRs per lane:** 1 (AGPR)
-
-### `v_mfma_f32_16x16x2bf16` / `_16x16x8bf16` / `_16x16x4bf16_1k` / `_16x16x16bf16_1k`
-
-**Output GPRs per lane:** 1 (AGPR)
-
-### `v_mfma_f32_32x32x2bf16` / `_32x32x4bf16` / `_32x32x4bf16_1k` / `_32x32x8bf16_1k`
-
-**Output GPRs per lane:** 16 (AGPRs)
-
----
-
-## I32 Output / I8 Input Variants (Simplified Per-Lane Model)
-
-### `v_mfma_i32_4x4x4i8`
-
-**Matrix tile:** 4 × 4, K=4 (four i8 packed in one u32)
-**Output GPRs per lane:** 1 (AGPR, i32)
-**Simulator model:** `acc[lane] += dot4(a_i8[0:3], b_i8[0:3])` per lane
-
-### `v_mfma_i32_16x16x4i8` / `v_mfma_i32_16x16x16i8`
-
-**Output GPRs per lane:** 1 (AGPR, i32)
-**Simulator model:** per-lane i8 dot product
-
-### `v_mfma_i32_32x32x4i8` / `v_mfma_i32_32x32x8i8`
-
-**Output GPRs per lane:** 16 (AGPRs, i32), all 16 receive the same per-lane dot
-**Simulator model:** simplified
-
----
-
-## F64 Variants (Simplified Per-Lane Model)
-
-F64 MFMA uses VGPR pairs for src0/src1 and AGPR pairs for the accumulator.
-
-### `v_mfma_f64_4x4x4f64`
-
-**Matrix tile:** 4 × 4, K=4
-**src0:** VGPR pair (f64) per lane
-**src1:** VGPR pair (f64) per lane
-**dst:** AGPR pair (f64) per lane
-**Output GPRs per lane:** 2 AGPRs (one f64)
-**Simulator model:** `acc_f64[lane] = fma(a_f64[lane], b_f64[lane], acc_f64[lane])` per lane
-
-### `v_mfma_f64_16x16x4f64`
-
-**Matrix tile:** 16 × 16, K=4
-**Output GPRs per lane:** 2 AGPRs (one f64)
-**Simulator model:** same per-lane fma
-
----
-
-## Summary Table
-
-| Instruction | Tile M×N | K/call | Blocks | Lanes/block | Out GPRs/lane | Acc type | Exact cross-lane? |
-|---|---|---|---|---|---|---|---|
-| `f32_4x4x1f32`     | 4×4   | 1 | 16 | 4  | 4  | AGPR/VGPR | **Yes** |
-| `f32_16x16x1f32`   | 16×16 | 1 | 4  | 16 | 16 | AGPR/VGPR | **Yes** |
-| `f32_32x32x1f32`   | 32×32 | 1 | 2  | 32 | 16 | AGPR/VGPR | **Yes** |
-| `f32_16x16x4f32`   | 16×16 | 4 | 1 (4 K-groups×16) | 16 | 4 | AGPR/VGPR | **Yes** |
-| `f32_32x32x2f32`   | 32×32 | 2 | 1 (2 K-groups×32) | 32 | 16 | AGPR/VGPR | **Yes** |
-| `f32_4x4x4f16`     | 4×4   | 4 | — | — | 1  | AGPR | No (simplified) |
-| `f32_16x16x4f16`   | 16×16 | 4 | — | — | 1  | AGPR | No |
-| `f32_16x16x16f16`  | 16×16 | 16| — | — | 1  | AGPR | No |
-| `f32_32x32x4f16`   | 32×32 | 4 | — | — | 16 | AGPR | No |
-| `f32_32x32x8f16`   | 32×32 | 8 | — | — | 16 | AGPR | No |
-| `f32_4x4x2bf16`    | 4×4   | 2 | — | — | 1  | AGPR | No |
-| `f32_4x4x4bf16_1k` | 4×4   | 4 | — | — | 1  | AGPR | No |
-| `f32_16x16x*bf16*` | 16×16 | varies | — | — | 1  | AGPR | No |
-| `f32_32x32x*bf16*` | 32×32 | varies | — | — | 16 | AGPR | No |
-| `i32_4x4x4i8`      | 4×4   | 4 | — | — | 1  | AGPR | No |
-| `i32_16x16x*i8`    | 16×16 | varies | — | — | 1  | AGPR | No |
-| `i32_32x32x*i8`    | 32×32 | varies | — | — | 16 | AGPR | No |
-| `f64_4x4x4f64`     | 4×4   | 4 | — | — | 2 (f64 pair) | AGPR | No |
-| `f64_16x16x4f64`   | 16×16 | 4 | — | — | 2 (f64 pair) | AGPR | No |
-
----
-
-## Writing a GEMM Kernel: Worked Example (4×4×1 F32)
-
-This shows the minimum-correct pattern for a kernel using `v_mfma_f32_4x4x1f32`
-with a 4-thread workgroup (one MFMA block per workgroup):
-
-```hip
-// block=(4,1,1), grid=((N/4)*4, M/4, 1)
-extern "C" __global__
-void gemm_4x4(const float* A, const float* B, float* C, int M, int N, int K)
-{
-    using float32x4_t = __attribute__((__vector_size__(4*sizeof(float)))) float;
-
-    int wg_row = blockIdx.y;
-    int wg_col = blockIdx.x;
-    int lane   = threadIdx.x;  // 0..3
-
-    // lane = t = row index within this block's 4×4 output tile
-    int c_row = wg_row * 4 + lane;
-
-    float32x4_t acc = {0, 0, 0, 0};  // acc[gpr] = D[lane][gpr]
-
-    for (int k = 0; k < K; k++) {
-        // Each lane provides its own A row element:
-        float a = (c_row < M) ? A[c_row * K + k] : 0.f;
-
-        // Each lane provides its own B column element:
-        // lane t provides B[k][wg_col*4 + t], which the hardware broadcasts
-        // to produce B[k][col=gpr] in acc[gpr] for all other lanes.
-        float b = (wg_col*4 + lane < N) ? B[k*N + wg_col*4 + lane] : 0.f;
-
-        acc = __builtin_amdgcn_mfma_f32_4x4x1f32(a, b, acc, 0, 0, 0);
-    }
-
-    // After the loop: acc[gpr] = D[row=lane][col=gpr]
-    if (c_row < M) {
-        for (int g = 0; g < 4; g++) {
-            int c_col = wg_col * 4 + g;
-            if (c_col < N) C[c_row * N + c_col] = acc[g];
-        }
-    }
-}
-```
-
-Key points:
-- Each lane loads **its own** A row element (`A[c_row][k]`).
-- Each lane loads **its own** B column element (`B[k][wg_col*4+lane]`).
-- The MFMA hardware does the cross-lane broadcast: `acc[gpr]` on lane `t`
-  accumulates `A[t][k] * B[k][gpr]` where `B[k][gpr]` comes from lane `gpr`.
-- After the K loop, each lane writes **4 output elements** (one full row of
-  the 4×4 tile).
-
----
-
-## Common Mistakes
-
-1. **Treating MFMA as per-lane multiply-add.**  `acc[0] += a * b` per lane
-   produces garbage: lane 0 would only accumulate `A[0][k] * B[k][0]` and miss
-   `A[0][k] * B[k][1..3]`.
-
-2. **Checking EXEC before writing accumulator.**  MFMA always operates on all
-   64 lanes; gating on EXEC corrupts blocks where EXEC happens to be 0.
-
-3. **Using 16-thread workgroups for 4×4×1.**  16 threads = 4 MFMA blocks.
-   Lanes 4–15 form blocks 1–3 and compute different 4×4 tiles.  The kernel
-   must map `c_col = wg_col*16 + (lane/4)*4 + gpr` and
-   `c_row = wg_row*4 + lane%4` if all 16 lanes cover a 4×16 sub-tile.
-
-4. **Wrong accumulator GPR count.**  Using only 1 AGPR when the instruction
-   produces 4/16 means 3/15 output elements are silently discarded.
+## 4. How `gcn-sim` Simulates Matrix Cores
+
+In `src/isa_executor.cpp`:
+1. **Cross-Lane Collection**:
+   Before updating any lane state, `read_vsrc()` extracts all 64 source values into CPU arrays (`a_all[64]` and `b_all[64]`). This mirrors the hardware's internal register read stage.
+2. **Hardware Outer-Product Emulation**:
+   For each lane, the exact row and column formulas map incoming matrix elements into standard IEEE-754 `fmaf(a, b, c)` or double-precision `fma()`.
+3. **Execution Shadow & Pipeline Interaction**:
+   `src/cycle_model.cpp` tracks the 64-cycle MFMA duration and enables up to 15 parallel VALU instructions in the shadow window without extra latency overhead.

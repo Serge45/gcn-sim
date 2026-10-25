@@ -45,6 +45,20 @@ On GFX90a, Matrix Core (MFMA) instructions operate on dedicated hardware units c
 * **Dual-Issue Absorption**: During the 60-cycle execution shadow, up to **15 independent VALU instructions** (4 cycles each) can be issued without increasing the wavefront's cycle count.
 * **Structural Hazards**: Back-to-back MFMA instructions that arrive before the Matrix Core pipeline completes will trigger a `stall:mfma_busy` stall until the execution unit is available.
 
+```
+Cycle Timeline (Dual-Issue Shadow Execution):
+Cycle:  0       4               20              36              52       64
+        ├───────┼───────────────┼───────────────┼───────────────┼────────┤
+MFMA:   │ Issue │ ◄────────────── MFMA Matrix Execution (60 cyc) ───────►│ Done
+VALU:   │ Wait  │ VALU 1 │ VALU 2 │ VALU 3 │ ... │ VALU 15 (Shadowed)   │
+        └───────┴────────┴────────┴────────┴─────┴──────────────────────┘
+        ▲                                                               ▲
+        │ 0 Added Delay (VALU execution is completely absorbed!)        │
+```
+
+> [!NOTE]
+> For the complete breakdown of 64-lane wavefront data distributions, input fragments, and output AGPR tiles, see the [MFMA Lane & Register Layout Guide](mfma_lane_layout.md).
+
 ### B. Coalesced Memory & Hierarchical Cache Model (`CacheModel`)
 Memory instructions dynamically probe an associative cache hierarchy:
 * **Vector L1 Data Cache (vL1D)**: 16 KB per Compute Unit, 4-way set-associative, 64-byte cache line size (hit latency ~100 cycles).
@@ -75,10 +89,23 @@ GCNSIM_PROFILE=1 GCNSIM_TRACE=my_kernel_trace.json LD_LIBRARY_PATH=./build ./my_
 ### Viewing Traces with Perfetto or Chrome Tracing
 1. Open [ui.perfetto.dev](https://ui.perfetto.dev) in Google Chrome or any modern browser.
 2. Click **Open trace file** and select `my_kernel_trace.json`.
-3. The UI will render:
-   * **Concurrent Wavefront Timelines**: Individual tracks for each SIMD unit.
-   * **Instruction Color-Coding**: Visual differentiation between MFMA, VALU, SALU, LDS, and Memory transactions.
-   * **Visual Stall Bars**: Explicit `stall:mfma_busy` (structural stalls) and `stall:waitcnt` (data dependency stalls).
+3. The UI will render interactive tracks with explicit execution and hazard bars:
+
+<div align="center">
+
+![Perfetto Profiling Timeline](images/perfetto_profile_timeline.png)
+
+</div>
+
+### Trace Visualization Breakdown
+- **SIMD Unit Tracks (SIMD 0–3)**: Separate horizontal rows showing the execution state of active wavefronts over time.
+- **Instruction Color Coding**:
+  - 🟩 **MFMA Instructions**: Depicted as sustained execution bars (64 cycles).
+  - 🟦 **VALU / SALU**: Arithmetic and logic instructions, displaying shadow-absorbed parallel execution.
+  - 🟨 **LDS / Memory Transfers**: Shared and global data transactions.
+- **Microarchitectural Stall Flags**:
+  - 🟥 **`stall:mfma_busy`**: Visualized when an MFMA instruction arrives while the Matrix Core hardware is still computing a previous operation.
+  - 🟧 **`stall:waitcnt`**: Highlights cycles where wavefront execution is suspended waiting for pending memory transactions (Global `vmcnt` or LDS `lgkmcnt`) to finish.
 
 ---
 
