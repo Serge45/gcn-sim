@@ -13,18 +13,25 @@ namespace gcnsim {
 enum class CacheHitLevel {
     L1,    // vL1D hit
     L2,    // L2 hit
+    L3,    // L3 Infinity Cache hit (CDNA3)
     HBM    // cache miss — full HBM round-trip
 };
 
 struct CacheConfig {
-    uint32_t l1_size_bytes  = 16384;  // 16 KB
+    uint32_t l1_size_bytes  = 16384;  // 16 KB (32 KB on CDNA3)
     uint32_t l1_ways        = 4;
     uint32_t l1_line_bytes  = 64;
-    uint32_t l2_size_bytes  = 8 * 1024 * 1024;  // 8 MB
+    uint32_t l2_size_bytes  = 8 * 1024 * 1024;  // 8 MB (32 MB on CDNA3)
     uint32_t l2_ways        = 16;
     uint32_t l2_line_bytes  = 128;
     uint32_t l1_hit_cycles  = 100;
     uint32_t l2_hit_cycles  = 200;
+    // L3 Infinity Cache (CDNA3)
+    bool     enable_l3      = false;
+    uint32_t l3_size_bytes  = 256 * 1024 * 1024; // 256 MB
+    uint32_t l3_ways        = 16;
+    uint32_t l3_line_bytes  = 128;
+    uint32_t l3_hit_cycles  = 180;
     // HBM miss latency comes from LaunchConfig::global_mem_latency
 };
 
@@ -77,10 +84,14 @@ public:
     uint64_t l1_misses() const { return l1_.misses(); }
     uint64_t l2_hits()   const { return l2_.hits(); }
     uint64_t l2_misses() const { return l2_.misses(); }
+    uint64_t l3_hits()   const { return l3_.hits(); }
+    uint64_t l3_misses() const { return l3_.misses(); }
 
 private:
     CacheLevel l1_;
     CacheLevel l2_;
+    bool       enable_l3_ = false;
+    CacheLevel l3_;
 };
 
 } // namespace gcnsim

@@ -729,6 +729,170 @@ TEST(ISAExecutor, DS_SWIZZLE_B32) {
     EXPECT_EQ(ws->vgpr[1][3], 102u);
 }
 
+// ===== CDNA3 (GFX942) MFMA & Unified Register Tests =====
+
+TEST(ISAExecutor, CDNA3_UnifiedRegisters_AccvgprReadWrite) {
+    auto ws = make_wave();
+    ws->is_gfx942 = true;
+    ws->accum_offset = 128; // Remap AGPRs to VGPR[128..]
+
+    // Set VGPR0[lane] = 0x12340000 + lane
+    for (int lane = 0; lane < 64; lane++) {
+        ws->vgpr[0][lane] = 0x12340000u + lane;
+    }
+
+    // Write to AGPR 4 using v_accvgpr_write_b32
+    Instruction inst_w{};
+    inst_w.opcode = Opcode::V_ACCVGPR_WRITE_B32;
+    inst_w.format = InstFormat::VOP1;
+    inst_w.dst.kind = Operand::Kind::AGPR;
+    inst_w.dst.index = 4;
+    inst_w.src[0].kind = Operand::Kind::VGPR;
+    inst_w.src[0].index = 0;
+    execute_instruction(*ws, inst_w);
+
+    // Verify VGPR[128 + 4] holds written value, while legacy AGPR[4] is 0
+    for (int lane = 0; lane < 64; lane++) {
+        EXPECT_EQ(ws->vgpr[128 + 4][lane], 0x12340000u + lane);
+        EXPECT_EQ(ws->agpr[4][lane], 0u);
+    }
+
+    // Read back to VGPR 5 using v_accvgpr_read_b32
+    Instruction inst_r{};
+    inst_r.opcode = Opcode::V_ACCVGPR_READ_B32;
+    inst_r.format = InstFormat::VOP1;
+    inst_r.dst.kind = Operand::Kind::VGPR;
+    inst_r.dst.index = 5;
+    inst_r.src[0].kind = Operand::Kind::AGPR;
+    inst_r.src[0].index = 4;
+    execute_instruction(*ws, inst_r);
+
+    for (int lane = 0; lane < 64; lane++) {
+        EXPECT_EQ(ws->vgpr[5][lane], 0x12340000u + lane);
+    }
+}
+
+TEST(ISAExecutor, CDNA3_MfmaF32_16x16x8_XF32) {
+    auto ws = make_wave();
+    ws->is_gfx942 = true;
+    ws->accum_offset = 64;
+
+    // Fill VGPR 0..1 (src0) with 1.0f, VGPR 2..3 (src1) with 2.0f
+    for (int lane = 0; lane < 64; lane++) {
+        ws->vgpr[0][lane] = f2u(1.0f);
+        ws->vgpr[1][lane] = f2u(1.0f);
+        ws->vgpr[2][lane] = f2u(2.0f);
+        ws->vgpr[3][lane] = f2u(2.0f);
+    }
+    // Zero accumulator VGPR 64..67
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            ws->vgpr[ws->accum_offset + gpr][lane] = 0;
+        }
+    }
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_MFMA_F32_16X16X8_XF32;
+    inst.format = InstFormat::MFMA;
+    inst.dst.kind = Operand::Kind::AGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::VGPR;
+    inst.src[1].index = 2;
+
+    execute_instruction(*ws, inst);
+
+    // K=8 with A=1.0, B=2.0 -> each output element = 8 * 1.0 * 2.0 = 16.0f
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            float val = u2f(ws->vgpr[ws->accum_offset + gpr][lane]);
+            EXPECT_FLOAT_EQ(val, 16.0f);
+        }
+    }
+}
+
+TEST(ISAExecutor, CDNA3_MfmaI32_16x16x32I8) {
+    auto ws = make_wave();
+    ws->is_gfx942 = true;
+    ws->accum_offset = 64;
+
+    // Fill 64-bit pair with int8 1's (0x01010101)
+    for (int lane = 0; lane < 64; lane++) {
+        ws->vgpr[0][lane] = 0x01010101u;
+        ws->vgpr[1][lane] = 0x01010101u;
+        ws->vgpr[2][lane] = 0x02020202u; // int8 2's
+        ws->vgpr[3][lane] = 0x02020202u;
+    }
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            ws->vgpr[ws->accum_offset + gpr][lane] = 0;
+        }
+    }
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_MFMA_I32_16X16X32I8;
+    inst.format = InstFormat::MFMA;
+    inst.dst.kind = Operand::Kind::AGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::VGPR;
+    inst.src[1].index = 2;
+
+    execute_instruction(*ws, inst);
+
+    // K=32 with A=1, B=2 -> dot product = 32 * 1 * 2 = 64
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            int32_t val = (int32_t)ws->vgpr[ws->accum_offset + gpr][lane];
+            EXPECT_EQ(val, 64);
+        }
+    }
+}
+
+TEST(ISAExecutor, CDNA3_MfmaF32_16x16x32_FP8_FP8) {
+    auto ws = make_wave();
+    ws->is_gfx942 = true;
+    ws->accum_offset = 64;
+
+    // 0x38 in E4M3 is 1.0f
+    // 0x40 in E4M3: sign=0, exp=8, m=0 -> 2^(8-7) = 2.0f
+    uint32_t packed_1 = 0x38383838u;
+    uint32_t packed_2 = 0x40404040u;
+    for (int lane = 0; lane < 64; lane++) {
+        ws->vgpr[0][lane] = packed_1;
+        ws->vgpr[1][lane] = packed_1;
+        ws->vgpr[2][lane] = packed_2;
+        ws->vgpr[3][lane] = packed_2;
+    }
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            ws->vgpr[ws->accum_offset + gpr][lane] = 0;
+        }
+    }
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_MFMA_F32_16X16X32_FP8_FP8;
+    inst.format = InstFormat::MFMA;
+    inst.dst.kind = Operand::Kind::AGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::VGPR;
+    inst.src[1].index = 2;
+
+    execute_instruction(*ws, inst);
+
+    // K=32 with A=1.0, B=2.0 -> dot product = 32 * 1.0 * 2.0 = 64.0f
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            float val = u2f(ws->vgpr[ws->accum_offset + gpr][lane]);
+            EXPECT_FLOAT_EQ(val, 64.0f);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

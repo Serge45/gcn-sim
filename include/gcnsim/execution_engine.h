@@ -16,6 +16,7 @@ struct LaunchConfig {
     uint32_t smem_latency = 20;          // SMEM (scalar load) completion latency in cycles
     const char* trace_path = nullptr;    // if non-null, write Chrome Trace to this file
     std::function<void(WavefrontState& wave)> debug_hook = nullptr; // hook callback for debugger
+    uint32_t num_cus = 0;                // number of CUs (0 = auto: 304 for CDNA3 gfx942, 104 for CDNA2 gfx90a)
 };
 
 // Run a kernel on the CPU simulator.

@@ -441,6 +441,54 @@ TEST(ISADecoder, MfmaF32_4x4x1f32) {
     EXPECT_EQ(inst.size_bytes, 8);
 }
 
+TEST(ISADecoder, CDNA3_MfmaOpcodes) {
+    auto decode_mfma = [](uint32_t hw_op) {
+        // [31:26]=0x34, [25:16]=hw_op, [15]=1 (is_agpr), [7:0]=vdst
+        uint32_t w0 = (0x34u << 26) | ((hw_op & 0x3FFu) << 16) | (1u << 15) | 4u;
+        uint32_t w1 = (256u) | (257u << 9) | (0u << 18); // src0=v0, src1=v1, src2=agpr0
+        auto b = enc2(w0, w1);
+        return decode(b.data());
+    };
+
+    // XF32
+    Instruction inst_xf32_16 = decode_mfma(958);
+    EXPECT_EQ(inst_xf32_16.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_xf32_16.opcode, Opcode::V_MFMA_F32_16X16X8_XF32);
+    EXPECT_STREQ(opcode_name(inst_xf32_16.opcode), "v_mfma_f32_16x16x8_xf32");
+
+    Instruction inst_xf32_32 = decode_mfma(959);
+    EXPECT_EQ(inst_xf32_32.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_xf32_32.opcode, Opcode::V_MFMA_F32_32X32X4_XF32);
+    EXPECT_STREQ(opcode_name(inst_xf32_32.opcode), "v_mfma_f32_32x32x4_xf32");
+
+    // INT8 double-rate
+    Instruction inst_i8_32 = decode_mfma(982);
+    EXPECT_EQ(inst_i8_32.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_i8_32.opcode, Opcode::V_MFMA_I32_32X32X16I8);
+    EXPECT_STREQ(opcode_name(inst_i8_32.opcode), "v_mfma_i32_32x32x16i8");
+
+    Instruction inst_i8_16 = decode_mfma(983);
+    EXPECT_EQ(inst_i8_16.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_i8_16.opcode, Opcode::V_MFMA_I32_16X16X32I8);
+    EXPECT_STREQ(opcode_name(inst_i8_16.opcode), "v_mfma_i32_16x16x32i8");
+
+    // FP8 / BF8 mixed and pure
+    Instruction inst_bf8 = decode_mfma(1008);
+    EXPECT_EQ(inst_bf8.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_bf8.opcode, Opcode::V_MFMA_F32_16X16X32_BF8_BF8);
+    EXPECT_STREQ(opcode_name(inst_bf8.opcode), "v_mfma_f32_16x16x32_bf8_bf8");
+
+    Instruction inst_fp8 = decode_mfma(1011);
+    EXPECT_EQ(inst_fp8.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_fp8.opcode, Opcode::V_MFMA_F32_16X16X32_FP8_FP8);
+    EXPECT_STREQ(opcode_name(inst_fp8.opcode), "v_mfma_f32_16x16x32_fp8_fp8");
+
+    Instruction inst_fp8_bf8 = decode_mfma(1014);
+    EXPECT_EQ(inst_fp8_bf8.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_fp8_bf8.opcode, Opcode::V_MFMA_F32_32X32X16_FP8_BF8);
+    EXPECT_STREQ(opcode_name(inst_fp8_bf8.opcode), "v_mfma_f32_32x32x16_fp8_bf8");
+}
+
 // --- VOP2: v_cndmask_b32 (Phase 1) ---
 TEST(ISADecoder, VCndmaskB32) {
     // v_cndmask_b32_e32 v2, v0, v1, vcc

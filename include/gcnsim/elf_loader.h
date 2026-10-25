@@ -24,12 +24,17 @@ struct KernelInfo {
     std::vector<KernelArgInfo> args;
     const uint8_t*          hsaco_data = nullptr; // pointer to start of HSACO ELF
     size_t                  hsaco_size = 0;       // total size of HSACO ELF
+    uint32_t                accum_offset = 0;     // AGPR offset in unified VGPRs (from .amdhsa_accum_offset)
+    uint32_t                elf_flags = 0;        // ELF e_flags
+    bool                    is_gfx942 = false;    // true if GFX942/CDNA3
 };
 
 struct HsacoModule {
     std::vector<uint8_t>  elf_data;
     std::vector<KernelInfo> kernels;
     int cov_version;   // 3=COV3, 4=COV4, 5=COV5
+    uint32_t elf_flags = 0;
+    bool     is_gfx942 = false;
 };
 
 // Load an HSACO ELF file. Returns nullopt on error (sets error_msg).

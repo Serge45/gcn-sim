@@ -41,6 +41,7 @@ CacheLevel::CacheLevel(uint32_t size_bytes, uint32_t ways, uint32_t line_bytes) 
 }
 
 bool CacheLevel::access(uint64_t addr) {
+    if (num_sets_ == 0) return false;
     uint64_t line_addr = addr >> line_shift_;
     uint32_t set_idx = (uint32_t)(line_addr % num_sets_);
     uint64_t tag = line_addr / num_sets_;
@@ -54,11 +55,14 @@ bool CacheLevel::access(uint64_t addr) {
 CacheModel::CacheModel(const CacheConfig& cfg)
     : l1_(cfg.l1_size_bytes, cfg.l1_ways, cfg.l1_line_bytes)
     , l2_(cfg.l2_size_bytes, cfg.l2_ways, cfg.l2_line_bytes)
+    , enable_l3_(cfg.enable_l3)
+    , l3_(cfg.enable_l3 ? cfg.l3_size_bytes : 0, cfg.enable_l3 ? cfg.l3_ways : 1, cfg.enable_l3 ? cfg.l3_line_bytes : 64)
 {}
 
 CacheHitLevel CacheModel::access(uint64_t addr) {
     if (l1_.access(addr)) return CacheHitLevel::L1;
     if (l2_.access(addr)) return CacheHitLevel::L2;
+    if (enable_l3_ && l3_.access(addr)) return CacheHitLevel::L3;
     return CacheHitLevel::HBM;
 }
 

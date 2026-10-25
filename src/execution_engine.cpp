@@ -100,10 +100,18 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     const uint8_t* kernarg = kernarg_buf.data();
 
-    // Create shared L2 cache model (L1 is per-workgroup)
+    // Create shared cache model (L1 is per-workgroup, L2 shared, L3 Infinity Cache on CDNA3)
     std::unique_ptr<CacheModel> global_cache;
     if (cfg.enable_cycle_counting) {
-        global_cache = std::make_unique<CacheModel>(CacheConfig{});
+        CacheConfig ccfg;
+        if (kernel.is_gfx942) {
+            ccfg.l1_size_bytes = 32768; // 32 KB per CU
+            ccfg.l2_size_bytes = 32 * 1024 * 1024; // 32 MB total L2 across 8 XCDs
+            ccfg.enable_l3 = true;
+            ccfg.l3_size_bytes = 256 * 1024 * 1024; // 256 MB Infinity Cache
+            ccfg.l3_hit_cycles = 180;
+        }
+        global_cache = std::make_unique<CacheModel>(ccfg);
     }
 
     // Determine LDS size from kernel descriptor
@@ -113,10 +121,18 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
     uint32_t scratch_per_wave = scratch_per_lane * WAVE_SIZE;
 
+    uint32_t num_cus = cfg.num_cus;
+    if (num_cus == 0) {
+        num_cus = kernel.is_gfx942 ? 304 : 104;
+    }
+    std::vector<uint64_t> cu_wall_cycles(num_cus, 0);
+    uint32_t current_wg = 0;
+
     try {
         for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
         for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
         for (uint32_t wg_x = 0; wg_x < wg_count_x; wg_x++) {
+        uint32_t cu_id = current_wg % num_cus;
         // Allocate per-workgroup LDS buffer; shared across all waves in the workgroup
         std::vector<uint8_t> lds_buf(lds_bytes, 0);
         uint8_t* lds_ptr = lds_bytes > 0 ? lds_buf.data() : nullptr;
@@ -137,6 +153,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                            block_x, block_y, block_z);
             waves[w]->lds_ptr  = lds_ptr;
             waves[w]->lds_size = lds_bytes;
+            waves[w]->is_gfx942 = kernel.is_gfx942;
+            if (kernel.accum_offset > 0) waves[w]->accum_offset = kernel.accum_offset;
 
             scratch_bufs[w].resize(scratch_per_wave, 0);
             waves[w]->scratch_ptr      = scratch_per_wave > 0 ? scratch_bufs[w].data() : nullptr;
@@ -236,8 +254,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             }
 
             uint64_t cu_wall = *std::max_element(simd_cycle, simd_cycle + NUM_SIMDS);
-            if (total_cycles)
-                *total_cycles += cu_wall;
+            if (cfg.enable_cycle_counting) {
+                cu_wall_cycles[cu_id] += cu_wall;
+            }
             if (trace_file) {
                 uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
                                    wg_y * wg_count_x + wg_x;
@@ -302,10 +321,13 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                             wg_flat, w, w, w % NUM_SIMDS, valu_util, mfma_util);
                     }
                 }
-                if (total_cycles)
-                    *total_cycles += max_cc;
+                cu_wall_cycles[cu_id] += max_cc;
             }
         }
+        current_wg++;
+    }
+    if (total_cycles && cfg.enable_cycle_counting) {
+        *total_cycles = *std::max_element(cu_wall_cycles.begin(), cu_wall_cycles.end());
     }
     } catch (const MemoryFaultException& ex) {
         error_msg = ex.what();

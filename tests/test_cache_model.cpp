@@ -66,3 +66,35 @@ TEST(CacheModel, StatsAccumulate) {
     EXPECT_EQ(cache.l1_misses(), 2u);
     EXPECT_EQ(cache.l2_misses(), 2u);
 }
+
+TEST(CacheModel, CDNA3_L3InfinityCache) {
+    CacheConfig cfg;
+    cfg.l1_size_bytes = 1024; // 1 KB
+    cfg.l1_ways = 2;
+    cfg.l1_line_bytes = 64;
+    cfg.l2_size_bytes = 4096; // 4 KB
+    cfg.l2_ways = 4;
+    cfg.l2_line_bytes = 64;
+    cfg.enable_l3 = true;
+    cfg.l3_size_bytes = 65536; // 64 KB
+    cfg.l3_ways = 8;
+    cfg.l3_line_bytes = 64;
+
+    CacheModel cache(cfg);
+
+    // Cold miss -> HBM
+    EXPECT_EQ(cache.access(0x1000), CacheHitLevel::HBM);
+    // Repeated access -> L1 hit
+    EXPECT_EQ(cache.access(0x1000), CacheHitLevel::L1);
+
+    // Evict from L2: fill L2 set for address 0x1000 with 4 accesses (4-way L2)
+    uint32_t l2_sets = cfg.l2_size_bytes / (cfg.l2_ways * cfg.l2_line_bytes);
+    for (int i = 1; i <= 4; i++) {
+        uint64_t addr = 0x1000 + (uint64_t)i * l2_sets * cfg.l2_line_bytes;
+        cache.access(addr);
+    }
+
+    // 0x1000 evicted from L1 and L2, but preserved in L3!
+    EXPECT_EQ(cache.access(0x1000), CacheHitLevel::L3);
+    EXPECT_EQ(cache.l3_hits(), 1u);
+}

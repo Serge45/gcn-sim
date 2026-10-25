@@ -491,9 +491,30 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
     if (deviceId < 0 || deviceId >= max_dev) return gcnsim::hipErrorInvalidValue;
 
     std::memset(prop, 0, sizeof(*prop));
-    std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
-    std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
-    prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e per GCD
+    const char* env_arch = std::getenv("GCN_SIM_ARCH");
+    bool is_gfx942 = (env_arch && (std::string(env_arch) == "gfx942" || std::string(env_arch) == "mi300" || std::string(env_arch) == "mi300x"));
+
+    if (is_gfx942) {
+        std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI300X");
+        std::strncpy(prop->gcnArchName, "gfx942:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
+        prop->totalGlobalMem = 192ULL * 1024 * 1024 * 1024; // 192 GB HBM3
+        prop->clockRate = 2100000;       // 2.1 GHz Boost
+        prop->memoryClockRate = 2600000; // 2.6 GHz in kHz
+        prop->multiProcessorCount = 304; // 304 CUs
+        prop->l2CacheSize = 32 * 1024 * 1024; // 32 MB L2
+        prop->major = 9;
+        prop->minor = 4;
+    } else {
+        std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
+        std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
+        prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e per GCD
+        prop->clockRate = 1700000;       // 1.7 GHz in kHz
+        prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
+        prop->multiProcessorCount = 110; // 110 CUs per GCD
+        prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 per GCD
+        prop->major = 9;
+        prop->minor = 0;
+    }
     prop->sharedMemPerBlock = 65536; // 64 KB
     prop->regsPerBlock = 65536;
     prop->warpSize = 64;
@@ -504,14 +525,8 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
     prop->maxGridSize[0] = 2147483647;
     prop->maxGridSize[1] = 65535;
     prop->maxGridSize[2] = 65535;
-    prop->clockRate = 1700000;       // 1.7 GHz in kHz
-    prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
-    prop->memoryBusWidth = 8192;     // 8192-bit HBM2e
+    prop->memoryBusWidth = 8192;     // 8192-bit HBM
     prop->totalConstMem = 2147483647;
-    prop->major = 9;
-    prop->minor = 0;
-    prop->multiProcessorCount = 110; // 110 CUs per GCD
-    prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 per GCD
     prop->maxThreadsPerMultiProcessor = 2048;
     prop->computeMode = 0;
     prop->concurrentKernels = 1;
