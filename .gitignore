@@ -43,6 +43,11 @@ gcnsim_mi.log
 gdb_in.log
 gdb_out.log
 
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Tool state
 .antigravitycli/
 
