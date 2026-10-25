@@ -433,15 +433,21 @@ private:
 } // namespace gcnsim
 
 // --- Global macros and forward declarations for hijacked C APIs ---
-#define HIP_LAUNCH_PARAM_END             ((void*)0x00)
 #define HIP_LAUNCH_PARAM_BUFFER_POINTER  ((void*)0x01)
 #define HIP_LAUNCH_PARAM_BUFFER_SIZE     ((void*)0x02)
+#define HIP_LAUNCH_PARAM_END             ((void*)0x03)
 
 extern "C" {
 gcnsim::hipError_t hipMalloc(void** devPtr, size_t size);
 gcnsim::hipError_t hipFree(void* devPtr);
 gcnsim::hipError_t hipMemcpy(void* dst, const void* src, size_t size, gcnsim::hipMemcpyKind kind);
 gcnsim::hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpyHtoD(void* dst, const void* src, size_t sizeBytes);
+gcnsim::hipError_t hipMemcpyDtoH(void* dst, const void* src, size_t sizeBytes);
+gcnsim::hipError_t hipMemcpyDtoD(void* dst, const void* src, size_t sizeBytes);
+gcnsim::hipError_t hipMemcpyHtoDAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpyDtoHAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpyDtoDAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream);
 
 gcnsim::hipError_t hipStreamCreate(gcnsim::hipStream_t* stream);
 gcnsim::hipError_t hipStreamCreateWithFlags(gcnsim::hipStream_t* stream, unsigned int flags);

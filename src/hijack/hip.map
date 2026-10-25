@@ -1,5 +1,7 @@
 hip_4.2 {
     global:
+        __gnu_f2h_ieee;
+        __gnu_h2f_ieee;
         __hipRegisterFatBinary;
         __hipRegisterFunction;
         __hipUnregisterFatBinary;
@@ -9,6 +11,12 @@ hip_4.2 {
         hipFree;
         hipMemcpy;
         hipMemcpyAsync;
+        hipMemcpyHtoD;
+        hipMemcpyDtoH;
+        hipMemcpyDtoD;
+        hipMemcpyHtoDAsync;
+        hipMemcpyDtoHAsync;
+        hipMemcpyDtoDAsync;
         hipStreamCreate;
         hipStreamCreateWithFlags;
         hipStreamDestroy;

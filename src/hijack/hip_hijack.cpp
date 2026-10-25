@@ -266,6 +266,30 @@ gcnsim::hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size, gcnsi
     return hipMemcpy(dst, src, size, kind);
 }
 
+gcnsim::hipError_t hipMemcpyHtoD(void* dst, const void* src, size_t sizeBytes) {
+    return hipMemcpy(dst, src, sizeBytes, gcnsim::hipMemcpyHostToDevice);
+}
+
+gcnsim::hipError_t hipMemcpyDtoH(void* dst, const void* src, size_t sizeBytes) {
+    return hipMemcpy(dst, src, sizeBytes, gcnsim::hipMemcpyDeviceToHost);
+}
+
+gcnsim::hipError_t hipMemcpyDtoD(void* dst, const void* src, size_t sizeBytes) {
+    return hipMemcpy(dst, src, sizeBytes, gcnsim::hipMemcpyDeviceToDevice);
+}
+
+gcnsim::hipError_t hipMemcpyHtoDAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream) {
+    return hipMemcpyAsync(dst, src, sizeBytes, gcnsim::hipMemcpyHostToDevice, stream);
+}
+
+gcnsim::hipError_t hipMemcpyDtoHAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream) {
+    return hipMemcpyAsync(dst, src, sizeBytes, gcnsim::hipMemcpyDeviceToHost, stream);
+}
+
+gcnsim::hipError_t hipMemcpyDtoDAsync(void* dst, const void* src, size_t sizeBytes, gcnsim::hipStream_t stream) {
+    return hipMemcpyAsync(dst, src, sizeBytes, gcnsim::hipMemcpyDeviceToDevice, stream);
+}
+
 static thread_local int g_current_device = 0;
 
 struct EventInternal {
@@ -999,12 +1023,17 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         void* packed_buffer = nullptr;
         size_t packed_size = 0;
 
-        for (size_t i = 0; extra[i] != HIP_LAUNCH_PARAM_END; ) {
+        for (size_t i = 0; extra[i] != nullptr && extra[i] != HIP_LAUNCH_PARAM_END; ) {
             if (extra[i] == HIP_LAUNCH_PARAM_BUFFER_POINTER) {
                 packed_buffer = extra[i + 1];
                 i += 2;
             } else if (extra[i] == HIP_LAUNCH_PARAM_BUFFER_SIZE) {
-                packed_size = *reinterpret_cast<size_t*>(extra[i + 1]);
+                uintptr_t val = reinterpret_cast<uintptr_t>(extra[i + 1]);
+                if (val < 1048576) {
+                    packed_size = static_cast<size_t>(val);
+                } else {
+                    packed_size = *reinterpret_cast<const size_t*>(extra[i + 1]);
+                }
                 i += 2;
             } else {
                 i++;
@@ -1152,6 +1181,58 @@ gcnsim::hipError_t hipModuleUnload(gcnsim::hipModule_t module) {
         delete heap_mod;
     }
     return gcnsim::hipSuccess;
+}
+
+uint16_t __gnu_f2h_ieee(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exp = static_cast<int32_t>((x >> 23) & 0xff) - 127 + 15;
+    uint32_t mant = x & 0x7fffff;
+    if (exp <= 0) {
+        if (exp < -10) return static_cast<uint16_t>(sign);
+        mant |= 0x800000;
+        uint32_t t = static_cast<uint32_t>(14 - exp);
+        uint32_t round_bit = 1 << (t - 1);
+        mant = (mant + round_bit) >> t;
+        return static_cast<uint16_t>(sign | mant);
+    } else if (exp >= 31) {
+        return static_cast<uint16_t>(sign | 0x7c00 | (mant ? 0x200 : 0));
+    }
+    uint32_t round_bit = 0x00001000;
+    mant = (mant + round_bit - 1 + ((mant >> 13) & 1)) >> 13;
+    if (mant > 0x3ff) {
+        mant = 0;
+        exp++;
+    }
+    return static_cast<uint16_t>(sign | (exp << 10) | mant);
+}
+
+float __gnu_h2f_ieee(uint16_t h) {
+    uint32_t sign = (static_cast<uint32_t>(h) & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+    uint32_t val;
+    if (exp == 0) {
+        if (mant == 0) {
+            val = sign;
+        } else {
+            while (!(mant & 0x400)) {
+                mant <<= 1;
+                exp--;
+            }
+            exp++;
+            mant &= ~0x400;
+            val = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        val = sign | 0x7f800000 | (mant << 13);
+    } else {
+        val = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float f;
+    std::memcpy(&f, &val, 4);
+    return f;
 }
 
 } // extern "C"
