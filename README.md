@@ -44,15 +44,14 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 
 - [Overview](#overview)
 - [Architecture](#architecture)
-- [Quick Start](#quick-start)
-  - [Building](#building)
-  - [Running Real HIP Apps](#running-real-hip-apps)
-  - [Microarchitecture Profiling & Chrome Tracing](#microarchitecture-profiling--chrome-tracing)
-  - [Debugging with gcndb](#debugging-with-gcndb)
-- [Microarchitecture & Performance Benchmark](#microarchitecture--performance-benchmark)
 - [Directory Structure](#directory-structure)
+- [Building & Testing](#building)
+- [Usage & Seamless Drop-in Integration](#seamless-integration-no-recompilation)
+- [Microarchitecture Profiling & Performance Analysis](#microarchitecture-profiling--performance-analysis)
+- [Debugging with gcndb](#debugging-with-gcndb)
 - [Supported Instructions](#supported-instructions)
-- [License](#license)
+- [Completed Architectural Milestones](#completed-architectural-milestones)
+- [Future Work & Roadmap](#future-work--roadmap)
 
 ---
 
@@ -701,45 +700,50 @@ All CDNA2 (`gfx90a`) and CDNA3 (`gfx942`) MFMA shapes with correct cross-lane ou
 
 ---
 
-## Potential Improvements
+## Completed Architectural Milestones
 
-### Performance
+The following features were previously listed as future development targets and are now fully implemented and verified in the test suite:
 
-- **Parallel wavefront execution** — wavefronts across independent workgroups could run in parallel. An `std::async` or thread pool would exploit multi-core CPUs.
-- **SIMD vectorization of lane loops** — the inner `for (int lane = 0; lane < 64; lane++)` loop in the executor is a natural target for AVX-512 auto-vectorization.
-- **Decode cache** — the same instruction bytes are decoded every time the kernel loops. A decoded instruction cache keyed on PC offset would eliminate repeated decoding.
-
-### Usability
-
-- **Instruction trace / logging** — an optional `--trace` mode that prints each decoded instruction and register state would accelerate debugging new kernels.
-- **Bounds-checked memory model** — the current `memory_model.h` dereferences any address blindly. Adding a registered-region table would turn silent segfaults into meaningful errors.
-
-### Build / Integration
-
-- **`pkg-config` / CMake `find_package` export** — install a `gcnsim-config.cmake` so downstream projects can consume the library with `find_package(gcnsim)`.
-- **Python bindings** — a thin pybind11 wrapper over the public API for driving simulation from Python test scripts.
+- [x] **Multi-Architecture Expansion (CDNA1 / CDNA2 / CDNA3)**: Full hardware support for AMD Instinct MI-100 (`gfx908`), MI-200 (`gfx90a`), and MI-300 (`gfx942`), including topology-aware CU scheduling, CDNA3 unified 512-VGPR register allocation (`.amdhsa_accum_offset`), and all new MFMA matrix shapes (FP8, BF8, XF32, double-rate INT8).
+- [x] **Multi-Tile & Multi-Workgroup GEMM Validation**: Multi-workgroup and multi-tile execution verified with AMD Tensile, rocBLAS, and `amdgpu-arch-gemm` kernels with correct inter-workgroup synchronization.
+- [x] **Code Object V2 / V3 / V4 / V5 / V6 Support**: End-to-end ELF and MsgPack metadata extraction across legacy and modern ROCm ABI versions (`ROCm 4.x` through `ROCm 7.x`).
+- [x] **Asynchronous Memory Scoreboarding (`s_waitcnt`)**: In-flight memory tracker accurately modeling VMCNT / LGKMCNT counter decrements, barrier stalls, and memory hazard delays.
+- [x] **3-Level Cache & Microarchitectural Hierarchy**: Per-CU vL1D cache, shared L2 cache, 256 MB CDNA3 Infinity Cache (L3), and HBM2/HBM2e/HBM3 latency and set-associative LRU eviction modeling.
+- [x] **Bounds-Checked Memory Fault Engine**: Page-level allocated regions with explicit `MemoryFaultException` throwing on out-of-bounds or NULL-pointer dereferences instead of silent host segfaults.
+- [x] **Instruction Tracing & Perfetto Timeline Export**: `--trace` mode for per-instruction logging and Chrome Trace Event / Perfetto (`ui.perfetto.dev`) visual timeline export showing SIMD lane occupancy and stall bars.
+- [x] **Interactive GDB/MI Debugger (`gcndb`) & Disassembler**: Full GDB/MI2 protocol debugger compatible with CGDB and VS Code, alongside human-readable disassembler output.
 
 ---
 
-## Future Work
+## Future Work & Architectural Roadmap
 
-### Re-convergence Stack
-The current EXEC mask handling is correct for `if/else` constructs that use `s_and_saveexec_b64` + `s_branch`. True divergent loops (where some lanes exit the loop body early) require a re-convergence stack — tracking pushed EXEC states and restoring them at merge points.
+### 1. High-Performance Simulation Engine
 
-### Multi-tile Tensile GEMM
-The single-tile (128x256x32) Tensile SGEMM passes end-to-end. Extending to multi-tile problems would exercise inter-workgroup correctness and validate the full production GEMM path.
+- **Multi-Threaded Host Execution**:
+  Wavefronts across independent workgroups are currently evaluated sequentially. Leveraging a host thread pool (`std::jthread` or OpenMP) across multi-core CPUs will achieve 10×–50× simulation acceleration for massive grid launches.
+- **Host SIMD Vectorization (AVX2 / AVX-512)**:
+  Vectorize the inner 64-lane SIMT loops in `isa_executor.cpp` using AVX2 (256-bit) and AVX-512 (512-bit) intrinsics to compute 8 or 16 lanes per host instruction.
+- **Dynamic Binary Translation (DBT / JIT)**:
+  Implement a JIT compiler (using LLVM ORC or AsmJit) to translate hot GCN basic blocks directly into native host x86-64 machine code, bypassing interpretation overhead in compute-dense matrix kernels.
+- **Decoded Instruction Cache**:
+  Cache decoded instruction structures keyed by PC to eliminate repeated byte-parsing overhead in tight inner kernel loops.
 
-### Memory Ordering Model
-`s_waitcnt` is currently a no-op since all simulation memory is synchronous. A simple counter-based model would allow detection of missing barriers in test kernels.
+### 2. Advanced Hardware Fidelity & Microarchitecture
 
-### MIMG (Texture) Instructions
-Image sampling instructions require texture descriptor and sampler hardware state. Currently silently skipped.
+- **Inter-XCD NUMA & Infinity Fabric Crossbar Latency**:
+  Model fine-grained asymmetric NUMA penalties, cross-die bandwidth constraints, and remote L2/L3 cache miss latency across the 8 XCDs of MI-300 and dual GCDs of MI-250X.
+- **Hardware Branch Re-convergence Stack**:
+  Extend current `s_and_saveexec_b64` handling to a full hardware re-convergence stack to handle arbitrary unstructured control flow and deeply nested divergent loops with multiple lane merge points.
+- **MIMG / Image Sampling Instructions**:
+  Model texture descriptors, image resource views, coordinate normalization, and bilinear/trilinear filtering hardware state for computer vision and image processing kernels.
+- **Symbolic Execution & Formal Verification**:
+  Integrate symbolic execution backends (e.g. Z3 SMT solver) to formally verify kernel correctness, dead-code branches, and prove the absence of out-of-bounds memory accesses across arbitrary grid dimensions.
 
-### Code Object V5 / V6
-The current implementation supports COV3 and COV4 fully. COV5 (ROCm 5.x+) and COV6 (ROCm 6.x+) introduced changes to the kernel descriptor and metadata format. Full support would extend compatibility to kernels compiled with newer toolchains.
+### 3. Toolchain & Ecosystem Integration
 
-### Symbolic Execution / Taint Analysis
-Run the simulator with symbolic values (e.g., using Z3) to enable automatic verification of kernel correctness or detection of out-of-bounds access for any possible index.
-
-### Disassembler Output
-Add a mode that prints human-readable disassembly (similar to `llvm-objdump -d`) using the existing decoder. Useful as a standalone tool and a regression test against `llvm-objdump`.
+- **Python Bindings (`pygcnsim`)**:
+  Provide native Python bindings via `nanobind` or `pybind11` for standalone simulation, unit testing, and integration with PyTorch custom C++/CUDA/HIP extensions and OpenAI Triton.
+- **Downstream CMake / `pkg-config` Packaging**:
+  Generate and install `gcnsim-config.cmake` and `gcnsim.pc` to allow downstream C++ compiler toolchains to link `libgcnsim` seamlessly.
+- **Consumer GPU ISA Support (RDNA3 `gfx1100` / RDNA4 `gfx1200`)**:
+  Add support for AMD Radeon consumer graphics architectures, featuring Wave32 mode, dual-issue VALU ALUs, and matrix WMMA (Wave Matrix Multiply-Accumulate) instructions.
