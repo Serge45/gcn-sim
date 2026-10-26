@@ -7,8 +7,8 @@ Read it fully before making any changes.
 
 ## What this project is
 
-`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx90a (MI-200 / CDNA2) and gfx942 (MI-300 / CDNA3) GPU kernels.
-It loads compiled HSACO ELF binaries, decodes gfx90a/gfx942 machine code, and executes it on the host CPU
+`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx908 (MI-100 / CDNA1), gfx90a (MI-200 / CDNA2), and gfx942 (MI-300 / CDNA3) GPU kernels.
+It loads compiled HSACO ELF binaries, decodes gfx908/gfx90a/gfx942 machine code, and executes it on the host CPU
 with no GPU or GPU driver dependency.
 
 Key entry point: `include/gcnsim/gcnsim.h` — three public functions:

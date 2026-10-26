@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <algorithm>
+#include <iostream>
 #include <sys/mman.h>
 #include "gcnsim/cache_model.h"
 
@@ -6118,6 +6119,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     }
     // F64 MFMA
     case Opcode::V_MFMA_F64_4X4X4F64: {
+        if (wave.is_gfx908) {
+            std::cerr << "[gcnsim] Warning: v_mfma_f64_4x4x4f64 is not supported on CDNA1 (gfx908)\n";
+        }
         // 4x4 F64 MFMA: src0/src1 are f64 VGPR pairs, accumulator is AGPR pair
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
@@ -6136,6 +6140,9 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     case Opcode::V_MFMA_F64_16X16X4F64: {
+        if (wave.is_gfx908) {
+            std::cerr << "[gcnsim] Warning: v_mfma_f64_16x16x4f64 is not supported on CDNA1 (gfx908)\n";
+        }
         // 16x16 F64: each lane holds one output f64 in an AGPR pair
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;

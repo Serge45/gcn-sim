@@ -106,7 +106,15 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
 
     mod.elf_flags = ehdr->e_flags;
     uint32_t mach = ehdr->e_flags & 0xFF;
-    mod.is_gfx942 = (mach == 0x4C || mach == 0x40 || mach == 0x4B); // GFX942, GFX940, GFX941
+    if (mach == 0x30) {
+        mod.arch = TargetArch::GFX908;
+        mod.is_gfx908 = true;
+    } else if (mach == 0x4C || mach == 0x40 || mach == 0x4B) {
+        mod.arch = TargetArch::GFX942;
+        mod.is_gfx942 = true;
+    } else {
+        mod.arch = TargetArch::GFX90A;
+    }
 
     // Get section header table
     uint64_t shoff = ehdr->e_shoff;
@@ -283,6 +291,8 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
             ki.hsaco_data = data;
             ki.hsaco_size = data_size;
             ki.elf_flags  = mod.elf_flags;
+            ki.arch       = mod.arch;
+            ki.is_gfx908  = mod.is_gfx908;
             ki.is_gfx942  = mod.is_gfx942;
             if (kd && kd->compute_pgm_rsrc3 != 0) {
                 ki.accum_offset = ((kd->compute_pgm_rsrc3 & 0x3F) + 1) * 4;

@@ -2,15 +2,15 @@
 
 ![gcn-sim banner](docs/images/gcn_sim_banner.png)
 
-# gcn-sim: AMD Instinct MI-200 & MI-300 Architectural GPU Simulator
+# gcn-sim: AMD Instinct MI-100, MI-200 & MI-300 Architectural GPU Simulator
 
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
-[![Target Arch](https://img.shields.io/badge/Arch-CDNA2%20(gfx90a)%20%7C%20CDNA3%20(gfx942)-red.svg)](https://www.amd.com/en/products/accelerators/instinct/mi300.html)
+[![Target Arch](https://img.shields.io/badge/Arch-CDNA1%20%7C%20CDNA2%20%7C%20CDNA3-red.svg)](https://www.amd.com/en/products/accelerators/instinct.html)
 [![ROCm Compatibility](https://img.shields.io/badge/ROCm-6.x%20%2F%207.x%20ABI-green.svg)](https://rocm.docs.amd.com/)
 [![Tests](https://img.shields.io/badge/Tests-100%25%20Passing-brightgreen.svg)]()
 [![No GPU Required](https://img.shields.io/badge/Hardware-100%25%20CPU%20Standalone-orange.svg)]()
 
-**A high-fidelity instruction-level and microarchitectural simulator for AMD Instinct MI200 / MI300 (CDNA2 / CDNA3: `gfx90a`, `gfx940`, `gfx942`) GPUs.**  
+**A high-fidelity instruction-level and microarchitectural simulator for AMD Instinct MI100 / MI200 / MI300 (CDNA1 / CDNA2 / CDNA3: `gfx908`, `gfx90a`, `gfx940`, `gfx942`) GPUs.**  
 Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **zero GPU hardware and zero kernel drivers required**.
 
 </div>
@@ -31,12 +31,12 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 - 🔬 **Cycle-Approximate Microarchitecture & 3-Level Cache Profiling**:
   - **Memory Hierarchy**: Per-CU 32 KB vL1D Cache, shared 32 MB L2 Cache, **256 MB CDNA3 Infinity Cache (L3)**, and HBM2e/HBM3 latency modeling with set-associative LRU eviction tracking.
   - **Pipeline Dynamics**: Models MFMA execution latency, VALU dual-issue shadow absorption, LDS 32-bank conflict stalls, and `s_waitcnt` in-flight memory scoreboards.
-  - **Multi-CU Scheduling & Wave Quantization**: Round-robin Workgroup dispatch across 304 CUs (8-XCD MI-300X) or 104/110 CUs (MI-200), capturing multi-wave tail latency and realistic Roofline TFLOPS.
+  - **Multi-CU Scheduling & Wave Quantization**: Round-robin Workgroup dispatch across 304 CUs (8-XCD MI-300X), 120 CUs (MI-100), or 104/110 CUs (MI-200), capturing multi-wave tail latency and realistic Roofline TFLOPS.
   - **Perfetto / Chrome Trace Export**: Generates full visual timeline JSON traces (`ui.perfetto.dev`) showing per-SIMD instruction execution and pipeline stall bars.
 - 🛠️ **GDB/MI-Compatible Interactive Debugger (`gcndb`)**:
   - Step through raw GCN assembly instructions, place hardware breakpoints, inspect 64-lane EXEC masks, VGPRs, SGPRs, and memory directly in terminal or via GUI debuggers like CGDB and Visual Studio Code.
-- 🖧 **Multi-Die MCM Hardware Abstraction**:
-  - Models AMD Instinct MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD) and MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s) topologies.
+- 🖧 **Multi-Architecture Hardware Abstraction**:
+  - Models AMD Instinct MI100 (120 CUs, 32 GB HBM2, 8 MB L2), MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD), and MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s) topologies.
 
 ---
 

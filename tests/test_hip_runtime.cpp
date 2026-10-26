@@ -38,6 +38,7 @@ TEST_F(HipRuntimeTest, DeviceCountAndSwitching) {
 }
 
 TEST_F(HipRuntimeTest, DevicePropertiesMI200) {
+    unsetenv("GCN_SIM_ARCH");
     gcnsim::hipDeviceProp_t prop;
     EXPECT_EQ(hipGetDeviceProperties(&prop, 0), gcnsim::hipSuccess);
     
@@ -56,6 +57,40 @@ TEST_F(HipRuntimeTest, DevicePropertiesMI200) {
     EXPECT_EQ(hipGetDeviceProperties(&prop, -1), gcnsim::hipErrorInvalidValue);
     EXPECT_EQ(hipGetDeviceProperties(&prop, 100), gcnsim::hipErrorInvalidValue);
     EXPECT_EQ(hipGetDeviceProperties(nullptr, 0), gcnsim::hipErrorInvalidValue);
+}
+
+TEST_F(HipRuntimeTest, DevicePropertiesMI100) {
+    setenv("GCN_SIM_ARCH", "gfx908", 1);
+    gcnsim::hipDeviceProp_t prop;
+    EXPECT_EQ(hipGetDeviceProperties(&prop, 0), gcnsim::hipSuccess);
+
+    EXPECT_STREQ(prop.name, "AMD Instinct MI100");
+    EXPECT_STREQ(prop.gcnArchName, "gfx908:sramecc+:xnack-");
+    EXPECT_EQ(prop.major, 9);
+    EXPECT_EQ(prop.minor, 0);
+    EXPECT_EQ(prop.multiProcessorCount, 120);
+    EXPECT_EQ(prop.warpSize, 64);
+    EXPECT_EQ(prop.totalGlobalMem, 32ULL * 1024 * 1024 * 1024);
+    EXPECT_EQ(prop.l2CacheSize, 8 * 1024 * 1024);
+    EXPECT_EQ(prop.memoryBusWidth, 4096);
+    unsetenv("GCN_SIM_ARCH");
+}
+
+TEST_F(HipRuntimeTest, DevicePropertiesMI300) {
+    setenv("GCN_SIM_ARCH", "gfx942", 1);
+    gcnsim::hipDeviceProp_t prop;
+    EXPECT_EQ(hipGetDeviceProperties(&prop, 0), gcnsim::hipSuccess);
+
+    EXPECT_STREQ(prop.name, "AMD Instinct MI300X");
+    EXPECT_STREQ(prop.gcnArchName, "gfx942:sramecc+:xnack-");
+    EXPECT_EQ(prop.major, 9);
+    EXPECT_EQ(prop.minor, 4);
+    EXPECT_EQ(prop.multiProcessorCount, 304);
+    EXPECT_EQ(prop.warpSize, 64);
+    EXPECT_EQ(prop.totalGlobalMem, 192ULL * 1024 * 1024 * 1024);
+    EXPECT_EQ(prop.l2CacheSize, 32 * 1024 * 1024);
+    EXPECT_EQ(prop.memoryBusWidth, 8192);
+    unsetenv("GCN_SIM_ARCH");
 }
 
 TEST_F(HipRuntimeTest, DeviceAttributes) {

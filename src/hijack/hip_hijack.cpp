@@ -493,6 +493,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
     std::memset(prop, 0, sizeof(*prop));
     const char* env_arch = std::getenv("GCN_SIM_ARCH");
     bool is_gfx942 = (env_arch && (std::string(env_arch) == "gfx942" || std::string(env_arch) == "mi300" || std::string(env_arch) == "mi300x"));
+    bool is_gfx908 = (env_arch && (std::string(env_arch) == "gfx908" || std::string(env_arch) == "mi100"));
 
     if (is_gfx942) {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI300X");
@@ -502,8 +503,20 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->memoryClockRate = 2600000; // 2.6 GHz in kHz
         prop->multiProcessorCount = 304; // 304 CUs
         prop->l2CacheSize = 32 * 1024 * 1024; // 32 MB L2
+        prop->memoryBusWidth = 8192;
         prop->major = 9;
         prop->minor = 4;
+    } else if (is_gfx908) {
+        std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI100");
+        std::strncpy(prop->gcnArchName, "gfx908:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
+        prop->totalGlobalMem = 32ULL * 1024 * 1024 * 1024; // 32 GB HBM2
+        prop->clockRate = 1502000;       // 1.502 GHz Boost in kHz
+        prop->memoryClockRate = 1200000; // 1.2 GHz in kHz
+        prop->multiProcessorCount = 120; // 120 CUs
+        prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2
+        prop->memoryBusWidth = 4096;     // 4096-bit HBM2
+        prop->major = 9;
+        prop->minor = 0;
     } else {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
         std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
@@ -512,6 +525,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
         prop->multiProcessorCount = 110; // 110 CUs per GCD
         prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 per GCD
+        prop->memoryBusWidth = 8192;
         prop->major = 9;
         prop->minor = 0;
     }
@@ -525,7 +539,6 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
     prop->maxGridSize[0] = 2147483647;
     prop->maxGridSize[1] = 65535;
     prop->maxGridSize[2] = 65535;
-    prop->memoryBusWidth = 8192;     // 8192-bit HBM
     prop->totalConstMem = 2147483647;
     prop->maxThreadsPerMultiProcessor = 2048;
     prop->computeMode = 0;

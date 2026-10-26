@@ -110,6 +110,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             ccfg.enable_l3 = true;
             ccfg.l3_size_bytes = 256 * 1024 * 1024; // 256 MB Infinity Cache
             ccfg.l3_hit_cycles = 180;
+        } else if (kernel.is_gfx908) {
+            ccfg.l1_size_bytes = 16384; // 16 KB per CU
+            ccfg.l2_size_bytes = 8 * 1024 * 1024; // 8 MB L2
+            ccfg.enable_l3 = false;
         }
         global_cache = std::make_unique<CacheModel>(ccfg);
     }
@@ -123,7 +127,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     uint32_t num_cus = cfg.num_cus;
     if (num_cus == 0) {
-        num_cus = kernel.is_gfx942 ? 304 : 104;
+        if (kernel.is_gfx942) num_cus = 304;
+        else if (kernel.is_gfx908) num_cus = 120;
+        else num_cus = 104;
     }
     std::vector<uint64_t> cu_wall_cycles(num_cus, 0);
     uint32_t current_wg = 0;
@@ -153,6 +159,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                            block_x, block_y, block_z);
             waves[w]->lds_ptr  = lds_ptr;
             waves[w]->lds_size = lds_bytes;
+            waves[w]->is_gfx908 = kernel.is_gfx908;
             waves[w]->is_gfx942 = kernel.is_gfx942;
             if (kernel.accum_offset > 0) waves[w]->accum_offset = kernel.accum_offset;
 

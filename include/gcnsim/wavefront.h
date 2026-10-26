@@ -76,6 +76,7 @@ struct WavefrontState {
     // Step-mode instruction counter (safety limit for CU interleaving)
     uint64_t insn_count = 0;
     uint32_t accum_offset = 0;              // GFX942: dynamic AGPR base in VGPR pool
+    bool     is_gfx908 = false;             // true if target is CDNA1 / gfx908
     bool     is_gfx942 = false;             // true if target is CDNA3 / gfx942
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads

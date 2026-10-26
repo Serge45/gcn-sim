@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "gcnsim/elf_loader.h"
 #include <string>
+#include <cstring>
 
 static std::string g_hsaco_path;
 
@@ -65,6 +66,53 @@ TEST_F(ElfLoaderTest, KernelCodeEntryOffsetReasonable) {
             EXPECT_GT(ki.descriptor->kernel_code_entry_byte_offset, 0)
                 << "Kernel entry offset should be positive";
         }
+    }
+}
+
+TEST_F(ElfLoaderTest, GFX908_ArchitectureDetection) {
+    std::string err;
+    auto mod_base = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod_base.has_value()) << err;
+
+    std::vector<uint8_t> gfx908_elf = mod_base->elf_data;
+    ASSERT_GE(gfx908_elf.size(), 52u);
+
+    // e_flags is at byte offset 48 (4 bytes) in standard 64-bit ELF header
+    uint32_t flags = 0x530; // mach = 0x30 (GFX908 / MI-100)
+    std::memcpy(gfx908_elf.data() + 48, &flags, 4);
+
+    std::string load_err;
+    auto mod908 = gcnsim::load_hsaco_from_memory(gfx908_elf.data(), gfx908_elf.size(), load_err);
+    ASSERT_TRUE(mod908.has_value()) << load_err;
+    EXPECT_EQ(mod908->arch, gcnsim::TargetArch::GFX908);
+    EXPECT_TRUE(mod908->is_gfx908);
+    EXPECT_FALSE(mod908->is_gfx942);
+    if (!mod908->kernels.empty()) {
+        EXPECT_EQ(mod908->kernels[0].arch, gcnsim::TargetArch::GFX908);
+        EXPECT_TRUE(mod908->kernels[0].is_gfx908);
+    }
+}
+
+TEST_F(ElfLoaderTest, GFX942_ArchitectureDetection) {
+    std::string err;
+    auto mod_base = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod_base.has_value()) << err;
+
+    std::vector<uint8_t> gfx942_elf = mod_base->elf_data;
+    ASSERT_GE(gfx942_elf.size(), 52u);
+
+    uint32_t flags = 0x54c; // mach = 0x4c (GFX942 / MI-300)
+    std::memcpy(gfx942_elf.data() + 48, &flags, 4);
+
+    std::string load_err;
+    auto mod942 = gcnsim::load_hsaco_from_memory(gfx942_elf.data(), gfx942_elf.size(), load_err);
+    ASSERT_TRUE(mod942.has_value()) << load_err;
+    EXPECT_EQ(mod942->arch, gcnsim::TargetArch::GFX942);
+    EXPECT_TRUE(mod942->is_gfx942);
+    EXPECT_FALSE(mod942->is_gfx908);
+    if (!mod942->kernels.empty()) {
+        EXPECT_EQ(mod942->kernels[0].arch, gcnsim::TargetArch::GFX942);
+        EXPECT_TRUE(mod942->kernels[0].is_gfx942);
     }
 }
 

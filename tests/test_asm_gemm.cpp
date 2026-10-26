@@ -152,6 +152,58 @@ TEST_F(AsmGemmMfmaTest, CorrectResults) {
         FAIL() << "Total element failures: " << failures << " / " << M * N;
 }
 
+TEST_F(AsmGemmMfmaTest, LaunchOnGFX908_120CUs) {
+    std::string err;
+    auto mod = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod.has_value()) << err;
+    const gcnsim::KernelInfo* ki = nullptr;
+    for (const auto& k : mod->kernels) {
+        if (k.name.find("asm_gemm_mfma") != std::string::npos) {
+            ki = &k;
+            break;
+        }
+    }
+    ASSERT_NE(ki, nullptr);
+
+    // Clone kernel and set target to GFX908 (CDNA1 / MI-100)
+    gcnsim::KernelInfo ki_908 = *ki;
+    ki_908.arch = gcnsim::TargetArch::GFX908;
+    ki_908.is_gfx908 = true;
+    ki_908.is_gfx942 = false;
+
+    const int M = 8, N = 8, K = 8;
+    std::vector<float> A(M * K), B(K * N), C_sim(M * N, 0.0f), C_ref(M * N, 0.0f);
+    for (int i = 0; i < M * K; i++) A[i] = 1.0f;
+    for (int i = 0; i < K * N; i++) B[i] = 2.0f;
+
+    float* pA = A.data(); float* pB = B.data(); float* pC = C_sim.data();
+    int pM = M, pN = N, pK = K;
+    void* params[] = { &pA, &pB, &pC, &pM, &pN, &pK };
+    auto kernarg = build_kernarg(*ki, params, 6);
+
+    gcnsim::LaunchConfig cfg;
+    cfg.grid_x  = (N / 4) * 4;
+    cfg.grid_y  = (M / 4) * 1;
+    cfg.grid_z  = 1;
+    cfg.block_x = 4;
+    cfg.block_y = 1;
+    cfg.block_z = 1;
+    cfg.kernarg      = kernarg.data();
+    cfg.kernarg_size = (uint32_t)kernarg.size();
+    cfg.enable_cycle_counting = true;
+
+    uint64_t total_cycles = 0;
+    std::string launch_err;
+    bool ok = gcnsim::launch_kernel(ki_908, cfg, launch_err, &total_cycles);
+    ASSERT_TRUE(ok) << "launch_kernel failed: " << launch_err;
+    EXPECT_GT(total_cycles, 0u);
+
+    // Verify numerical accuracy
+    for (int i = 0; i < M * N; i++) {
+        EXPECT_NEAR(C_sim[i], 16.0f, 1e-4f); // 8 * 1.0 * 2.0 = 16.0
+    }
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--hsaco" && i + 1 < argc)

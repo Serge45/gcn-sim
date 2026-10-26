@@ -244,14 +244,25 @@ public:
             std::string triple(ptr, triple_len);
             ptr += triple_len;
 
-            // Check if this is the AMD GPU target for gfx90a (cdna2)
-            if ((triple.find("hip-amdgcn-amd-amdhsa") != std::string::npos || 
-                 triple.find("hipv4-amdgcn-amd-amdhsa") != std::string::npos) &&
-                triple.find("gfx90a") != std::string::npos) {
-                
-                co_data = reinterpret_cast<const void*>(reinterpret_cast<const char*>(bundle_data) + offset);
-                co_size = size;
-                return true;
+            // Check if this is the AMD GPU target (gfx90a, gfx908, gfx942)
+            bool is_hip_target = (triple.find("hip-amdgcn-amd-amdhsa") != std::string::npos || 
+                                  triple.find("hipv4-amdgcn-amd-amdhsa") != std::string::npos);
+            if (is_hip_target) {
+                const char* env_arch = std::getenv("GCN_SIM_ARCH");
+                std::string target_arch = env_arch ? env_arch : "";
+                bool match = false;
+                if (!target_arch.empty()) {
+                    match = (triple.find(target_arch) != std::string::npos);
+                } else {
+                    match = (triple.find("gfx90a") != std::string::npos ||
+                             triple.find("gfx942") != std::string::npos ||
+                             triple.find("gfx908") != std::string::npos);
+                }
+                if (match) {
+                    co_data = reinterpret_cast<const void*>(reinterpret_cast<const char*>(bundle_data) + offset);
+                    co_size = size;
+                    return true;
+                }
             }
         }
 

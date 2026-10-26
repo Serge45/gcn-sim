@@ -7,6 +7,12 @@
 
 namespace gcnsim {
 
+enum class TargetArch {
+    GFX908, // CDNA1 (MI-100)
+    GFX90A, // CDNA2 (MI-200)
+    GFX942, // CDNA3 (MI-300)
+};
+
 struct KernelArgInfo {
     std::string name;
     std::string type_name;
@@ -26,6 +32,8 @@ struct KernelInfo {
     size_t                  hsaco_size = 0;       // total size of HSACO ELF
     uint32_t                accum_offset = 0;     // AGPR offset in unified VGPRs (from .amdhsa_accum_offset)
     uint32_t                elf_flags = 0;        // ELF e_flags
+    TargetArch              arch = TargetArch::GFX90A;
+    bool                    is_gfx908 = false;    // true if GFX908/CDNA1
     bool                    is_gfx942 = false;    // true if GFX942/CDNA3
 };
 
@@ -34,6 +42,8 @@ struct HsacoModule {
     std::vector<KernelInfo> kernels;
     int cov_version;   // 3=COV3, 4=COV4, 5=COV5
     uint32_t elf_flags = 0;
+    TargetArch arch = TargetArch::GFX90A;
+    bool     is_gfx908 = false;
     bool     is_gfx942 = false;
 };
 
