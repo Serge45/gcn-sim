@@ -7,8 +7,8 @@ Read it fully before making any changes.
 
 ## What this project is
 
-`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx90a (MI-200 / CDNA2) GPU kernels.
-It loads compiled HSACO ELF binaries, decodes gfx90a machine code, and executes it on the host CPU
+`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx90a (MI-200 / CDNA2) and gfx942 (MI-300 / CDNA3) GPU kernels.
+It loads compiled HSACO ELF binaries, decodes gfx90a/gfx942 machine code, and executes it on the host CPU
 with no GPU or GPU driver dependency.
 
 Key entry point: `include/gcnsim/gcnsim.h` — three public functions:
@@ -41,7 +41,7 @@ ctest --test-dir build -V
 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
 ```
 
-**Expected:** 107 tests pass across 13 suites.
+**Expected:** 17 CTest suites passing (100% pass rate).
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---
