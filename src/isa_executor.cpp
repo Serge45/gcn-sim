@@ -5498,18 +5498,12 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             for (int gpr = 0; gpr < 4; gpr++) {
                 // B[col=gpr] comes from the lane at block_base + gpr
                 float b_val = b_all[block_base + gpr];
-                uint32_t c_bits;
-                if (inst.dst.kind == Operand::Kind::AGPR)
-                    c_bits = wave.agpr[inst.dst.index + gpr][lane];
-                else
-                    c_bits = wave.vgpr[inst.dst.index + gpr][lane];
+                bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+                uint32_t c_bits = read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
                 float c; memcpy(&c, &c_bits, 4);
                 float r = fmaf(a_all[lane], b_val, c);
                 uint32_t r_bits; memcpy(&r_bits, &r, 4);
-                if (inst.dst.kind == Operand::Kind::AGPR)
-                    wave.agpr[inst.dst.index + gpr][lane] = r_bits;
-                else
-                    wave.vgpr[inst.dst.index + gpr][lane] = r_bits;
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, r_bits);
             }
         }
         break;

@@ -7,6 +7,10 @@
 #include <vector>
 #include <string>
 
+namespace gcnsim {
+WaveStatus run_wavefront(WavefrontState& wave);
+}
+
 static std::string g_hsaco_path;
 
 // Build kernarg from metadata (same helper as test_gemm_mfma.cpp)
@@ -201,6 +205,106 @@ TEST_F(AsmGemmMfmaTest, LaunchOnGFX908_120CUs) {
     // Verify numerical accuracy
     for (int i = 0; i < M * N; i++) {
         EXPECT_NEAR(C_sim[i], 16.0f, 1e-4f); // 8 * 1.0 * 2.0 = 16.0
+    }
+}
+
+TEST_F(AsmGemmMfmaTest, LaunchOnGFX950_304CUs) {
+    std::string err;
+    auto mod = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod.has_value()) << err;
+    const gcnsim::KernelInfo* ki = nullptr;
+    for (const auto& k : mod->kernels) {
+        if (k.name.find("asm_gemm_mfma") != std::string::npos) {
+            ki = &k;
+            break;
+        }
+    }
+    ASSERT_NE(ki, nullptr);
+
+    // Clone kernel and set target to GFX950 (CDNA4 / MI-350)
+    gcnsim::KernelInfo ki_950 = *ki;
+    ki_950.arch = gcnsim::TargetArch::GFX950;
+    ki_950.is_gfx950 = true;
+    ki_950.is_gfx942 = false;
+    ki_950.is_gfx908 = false;
+    ki_950.accum_offset = 0;
+
+    const int M = 8, N = 8, K = 8;
+    std::vector<float> A(M * K), B(K * N), C_sim(M * N, 0.0f), C_ref(M * N, 0.0f);
+    for (int i = 0; i < M * K; i++) A[i] = 1.0f;
+    for (int i = 0; i < K * N; i++) B[i] = 2.0f;
+
+    float* pA = A.data(); float* pB = B.data(); float* pC = C_sim.data();
+    int pM = M, pN = N, pK = K;
+    void* params[] = { &pA, &pB, &pC, &pM, &pN, &pK };
+    auto kernarg = build_kernarg(*ki, params, 6);
+
+    gcnsim::LaunchConfig cfg;
+    cfg.grid_x  = (N / 4) * 4;
+    cfg.grid_y  = (M / 4) * 1;
+    cfg.grid_z  = 1;
+    cfg.block_x = 4;
+    cfg.block_y = 1;
+    cfg.block_z = 1;
+    cfg.kernarg      = kernarg.data();
+    cfg.kernarg_size = (uint32_t)kernarg.size();
+    cfg.enable_cycle_counting = true;
+
+    uint64_t total_cycles = 0;
+    std::string launch_err;
+    bool ok = gcnsim::launch_kernel(ki_950, cfg, launch_err, &total_cycles);
+    ASSERT_TRUE(ok) << "launch_kernel failed: " << launch_err;
+    EXPECT_GT(total_cycles, 0u);
+
+    // Verify numerical accuracy: 8 * 1.0 * 2.0 = 16.0f
+    for (int i = 0; i < M * N; i++) {
+        EXPECT_NEAR(C_sim[i], 16.0f, 1e-4f);
+    }
+}
+
+TEST_F(AsmGemmMfmaTest, GFX950_MicroscalingFP4_InstructionKernel) {
+    // Construct in-memory code object testing v_mfma_scale_f32_16x16x128_f8f6f4
+    // w0: bits31_26 = 0x34, op = 1020, is_agpr = 1, dst = a0
+    // w1: src0 = v0 (256 + 0), src1 = v4 (256 + 4), src2 = a0 (0)
+    // Followed by s_endpgm (0xBF810000)
+    std::vector<uint32_t> code = {
+        (0x34u << 26) | (1020u << 16) | (1u << 15) | 0u,
+        (0u << 18) | ((256u + 4u) << 9) | (256u + 0u),
+        0xBF810000u // s_endpgm
+    };
+
+    auto ws = std::make_unique<gcnsim::WavefrontState>();
+    memset((void*)ws.get(), 0, offsetof(gcnsim::WavefrontState, lgkm_pending));
+    ws->exec = ~0ULL;
+    ws->is_gfx950 = true;
+    ws->kernel_code_ptr = reinterpret_cast<const uint8_t*>(code.data());
+    ws->kernel_code_size = code.size() * sizeof(uint32_t);
+    ws->count_cycles = true;
+
+    // Initialize packed FP4 inputs in v0..v3 and v4..v7
+    // FP4 E2M1: 1.0 is 0x2, 2.0 is 0x4
+    uint32_t packed_1 = 0x22222222;
+    uint32_t packed_2 = 0x44444444;
+    for (int lane = 0; lane < 64; lane++) {
+        for (int d = 0; d < 4; d++) {
+            ws->vgpr[0 + d][lane] = packed_1;
+            ws->vgpr[4 + d][lane] = packed_2;
+        }
+        for (int g = 0; g < 4; g++) {
+            ws->agpr[g][lane] = 0;
+        }
+    }
+
+    gcnsim::run_wavefront(*ws);
+
+    // K=128 with A=1.0, B=2.0 -> dot product = 128 * 1.0 * 2.0 = 256.0f
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            float val;
+            uint32_t bits = ws->agpr[gpr][lane];
+            memcpy(&val, &bits, 4);
+            EXPECT_FLOAT_EQ(val, 256.0f);
+        }
     }
 }
 

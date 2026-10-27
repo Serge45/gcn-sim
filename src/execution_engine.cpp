@@ -162,7 +162,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->is_gfx908 = kernel.is_gfx908;
             waves[w]->is_gfx942 = kernel.is_gfx942;
             waves[w]->is_gfx950 = kernel.is_gfx950;
-            if (kernel.accum_offset > 0) waves[w]->accum_offset = kernel.accum_offset;
+            waves[w]->accum_offset = kernel.accum_offset;
 
             scratch_bufs[w].resize(scratch_per_wave, 0);
             waves[w]->scratch_ptr      = scratch_per_wave > 0 ? scratch_bufs[w].data() : nullptr;
