@@ -100,3 +100,10 @@ add_executable(test_hip_symbols test_hip_symbols.cpp)
 target_link_libraries(test_hip_symbols gcnsim_hip gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_hip_symbols COMMAND test_hip_symbols)
 add_dependencies(test_hip_symbols gcnsim_hip vector_add_hsaco)
+
+# test_cdna4_gemm (AMD Instinct MI-350 / CDNA4 / GFX950 Hardware Kernel Test)
+add_executable(test_cdna4_gemm test_cdna4_gemm.cpp)
+target_link_libraries(test_cdna4_gemm gcnsim GTest::gtest GTest::gtest_main)
+add_test(NAME test_cdna4_gemm COMMAND test_cdna4_gemm
+         --hsaco ${CMAKE_BINARY_DIR}/tools/cdna4_gemm/cdna4_gemm.co)
+add_dependencies(test_cdna4_gemm cdna4_gemm_co)

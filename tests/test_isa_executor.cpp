@@ -1041,6 +1041,84 @@ TEST(ISAExecutor, VLshlAddU64) {
     EXPECT_EQ(ws->vgpr[1][0], 0x4u);
 }
 
+TEST(ISAExecutor, Gfx950DoubleRateInt8Mfma) {
+    auto ws = make_wave();
+    ws->is_gfx950 = true;
+    ws->accum_offset = 64; // dynamic AGPR base in VGPR pool
+
+    // Set A=1, B=2 in int8 across 4 VGPRs
+    // 0x01010101 packed int8
+    uint32_t a_val = 0x01010101;
+    uint32_t b_val = 0x02020202;
+    for (int lane = 0; lane < 64; lane++) {
+        for (int d = 0; d < 4; d++) {
+            ws->vgpr[0 + d][lane] = a_val;
+            ws->vgpr[4 + d][lane] = b_val;
+        }
+    }
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            ws->vgpr[ws->accum_offset + gpr][lane] = 0;
+        }
+    }
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_MFMA_I32_16X16X64_I8;
+    inst.format = InstFormat::MFMA;
+    inst.dst.kind = Operand::Kind::AGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::VGPR;
+    inst.src[1].index = 4;
+
+    execute_instruction(*ws, inst);
+
+    // K=64 with A=1, B=2 -> dot product = 64 * 1 * 2 = 128
+    for (int gpr = 0; gpr < 4; gpr++) {
+        for (int lane = 0; lane < 64; lane++) {
+            uint32_t val = ws->vgpr[ws->accum_offset + gpr][lane];
+            EXPECT_EQ(val, 128u);
+        }
+    }
+}
+
+TEST(ISAExecutor, Gfx950CvtScalef32PkF32Fp4) {
+    auto ws = make_wave();
+    ws->exec = 0x1; // lane 0
+
+    // FP4 E2M1:
+    // 0b0010 = sign=0, exp=1, man=0 -> 1.0f * 2^(1-1) = 1.0f
+    // 0b0011 = sign=0, exp=1, man=1 -> 1.5f * 2^(1-1) = 1.5f
+    // Packed low nibble: 0x2, second nibble: 0x3 -> 0x32
+    ws->vgpr[2][0] = 0x32;
+    // Scale in s0: 2.0f
+    float scale = 2.0f;
+    uint32_t scale_u; memcpy(&scale_u, &scale, 4);
+    ws->sgpr[0] = scale_u;
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_CVT_SCALEF32_PK_F32_FP4;
+    inst.format = InstFormat::VOP3A;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::VGPR;
+    inst.src[0].index = 2;
+    inst.src[1].kind = Operand::Kind::SGPR;
+    inst.src[1].index = 0;
+
+    execute_instruction(*ws, inst);
+
+    // Expected:
+    // v0 = 1.0f * 2.0f = 2.0f
+    // v1 = 1.5f * 2.0f = 3.0f
+    float r0, r1;
+    memcpy(&r0, &ws->vgpr[0][0], 4);
+    memcpy(&r1, &ws->vgpr[1][0], 4);
+    EXPECT_FLOAT_EQ(r0, 2.0f);
+    EXPECT_FLOAT_EQ(r1, 3.0f);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -796,6 +796,7 @@ static uint32_t mfma_exec_cycles(Opcode op) {
     case Opcode::V_MFMA_F32_16X16X32_FP8_FP8:
     case Opcode::V_MFMA_F32_16X16X32_F16:
     case Opcode::V_MFMA_F32_16X16X32_BF16:
+    case Opcode::V_MFMA_I32_16X16X64_I8:
     case Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4:
         return 16;
 
@@ -821,6 +822,7 @@ static uint32_t mfma_exec_cycles(Opcode op) {
     case Opcode::V_MFMA_F32_32X32X16_FP8_FP8:
     case Opcode::V_MFMA_F32_32X32X16_F16:
     case Opcode::V_MFMA_F32_32X32X16_BF16:
+    case Opcode::V_MFMA_I32_32X32X32_I8:
     case Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4:
         return 32;
 
@@ -931,7 +933,7 @@ WaveStatus step_wavefront(WavefrontState& wave) {
 
     const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
     uint64_t pre_pc = wave.pc;
-    Instruction inst = decode(wave.kernel_code_ptr + wave.pc);
+    Instruction inst = decode(wave.kernel_code_ptr + wave.pc, wave.is_gfx950);
     wave.pc += inst.size_bytes;
     if (trace) {
         fprintf(stderr, "PC=%#llx enc=%08X exec=%#llx op=%s\n",
@@ -1041,7 +1043,7 @@ WaveStatus run_wavefront(WavefrontState& wave) {
             wave.debug_hook(wave);
         }
         uint64_t pre_pc = wave.pc;
-        Instruction inst = decode(wave.kernel_code_ptr + wave.pc);
+        Instruction inst = decode(wave.kernel_code_ptr + wave.pc, wave.is_gfx950);
         wave.pc += inst.size_bytes;
         if (trace) {
             fprintf(stderr, "PC=%#llx enc=%08X exec=%#llx op=%s\n",
@@ -6660,6 +6662,119 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                 uint32_t rb; memcpy(&rb, &acc, 4);
                 write_acc(wave, use_agpr, inst.dst.index + gpr, lane, rb);
             }
+        }
+        break;
+    }
+    case Opcode::V_MFMA_LD_SCALE_B32: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            wave.mfma_scale_a[lane] = read_vsrc(wave, inst.src[0], lane);
+            wave.mfma_scale_b[lane] = read_vsrc(wave, inst.src[1], lane);
+        }
+        break;
+    }
+    case Opcode::V_MFMA_I32_16X16X64_I8: {
+        // M=16, N=16, K=64: 4 K-groups of 16 lanes, 4 output GPRs
+        // Each lane provides 16 i8 values across 4 VGPRs
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        int8_t a_i8[WAVE_SIZE][16], b_i8[WAVE_SIZE][16];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            for (int d = 0; d < 4; d++) {
+                uint32_t a = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index + d < NUM_VGPR)
+                             ? wave.vgpr[inst.src[0].index + d][lane] : read_vsrc(wave, inst.src[0], lane);
+                uint32_t b = (inst.src[1].kind == Operand::Kind::VGPR && inst.src[1].index + d < NUM_VGPR)
+                             ? wave.vgpr[inst.src[1].index + d][lane] : read_vsrc(wave, inst.src[1], lane);
+                for (int k = 0; k < 4; k++) {
+                    a_i8[lane][d * 4 + k] = (int8_t)((a >> (k * 8)) & 0xFF);
+                    b_i8[lane][d * 4 + k] = (int8_t)((b >> (k * 8)) & 0xFF);
+                }
+            }
+        }
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int kg_out = lane / 16;
+            int col = lane % 16;
+            for (int gpr = 0; gpr < 4; gpr++) {
+                int row = kg_out * 4 + gpr;
+                int32_t acc = (int32_t)read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
+                for (int kg = 0; kg < 4; kg++) {
+                    int a_lane = kg * 16 + row;
+                    int b_lane = kg * 16 + col;
+                    for (int k_sub = 0; k_sub < 16; k_sub++) {
+                        acc += (int32_t)a_i8[a_lane][k_sub] * (int32_t)b_i8[b_lane][k_sub];
+                    }
+                }
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, (uint32_t)acc);
+            }
+        }
+        break;
+    }
+    case Opcode::V_MFMA_I32_32X32X32_I8: {
+        // M=32, N=32, K=32: 2 K-groups of 32 lanes, 16 output GPRs
+        // Each lane provides 16 i8 values across 4 VGPRs
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR);
+        int8_t a_i8[WAVE_SIZE][16], b_i8[WAVE_SIZE][16];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            for (int d = 0; d < 4; d++) {
+                uint32_t a = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index + d < NUM_VGPR)
+                             ? wave.vgpr[inst.src[0].index + d][lane] : read_vsrc(wave, inst.src[0], lane);
+                uint32_t b = (inst.src[1].kind == Operand::Kind::VGPR && inst.src[1].index + d < NUM_VGPR)
+                             ? wave.vgpr[inst.src[1].index + d][lane] : read_vsrc(wave, inst.src[1], lane);
+                for (int k = 0; k < 4; k++) {
+                    a_i8[lane][d * 4 + k] = (int8_t)((a >> (k * 8)) & 0xFF);
+                    b_i8[lane][d * 4 + k] = (int8_t)((b >> (k * 8)) & 0xFF);
+                }
+            }
+        }
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int kg_out = lane / 32;
+            int col = lane % 32;
+            int row_base = kg_out * 16;
+            for (int gpr = 0; gpr < 16; gpr++) {
+                int32_t acc = (int32_t)read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
+                for (int kg = 0; kg < 2; kg++) {
+                    int a_lane = kg * 32 + row_base + gpr;
+                    int b_lane = kg * 32 + col;
+                    for (int k_sub = 0; k_sub < 16; k_sub++) {
+                        acc += (int32_t)a_i8[a_lane][k_sub] * (int32_t)b_i8[b_lane][k_sub];
+                    }
+                }
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, (uint32_t)acc);
+            }
+        }
+        break;
+    }
+    case Opcode::V_CVT_SCALEF32_PK_F32_FP4: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t src_fp4 = read_vsrc(wave, inst.src[0], lane);
+            float scale = 1.0f;
+            uint32_t scale_u = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&scale, &scale_u, 4);
+            if (scale == 0.0f) scale = 1.0f;
+            float f0 = fp4_e2m1_to_f32((uint8_t)(src_fp4 & 0xF)) * scale;
+            float f1 = fp4_e2m1_to_f32((uint8_t)((src_fp4 >> 4) & 0xF)) * scale;
+            uint32_t u0; memcpy(&u0, &f0, 4);
+            uint32_t u1; memcpy(&u1, &f1, 4);
+            wave.vgpr[inst.dst.index][lane] = u0;
+            if (inst.dst.index + 1 < NUM_VGPR) {
+                wave.vgpr[inst.dst.index + 1][lane] = u1;
+            }
+        }
+        break;
+    }
+    case Opcode::V_CVT_SCALEF32_PK_F16_FP4: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t src_fp4 = read_vsrc(wave, inst.src[0], lane);
+            float scale = 1.0f;
+            uint32_t scale_u = read_vsrc(wave, inst.src[1], lane);
+            memcpy(&scale, &scale_u, 4);
+            if (scale == 0.0f) scale = 1.0f;
+            float f0 = fp4_e2m1_to_f32((uint8_t)(src_fp4 & 0xF)) * scale;
+            float f1 = fp4_e2m1_to_f32((uint8_t)((src_fp4 >> 4) & 0xF)) * scale;
+            uint16_t h0 = f32_to_f16(f0);
+            uint16_t h1 = f32_to_f16(f1);
+            wave.vgpr[inst.dst.index][lane] = ((uint32_t)h1 << 16) | h0;
         }
         break;
     }

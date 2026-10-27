@@ -734,8 +734,13 @@ enum class Opcode {
     V_MFMA_F32_32X32X16_F16,
     V_MFMA_F32_16X16X32_BF16,
     V_MFMA_F32_32X32X16_BF16,
+    V_MFMA_I32_16X16X64_I8,
+    V_MFMA_I32_32X32X32_I8,
+    V_MFMA_LD_SCALE_B32,
     V_MFMA_SCALE_F32_16X16X128_F8F6F4,
     V_MFMA_SCALE_F32_32X32X64_F8F6F4,
+    V_CVT_SCALEF32_PK_F32_FP4,
+    V_CVT_SCALEF32_PK_F16_FP4,
     V_PRNG_B32,
     // VINTRP
     V_INTERP_P1LL_F16,
@@ -831,7 +836,7 @@ struct Instruction {
 
 // Decode one instruction at pc; returns decoded struct.
 // size_bytes is 4 or 8 — caller advances PC by that amount.
-Instruction decode(const uint8_t* pc);
+Instruction decode(const uint8_t* pc, bool is_gfx950 = false);
 
 const char* opcode_name(Opcode op);
 const char* format_name(InstFormat fmt);

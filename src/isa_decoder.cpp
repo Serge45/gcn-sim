@@ -433,6 +433,7 @@ static Opcode vop1_opcode(uint32_t op) {
         case 84:  return Opcode::V_ACCVGPR_READ_B32;
         case 86:  return Opcode::V_ACCVGPR_WRITE_B32;
         case 87:  return Opcode::V_PRNG_B32;
+        case 88:  return Opcode::V_PRNG_B32;
         case 112: return Opcode::V_SWAP_B32;
         default:  return Opcode::UNKNOWN;
     }
@@ -566,6 +567,9 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x201: return Opcode::V_AND_OR_B32;    // gfx90a encoding (was 0x277 on Vega)
         case 0x202: return Opcode::V_OR3_B32;       // gfx90a encoding (was 0x278 on Vega)
         case 0x208: return Opcode::V_LSHL_ADD_U64;
+        case 0x23F: return Opcode::V_CVT_SCALEF32_PK_F32_FP4;
+        case 0x250: return Opcode::V_CVT_SCALEF32_PK_F16_FP4;
+        case 0x3AA: return Opcode::V_DOT8_I32_I4;
         case 0x204: return Opcode::UNKNOWN;         // v_cubeid_f32 (graphics)
         case 0x1C8: return Opcode::V_BFE_U32;       // gfx90a encoding
         case 0x1C9: return Opcode::V_BFE_I32;       // gfx90a encoding
@@ -929,8 +933,17 @@ static Opcode ds_opcode(uint32_t op) {
     }
 }
 
-static Opcode mfma_opcode(uint32_t op) {
+static Opcode mfma_opcode(uint32_t op, bool is_gfx950 = false) {
     switch (op) {
+        // CDNA4 (GFX950) newly assigned hardware opcodes
+        case 940: return Opcode::V_MFMA_LD_SCALE_B32;
+        case 941: return Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4;
+        case 942: return Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4;
+        case 949: return Opcode::V_MFMA_F32_16X16X32_BF16;
+        case 950: return Opcode::V_MFMA_I32_16X16X64_I8;
+        case 951: return Opcode::V_MFMA_F32_32X32X16_BF16;
+        case 952: return Opcode::V_MFMA_I32_32X32X32_I8;
+
         // Direct 10-bit hardware opcodes (GFX90A & GFX942)
         case 958: return Opcode::V_MFMA_F32_16X16X8_XF32;
         case 959: return Opcode::V_MFMA_F32_32X32X4_XF32;
@@ -947,8 +960,8 @@ static Opcode mfma_opcode(uint32_t op) {
         case 976: return Opcode::V_MFMA_I32_32X32X4I8;
         case 977: return Opcode::V_MFMA_I32_16X16X4I8;
         case 978: return Opcode::V_MFMA_I32_4X4X4I8;
-        case 980: return Opcode::V_MFMA_I32_32X32X8I8;
-        case 981: return Opcode::V_MFMA_I32_16X16X16I8;
+        case 980: return is_gfx950 ? Opcode::V_MFMA_F32_16X16X32_F16 : Opcode::V_MFMA_I32_32X32X8I8;
+        case 981: return is_gfx950 ? Opcode::V_MFMA_F32_32X32X16_F16 : Opcode::V_MFMA_I32_16X16X16I8;
         case 982: return Opcode::V_MFMA_I32_32X32X16I8;
         case 983: return Opcode::V_MFMA_I32_16X16X32I8;
         case 989: return Opcode::V_MFMA_F32_32X32X4BF16;
@@ -1050,7 +1063,7 @@ static void parse_waitcnt(uint32_t simm16, uint8_t& vmcnt, uint8_t& lgkmcnt) {
 // Main decode function
 // ---------------------------------------------------------------------------
 
-Instruction decode(const uint8_t* pc) {
+Instruction decode(const uint8_t* pc, bool is_gfx950) {
     Instruction inst;
     uint32_t w0 = read_u32_le(pc);
     inst.encoding[0] = w0;
@@ -1490,11 +1503,11 @@ Instruction decode(const uint8_t* pc) {
                 inst.op_sel = (w0 >> 11) & 0x3;
                 return inst;
             }
-            // Try MFMA: MFMA ops occupy op range 958..1023
-            if (op >= 958 && op <= 1023) {
-                Opcode mc = mfma_opcode(op);
+            // Try MFMA: MFMA ops occupy op range 940..1023
+            if (op >= 940 && op <= 1023) {
+                Opcode mc = mfma_opcode(op, is_gfx950);
                 if (mc == Opcode::UNKNOWN && op >= 960) {
-                    mc = mfma_opcode(op - 960);
+                    mc = mfma_opcode(op - 960, is_gfx950);
                 }
                 if (mc != Opcode::UNKNOWN) {
                     inst.format = InstFormat::MFMA;
@@ -2090,6 +2103,11 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_MFMA_F32_32X32X16_BF16: return "v_mfma_f32_32x32x16_bf16";
         case Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4: return "v_mfma_scale_f32_16x16x128_f8f6f4";
         case Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4: return "v_mfma_scale_f32_32x32x64_f8f6f4";
+        case Opcode::V_MFMA_I32_16X16X64_I8: return "v_mfma_i32_16x16x64_i8";
+        case Opcode::V_MFMA_I32_32X32X32_I8: return "v_mfma_i32_32x32x32_i8";
+        case Opcode::V_MFMA_LD_SCALE_B32:    return "v_mfma_ld_scale_b32";
+        case Opcode::V_CVT_SCALEF32_PK_F32_FP4: return "v_cvt_scalef32_pk_f32_fp4";
+        case Opcode::V_CVT_SCALEF32_PK_F16_FP4: return "v_cvt_scalef32_pk_f16_fp4";
         case Opcode::V_PRNG_B32:             return "v_prng_b32";
         case Opcode::V_PK_ADD_F16:           return "v_pk_add_f16";
         case Opcode::V_PK_MUL_F16:           return "v_pk_mul_f16";

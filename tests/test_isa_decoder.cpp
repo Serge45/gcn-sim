@@ -694,6 +694,102 @@ TEST(ISADecoder, VOP3P_OpSel) {
     EXPECT_EQ(inst.op_sel_hi & 1, 1u);    // op_sel_hi bit 0 set
 }
 
+TEST(ISADecoder, Gfx950HardwareBytecodeDecodes) {
+    // 1. v_prng_b32_e32 v0, v1: 7E00B101
+    {
+        std::vector<uint8_t> b = {0x01, 0xb1, 0x00, 0x7e};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_PRNG_B32);
+        EXPECT_EQ(inst.format, InstFormat::VOP1);
+        EXPECT_EQ(inst.dst.index, 0u);
+        EXPECT_EQ(inst.src[0].index, 1u);
+    }
+    // 2. v_mfma_f32_16x16x32_f16: D3D48000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xd4, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_F32_16X16X32_F16);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 3. v_mfma_f32_32x32x16_f16: D3D58000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xd5, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_F32_32X32X16_F16);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 4. v_mfma_f32_16x16x32_bf16: D3B58000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xb5, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_F32_16X16X32_BF16);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 5. v_mfma_f32_32x32x16_bf16: D3B78000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xb7, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_F32_32X32X16_BF16);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 6. v_mfma_i32_16x16x64_i8: D3B68000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xb6, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_I32_16X16X64_I8);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 7. v_mfma_i32_32x32x32_i8: D3B88000 04020900
+    {
+        std::vector<uint8_t> b = {0x00, 0x80, 0xb8, 0xd3, 0x00, 0x09, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_I32_32X32X32_I8);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 8. v_mfma_ld_scale_b32: D3AC0000 00022310
+    {
+        std::vector<uint8_t> b = {0x00, 0x00, 0xac, 0xd3, 0x10, 0x23, 0x02, 0x00};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_LD_SCALE_B32);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 9. v_mfma_scale_f32_16x16x128_f8f6f4: D3AD8800 04021100
+    {
+        std::vector<uint8_t> b = {0x00, 0x88, 0xad, 0xd3, 0x00, 0x11, 0x02, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4);
+        EXPECT_EQ(inst.format, InstFormat::MFMA);
+    }
+    // 10. v_lshl_add_u64: D2080004 04010004
+    {
+        std::vector<uint8_t> b = {0x04, 0x00, 0x08, 0xd2, 0x04, 0x00, 0x01, 0x04};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_LSHL_ADD_U64);
+        EXPECT_EQ(inst.format, InstFormat::VOP3A);
+    }
+    // 11. v_cvt_scalef32_pk_f32_fp4: D23F0000 00000102
+    {
+        std::vector<uint8_t> b = {0x00, 0x00, 0x3f, 0xd2, 0x02, 0x01, 0x00, 0x00};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_CVT_SCALEF32_PK_F32_FP4);
+        EXPECT_EQ(inst.format, InstFormat::VOP3A);
+    }
+    // 12. v_cvt_scalef32_pk_f16_fp4: D2500000 00000102
+    {
+        std::vector<uint8_t> b = {0x00, 0x00, 0x50, 0xd2, 0x02, 0x01, 0x00, 0x00};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_CVT_SCALEF32_PK_F16_FP4);
+        EXPECT_EQ(inst.format, InstFormat::VOP3A);
+    }
+    // 13. v_dot8_i32_i4: D3AA4000 1C020501
+    {
+        std::vector<uint8_t> b = {0x00, 0x40, 0xaa, 0xd3, 0x01, 0x05, 0x02, 0x1c};
+        Instruction inst = decode(b.data(), true);
+        EXPECT_EQ(inst.opcode, Opcode::V_DOT8_I32_I4);
+        EXPECT_EQ(inst.format, InstFormat::VOP3A);
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
