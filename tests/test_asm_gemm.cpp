@@ -208,7 +208,7 @@ TEST_F(AsmGemmMfmaTest, LaunchOnGFX908_120CUs) {
     }
 }
 
-TEST_F(AsmGemmMfmaTest, LaunchOnGFX950_304CUs) {
+TEST_F(AsmGemmMfmaTest, LaunchOnGFX950_256CUs) {
     std::string err;
     auto mod = gcnsim::load_hsaco(g_hsaco_path, err);
     ASSERT_TRUE(mod.has_value()) << err;
@@ -221,7 +221,7 @@ TEST_F(AsmGemmMfmaTest, LaunchOnGFX950_304CUs) {
     }
     ASSERT_NE(ki, nullptr);
 
-    // Clone kernel and set target to GFX950 (CDNA4 / MI-350)
+    // Clone kernel and set target to GFX950 (CDNA4 / MI-350 with 256 CUs)
     gcnsim::KernelInfo ki_950 = *ki;
     ki_950.arch = gcnsim::TargetArch::GFX950;
     ki_950.is_gfx950 = true;

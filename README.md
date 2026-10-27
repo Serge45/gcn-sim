@@ -33,12 +33,12 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 - 🔬 **Cycle-Approximate Microarchitecture & 3-Level Cache Profiling**:
   - **Memory Hierarchy**: Per-CU 32 KB vL1D Cache, shared 32 MB L2 Cache, **256 MB CDNA3/4 Infinity Cache (L3)**, and HBM2e/HBM3/HBM3e latency modeling with set-associative LRU eviction tracking.
   - **Pipeline Dynamics**: Models MFMA execution latency, VALU dual-issue shadow absorption, LDS 32-bank conflict stalls, and `s_waitcnt` in-flight memory scoreboards.
-  - **Multi-CU Scheduling & Wave Quantization**: Round-robin Workgroup dispatch across 304 CUs (8-XCD MI-300X/MI-350X), 120 CUs (MI-100), or 104/110 CUs (MI-200), capturing multi-wave tail latency and realistic Roofline TFLOPS.
+  - **Multi-CU Scheduling & Wave Quantization**: Round-robin Workgroup dispatch across 256 CUs (8-XCD MI-350X), 304 CUs (8-XCD MI-300X), 120 CUs (MI-100), or 104/110 CUs (MI-200), capturing multi-wave tail latency and realistic Roofline TFLOPS.
   - **Perfetto / Chrome Trace Export**: Generates full visual timeline JSON traces (`ui.perfetto.dev`) showing per-SIMD instruction execution and pipeline stall bars.
 - 🛠️ **GDB/MI-Compatible Interactive Debugger (`gcndb`)**:
   - Step through raw GCN assembly instructions, place hardware breakpoints, inspect 64-lane EXEC masks, VGPRs, SGPRs, and memory directly in terminal or via GUI debuggers like CGDB and Visual Studio Code.
 - 🖧 **Multi-Architecture Hardware Abstraction**:
-  - Models AMD Instinct MI100 (120 CUs, 32 GB HBM2, 8 MB L2), MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD), MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s), and MI350X 8-XCD (304 CUs, 288 GB HBM3e, 160 KB LDS, 8 TB/s) topologies.
+  - Models AMD Instinct MI100 (120 CUs, 32 GB HBM2, 8 MB L2), MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD), MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s), and MI350X 8-XCD (256 CUs, 288 GB HBM3e, 160 KB LDS, 8 TB/s) topologies.
 
 ---
 

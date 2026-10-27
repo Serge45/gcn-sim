@@ -502,7 +502,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->totalGlobalMem = 288ULL * 1024 * 1024 * 1024; // 288 GB HBM3e
         prop->clockRate = 2100000;       // 2.1 GHz Boost in kHz
         prop->memoryClockRate = 3200000; // 3.2 GHz in kHz
-        prop->multiProcessorCount = 304; // 304 CUs
+        prop->multiProcessorCount = 256; // 256 CUs (32 active CUs x 8 XCDs)
         prop->l2CacheSize = 32 * 1024 * 1024; // 32 MB L2
         prop->memoryBusWidth = 8192;
         prop->major = 9;

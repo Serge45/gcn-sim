@@ -127,7 +127,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     uint32_t num_cus = cfg.num_cus;
     if (num_cus == 0) {
-        if (kernel.is_gfx950 || kernel.is_gfx942) num_cus = 304;
+        if (kernel.is_gfx950) num_cus = 256;
+        else if (kernel.is_gfx942) num_cus = 304;
         else if (kernel.is_gfx908) num_cus = 120;
         else num_cus = 104;
     }

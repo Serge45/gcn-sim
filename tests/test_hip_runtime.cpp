@@ -102,7 +102,7 @@ TEST_F(HipRuntimeTest, DevicePropertiesMI350) {
     EXPECT_STREQ(prop.gcnArchName, "gfx950:sramecc+:xnack-");
     EXPECT_EQ(prop.major, 9);
     EXPECT_EQ(prop.minor, 5);
-    EXPECT_EQ(prop.multiProcessorCount, 304);
+    EXPECT_EQ(prop.multiProcessorCount, 256);
     EXPECT_EQ(prop.warpSize, 64);
     EXPECT_EQ(prop.totalGlobalMem, 288ULL * 1024 * 1024 * 1024);
     EXPECT_EQ(prop.l2CacheSize, 32 * 1024 * 1024);
