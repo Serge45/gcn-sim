@@ -112,6 +112,9 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     } else if (mach == 0x4C || mach == 0x40 || mach == 0x4B) {
         mod.arch = TargetArch::GFX942;
         mod.is_gfx942 = true;
+    } else if (mach == 0x4F) {
+        mod.arch = TargetArch::GFX950;
+        mod.is_gfx950 = true;
     } else {
         mod.arch = TargetArch::GFX90A;
     }
@@ -294,6 +297,7 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
             ki.arch       = mod.arch;
             ki.is_gfx908  = mod.is_gfx908;
             ki.is_gfx942  = mod.is_gfx942;
+            ki.is_gfx950  = mod.is_gfx950;
             if (kd && kd->compute_pgm_rsrc3 != 0) {
                 ki.accum_offset = ((kd->compute_pgm_rsrc3 & 0x3F) + 1) * 4;
             }

@@ -104,7 +104,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     std::unique_ptr<CacheModel> global_cache;
     if (cfg.enable_cycle_counting) {
         CacheConfig ccfg;
-        if (kernel.is_gfx942) {
+        if (kernel.is_gfx950 || kernel.is_gfx942) {
             ccfg.l1_size_bytes = 32768; // 32 KB per CU
             ccfg.l2_size_bytes = 32 * 1024 * 1024; // 32 MB total L2 across 8 XCDs
             ccfg.enable_l3 = true;
@@ -127,7 +127,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     uint32_t num_cus = cfg.num_cus;
     if (num_cus == 0) {
-        if (kernel.is_gfx942) num_cus = 304;
+        if (kernel.is_gfx950 || kernel.is_gfx942) num_cus = 304;
         else if (kernel.is_gfx908) num_cus = 120;
         else num_cus = 104;
     }
@@ -161,6 +161,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->lds_size = lds_bytes;
             waves[w]->is_gfx908 = kernel.is_gfx908;
             waves[w]->is_gfx942 = kernel.is_gfx942;
+            waves[w]->is_gfx950 = kernel.is_gfx950;
             if (kernel.accum_offset > 0) waves[w]->accum_offset = kernel.accum_offset;
 
             scratch_bufs[w].resize(scratch_per_wave, 0);

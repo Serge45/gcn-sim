@@ -93,6 +93,25 @@ TEST_F(HipRuntimeTest, DevicePropertiesMI300) {
     unsetenv("GCN_SIM_ARCH");
 }
 
+TEST_F(HipRuntimeTest, DevicePropertiesMI350) {
+    setenv("GCN_SIM_ARCH", "gfx950", 1);
+    gcnsim::hipDeviceProp_t prop;
+    EXPECT_EQ(hipGetDeviceProperties(&prop, 0), gcnsim::hipSuccess);
+
+    EXPECT_STREQ(prop.name, "AMD Instinct MI350X");
+    EXPECT_STREQ(prop.gcnArchName, "gfx950:sramecc+:xnack-");
+    EXPECT_EQ(prop.major, 9);
+    EXPECT_EQ(prop.minor, 5);
+    EXPECT_EQ(prop.multiProcessorCount, 304);
+    EXPECT_EQ(prop.warpSize, 64);
+    EXPECT_EQ(prop.totalGlobalMem, 288ULL * 1024 * 1024 * 1024);
+    EXPECT_EQ(prop.l2CacheSize, 32 * 1024 * 1024);
+    EXPECT_EQ(prop.memoryBusWidth, 8192);
+    EXPECT_EQ(prop.sharedMemPerBlock, 163840);
+    EXPECT_EQ(prop.maxSharedMemoryPerMultiProcessor, 163840);
+    unsetenv("GCN_SIM_ARCH");
+}
+
 TEST_F(HipRuntimeTest, DeviceAttributes) {
     int val = 0;
     EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeMaxThreadsPerBlock, 0), gcnsim::hipSuccess);

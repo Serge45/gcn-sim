@@ -78,6 +78,7 @@ struct WavefrontState {
     uint32_t accum_offset = 0;              // GFX942: dynamic AGPR base in VGPR pool
     bool     is_gfx908 = false;             // true if target is CDNA1 / gfx908
     bool     is_gfx942 = false;             // true if target is CDNA3 / gfx942
+    bool     is_gfx950 = false;             // true if target is CDNA4 / gfx950
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
     std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
     std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores

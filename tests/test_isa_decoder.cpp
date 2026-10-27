@@ -487,6 +487,27 @@ TEST(ISADecoder, CDNA3_MfmaOpcodes) {
     EXPECT_EQ(inst_fp8_bf8.format, InstFormat::MFMA);
     EXPECT_EQ(inst_fp8_bf8.opcode, Opcode::V_MFMA_F32_32X32X16_FP8_BF8);
     EXPECT_STREQ(opcode_name(inst_fp8_bf8.opcode), "v_mfma_f32_32x32x16_fp8_bf8");
+
+    // CDNA4 (GFX950) New MFMA
+    Instruction inst_f16_16 = decode_mfma(1016);
+    EXPECT_EQ(inst_f16_16.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_f16_16.opcode, Opcode::V_MFMA_F32_16X16X32_F16);
+    EXPECT_STREQ(opcode_name(inst_f16_16.opcode), "v_mfma_f32_16x16x32_f16");
+
+    Instruction inst_f16_32 = decode_mfma(1017);
+    EXPECT_EQ(inst_f16_32.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_f16_32.opcode, Opcode::V_MFMA_F32_32X32X16_F16);
+    EXPECT_STREQ(opcode_name(inst_f16_32.opcode), "v_mfma_f32_32x32x16_f16");
+
+    Instruction inst_scale_16 = decode_mfma(1020);
+    EXPECT_EQ(inst_scale_16.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_scale_16.opcode, Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4);
+    EXPECT_STREQ(opcode_name(inst_scale_16.opcode), "v_mfma_scale_f32_16x16x128_f8f6f4");
+
+    Instruction inst_scale_32 = decode_mfma(1021);
+    EXPECT_EQ(inst_scale_32.format, InstFormat::MFMA);
+    EXPECT_EQ(inst_scale_32.opcode, Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4);
+    EXPECT_STREQ(opcode_name(inst_scale_32.opcode), "v_mfma_scale_f32_32x32x64_f8f6f4");
 }
 
 // --- VOP2: v_cndmask_b32 (Phase 1) ---

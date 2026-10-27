@@ -11,6 +11,7 @@ enum class TargetArch {
     GFX908, // CDNA1 (MI-100)
     GFX90A, // CDNA2 (MI-200)
     GFX942, // CDNA3 (MI-300)
+    GFX950, // CDNA4 (MI-350)
 };
 
 struct KernelArgInfo {
@@ -35,6 +36,7 @@ struct KernelInfo {
     TargetArch              arch = TargetArch::GFX90A;
     bool                    is_gfx908 = false;    // true if GFX908/CDNA1
     bool                    is_gfx942 = false;    // true if GFX942/CDNA3
+    bool                    is_gfx950 = false;    // true if GFX950/CDNA4
 };
 
 struct HsacoModule {
@@ -45,6 +47,7 @@ struct HsacoModule {
     TargetArch arch = TargetArch::GFX90A;
     bool     is_gfx908 = false;
     bool     is_gfx942 = false;
+    bool     is_gfx950 = false;
 };
 
 // Load an HSACO ELF file. Returns nullopt on error (sets error_msg).

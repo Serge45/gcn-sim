@@ -110,9 +110,34 @@ TEST_F(ElfLoaderTest, GFX942_ArchitectureDetection) {
     EXPECT_EQ(mod942->arch, gcnsim::TargetArch::GFX942);
     EXPECT_TRUE(mod942->is_gfx942);
     EXPECT_FALSE(mod942->is_gfx908);
+    EXPECT_FALSE(mod942->is_gfx950);
     if (!mod942->kernels.empty()) {
         EXPECT_EQ(mod942->kernels[0].arch, gcnsim::TargetArch::GFX942);
         EXPECT_TRUE(mod942->kernels[0].is_gfx942);
+    }
+}
+
+TEST_F(ElfLoaderTest, GFX950_ArchitectureDetection) {
+    std::string err;
+    auto mod_base = gcnsim::load_hsaco(g_hsaco_path, err);
+    ASSERT_TRUE(mod_base.has_value()) << err;
+
+    std::vector<uint8_t> gfx950_elf = mod_base->elf_data;
+    ASSERT_GE(gfx950_elf.size(), 52u);
+
+    uint32_t flags = 0x54f; // mach = 0x4f (GFX950 / MI-350)
+    std::memcpy(gfx950_elf.data() + 48, &flags, 4);
+
+    std::string load_err;
+    auto mod950 = gcnsim::load_hsaco_from_memory(gfx950_elf.data(), gfx950_elf.size(), load_err);
+    ASSERT_TRUE(mod950.has_value()) << load_err;
+    EXPECT_EQ(mod950->arch, gcnsim::TargetArch::GFX950);
+    EXPECT_TRUE(mod950->is_gfx950);
+    EXPECT_FALSE(mod950->is_gfx908);
+    EXPECT_FALSE(mod950->is_gfx942);
+    if (!mod950->kernels.empty()) {
+        EXPECT_EQ(mod950->kernels[0].arch, gcnsim::TargetArch::GFX950);
+        EXPECT_TRUE(mod950->kernels[0].is_gfx950);
     }
 }
 

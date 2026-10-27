@@ -429,8 +429,10 @@ static Opcode vop1_opcode(uint32_t op) {
         case 75:  return Opcode::V_CEIL_F64;
         case 76:  return Opcode::V_RNDNE_F64;
         case 77:  return Opcode::V_FLOOR_F64;
+        case 79:  return Opcode::V_PRNG_B32;
         case 84:  return Opcode::V_ACCVGPR_READ_B32;
         case 86:  return Opcode::V_ACCVGPR_WRITE_B32;
+        case 87:  return Opcode::V_PRNG_B32;
         case 112: return Opcode::V_SWAP_B32;
         default:  return Opcode::UNKNOWN;
     }
@@ -972,6 +974,12 @@ static Opcode mfma_opcode(uint32_t op) {
         case 1013: return Opcode::V_MFMA_F32_32X32X16_BF8_FP8;
         case 1014: return Opcode::V_MFMA_F32_32X32X16_FP8_BF8;
         case 1015: return Opcode::V_MFMA_F32_32X32X16_FP8_FP8;
+        case 1016: return Opcode::V_MFMA_F32_16X16X32_F16;
+        case 1017: return Opcode::V_MFMA_F32_32X32X16_F16;
+        case 1018: return Opcode::V_MFMA_F32_16X16X32_BF16;
+        case 1019: return Opcode::V_MFMA_F32_32X32X16_BF16;
+        case 1020: return Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4;
+        case 1021: return Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4;
 
         // Legacy / relative (op - 960) mapping compatibility
         case 0:  return Opcode::V_MFMA_F32_32X32X1F32;
@@ -1011,11 +1019,17 @@ static Opcode mfma_opcode(uint32_t op) {
         case 53: return Opcode::V_MFMA_F32_32X32X16_BF8_FP8;
         case 54: return Opcode::V_MFMA_F32_32X32X16_FP8_BF8;
         case 55: return Opcode::V_MFMA_F32_32X32X16_FP8_FP8;
+        case 56: return Opcode::V_MFMA_F32_16X16X32_F16;
+        case 57: return Opcode::V_MFMA_F32_32X32X16_F16;
+        case 58: return Opcode::V_MFMA_F32_16X16X32_BF16;
+        case 59: return Opcode::V_MFMA_F32_32X32X16_BF16;
         case 60: return Opcode::V_MFMA_F32_32X32X4BF16_1K;
         case 61: return Opcode::V_MFMA_F32_16X16X4BF16_1K;
         case 62: return Opcode::V_MFMA_F32_4X4X4BF16_1K;
         case 63: return Opcode::V_MFMA_F32_32X32X8BF16_1K;
         case 64: return Opcode::V_MFMA_F32_16X16X16BF16_1K;
+        case 65: return Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4;
+        case 66: return Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4;
         case 96: return Opcode::V_MFMA_F64_16X16X4F64;
         case 97: return Opcode::V_MFMA_F64_4X4X4F64;
         default: return Opcode::UNKNOWN;
@@ -2068,6 +2082,13 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_MFMA_F32_32X32X16_BF8_FP8: return "v_mfma_f32_32x32x16_bf8_fp8";
         case Opcode::V_MFMA_F32_32X32X16_FP8_BF8: return "v_mfma_f32_32x32x16_fp8_bf8";
         case Opcode::V_MFMA_F32_32X32X16_FP8_FP8: return "v_mfma_f32_32x32x16_fp8_fp8";
+        case Opcode::V_MFMA_F32_16X16X32_F16: return "v_mfma_f32_16x16x32_f16";
+        case Opcode::V_MFMA_F32_32X32X16_F16: return "v_mfma_f32_32x32x16_f16";
+        case Opcode::V_MFMA_F32_16X16X32_BF16: return "v_mfma_f32_16x16x32_bf16";
+        case Opcode::V_MFMA_F32_32X32X16_BF16: return "v_mfma_f32_32x32x16_bf16";
+        case Opcode::V_MFMA_SCALE_F32_16X16X128_F8F6F4: return "v_mfma_scale_f32_16x16x128_f8f6f4";
+        case Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4: return "v_mfma_scale_f32_32x32x64_f8f6f4";
+        case Opcode::V_PRNG_B32:             return "v_prng_b32";
         case Opcode::V_PK_ADD_F16:           return "v_pk_add_f16";
         case Opcode::V_PK_MUL_F16:           return "v_pk_mul_f16";
         case Opcode::V_PK_FMA_F32:           return "v_pk_fma_f32";

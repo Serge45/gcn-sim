@@ -256,7 +256,8 @@ public:
                 } else {
                     match = (triple.find("gfx90a") != std::string::npos ||
                              triple.find("gfx942") != std::string::npos ||
-                             triple.find("gfx908") != std::string::npos);
+                             triple.find("gfx908") != std::string::npos ||
+                             triple.find("gfx950") != std::string::npos);
                 }
                 if (match) {
                     co_data = reinterpret_cast<const void*>(reinterpret_cast<const char*>(bundle_data) + offset);
