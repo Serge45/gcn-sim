@@ -91,6 +91,25 @@ static uint32_t read_vsrc(const WavefrontState& w, const Operand& op, int lane) 
     }
 }
 
+static uint64_t read_vsrc64(const WavefrontState& w, const Operand& op, int lane) {
+    if (op.kind == Operand::Kind::SGPR) {
+        uint32_t lo = w.sgpr[op.index];
+        uint32_t hi = (op.index + 1 < NUM_SGPR) ? w.sgpr[op.index + 1] : 0;
+        return ((uint64_t)hi << 32) | lo;
+    } else if (op.kind == Operand::Kind::VGPR) {
+        uint32_t lo = w.vgpr[op.index][lane];
+        uint32_t hi = (op.index + 1 < NUM_VGPR) ? w.vgpr[op.index + 1][lane] : 0;
+        return ((uint64_t)hi << 32) | lo;
+    } else if (op.kind == Operand::Kind::AGPR) {
+        uint32_t lo = w.agpr[op.index][lane];
+        uint32_t hi = (op.index + 1 < NUM_AGPR) ? w.agpr[op.index + 1][lane] : 0;
+        return ((uint64_t)hi << 32) | lo;
+    } else if (op.kind == Operand::Kind::INLINE_CONST || op.kind == Operand::Kind::LITERAL) {
+        return (uint64_t)(int64_t)(int32_t)(uint32_t)op.imm;
+    }
+    return (uint64_t)read_vsrc(w, op, lane);
+}
+
 // Write scalar dst (scalar register or VCC/EXEC pair)
 static void write_sdst(WavefrontState& w, const Operand& op, uint32_t val) {
     switch (op.kind) {
@@ -3329,6 +3348,17 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
+    case Opcode::V_ADD_LSHL_U32: {
+        // dst = (src0 + src1) << (src2 & 31)
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t a = read_vsrc(wave, inst.src[0], lane);
+            uint32_t b = read_vsrc(wave, inst.src[1], lane);
+            uint32_t c = read_vsrc(wave, inst.src[2], lane) & 31;
+            wave.vgpr[inst.dst.index][lane] = (a + b) << c;
+        }
+        break;
+    }
     case Opcode::V_LSHL_ADD_U32: {
         // dst = (src0 << src1) + src2
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
@@ -3337,6 +3367,21 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t b = read_vsrc(wave, inst.src[1], lane) & 31;
             uint32_t c = read_vsrc(wave, inst.src[2], lane);
             wave.vgpr[inst.dst.index][lane] = (a << b) + c;
+        }
+        break;
+    }
+    case Opcode::V_LSHL_ADD_U64: {
+        // dst = (src0 << (src1 & 63)) + src2
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint64_t a = read_vsrc64(wave, inst.src[0], lane);
+            uint32_t b = read_vsrc(wave, inst.src[1], lane) & 63;
+            uint64_t c = read_vsrc64(wave, inst.src[2], lane);
+            uint64_t res = (a << b) + c;
+            wave.vgpr[inst.dst.index][lane] = (uint32_t)(res & 0xFFFFFFFF);
+            if (inst.dst.index + 1 < NUM_VGPR) {
+                wave.vgpr[inst.dst.index + 1][lane] = (uint32_t)(res >> 32);
+            }
         }
         break;
     }

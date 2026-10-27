@@ -1011,6 +1011,36 @@ TEST(ISAExecutor, CDNA4_MFMA_SCALE_FP4_16x16x128) {
     }
 }
 
+TEST(ISAExecutor, VLshlAddU64) {
+    auto ws = make_wave();
+    ws->exec = 0x1; // lane 0
+    // src0 = 0x100000000 (s[0:1])
+    ws->sgpr[0] = 0x00000000;
+    ws->sgpr[1] = 0x00000001;
+    // src1 = 2 (shift by 2)
+    // src2 = 0x24 (v[4:5])
+    ws->vgpr[4][0] = 0x24;
+    ws->vgpr[5][0] = 0x00;
+
+    Instruction inst{};
+    inst.opcode = Opcode::V_LSHL_ADD_U64;
+    inst.format = InstFormat::VOP3A;
+    inst.dst.kind = Operand::Kind::VGPR;
+    inst.dst.index = 0;
+    inst.src[0].kind = Operand::Kind::SGPR;
+    inst.src[0].index = 0;
+    inst.src[1].kind = Operand::Kind::INLINE_CONST;
+    inst.src[1].imm = 2;
+    inst.src[2].kind = Operand::Kind::VGPR;
+    inst.src[2].index = 4;
+
+    execute_instruction(*ws, inst);
+
+    // Expected: (0x100000000 << 2) + 0x24 = 0x400000024
+    EXPECT_EQ(ws->vgpr[0][0], 0x24u);
+    EXPECT_EQ(ws->vgpr[1][0], 0x4u);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

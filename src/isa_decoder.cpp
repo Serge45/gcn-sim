@@ -560,10 +560,12 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x282: return Opcode::V_MIN_F64;
         case 0x283: return Opcode::V_MAX_F64;
         case 0x284: return Opcode::V_LDEXP_F64;
+        case 0x1FE: return Opcode::V_ADD_LSHL_U32;
         case 0x1FF: return Opcode::V_ADD3_U32;       // gfx90a encoding (was 0x275 on Vega)
         case 0x200: return Opcode::V_LSHL_OR_B32;   // gfx90a encoding (was 0x276 on Vega)
         case 0x201: return Opcode::V_AND_OR_B32;    // gfx90a encoding (was 0x277 on Vega)
         case 0x202: return Opcode::V_OR3_B32;       // gfx90a encoding (was 0x278 on Vega)
+        case 0x208: return Opcode::V_LSHL_ADD_U64;
         case 0x204: return Opcode::UNKNOWN;         // v_cubeid_f32 (graphics)
         case 0x1C8: return Opcode::V_BFE_U32;       // gfx90a encoding
         case 0x1C9: return Opcode::V_BFE_I32;       // gfx90a encoding
@@ -2097,6 +2099,9 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_DOT2_F32_F16:         return "v_dot2_f32_f16";
         case Opcode::V_DOT4_I32_I8:          return "v_dot4_i32_i8";
         case Opcode::V_DOT8_I32_I4:          return "v_dot8_i32_i4";
+        case Opcode::V_ADD_LSHL_U32:         return "v_add_lshl_u32";
+        case Opcode::V_LSHL_ADD_U32:         return "v_lshl_add_u32";
+        case Opcode::V_LSHL_ADD_U64:         return "v_lshl_add_u64";
         case Opcode::UNKNOWN:                return "unknown";
         default:                             return "?";
     }
