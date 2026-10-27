@@ -200,9 +200,6 @@ asm_gemm_mfma:
 // -------------------------------------------------------------------
     .amdgpu_metadata
 ---
-amdhsa.version:
-  - 1
-  - 0
 amdhsa.kernels:
   - .name:            asm_gemm_mfma
     .symbol:          asm_gemm_mfma.kd
@@ -235,7 +232,7 @@ amdhsa.kernels:
         .offset:     24
         .size:       4
         .value_kind: by_value
-      - .name:       N
+      - .name:       size_n
         .offset:     28
         .size:       4
         .value_kind: by_value
@@ -243,5 +240,9 @@ amdhsa.kernels:
         .offset:     32
         .size:       4
         .value_kind: by_value
+amdhsa.target: amdgcn-amd-amdhsa--gfx90a:xnack-
+amdhsa.version:
+  - 1
+  - 1
 ...
     .end_amdgpu_metadata

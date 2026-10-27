@@ -1516,7 +1516,7 @@ amdhsa.kernels:
     .offset: 32
     .size: 4
     .value_kind: by_value
-  - .name: n
+  - .name: size_n
     .offset: 36
     .size: 4
     .value_kind: by_value
@@ -1566,6 +1566,7 @@ amdhsa.kernels:
   .symbol: generated_gemm.kd
   .vgpr_count: 74
   .wavefront_size: 64
+amdhsa.target: amdgcn-amd-amdhsa--gfx90a
 amdhsa.version:
 - 1
 - 1

@@ -481,29 +481,41 @@ ctest --test-dir build -V
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ./build/tests/test_hijack_vector_add --hsaco build/tools/vector_add/vector_add.hsaco
 ./build/tests/test_hijack_asm_gemm --asm-co build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+./build/tests/test_debugger
+./build/tests/test_cov5 --hsaco build/tools/cov5_kernel/cov5_kernel.hsaco
+./build/tests/test_hip_runtime
+./build/tests/test_hip_symbols
+./build/tests/test_cdna4_gemm --hsaco build/tools/cdna4_gemm/cdna4_gemm.co
 
 # Run the real ROCm/hipcc compiled application through the hijack library
 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
 
+# Run end-to-end GDB/MI integration tests
+python3 tests/test_mi_flow.py
 ```
 
-Expected output: **107 tests pass across 13 suites**.
+Expected output: **158 tests pass across 18 suites**.
 
 | Test suite | Count | What it covers |
 |---|---|---|
-| `test_elf_loader` | 6 | ELF validation, kernel discovery, descriptor parsing |
-| `test_isa_decoder` | 41 | All instruction formats, SDWA, DPP, VOP3 modifiers |
-| `test_isa_executor` | 16 | Instruction execution, modifiers, scratch memory |
+| `test_elf_loader` | 9 | ELF validation, kernel discovery, descriptor parsing |
+| `test_isa_decoder` | 43 | All instruction formats, SDWA, DPP, VOP3 modifiers |
+| `test_isa_executor` | 34 | Instruction execution, modifiers, scratch memory, FP8/FP4/XF32 ops |
 | `test_wavefront` | 9 | SGPR/VGPR/EXEC init, workitem_id.x/y/z |
 | `test_vector_add` | 2 | End-to-end vector-add kernel |
 | `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
 | `test_mfma_kernels` | 4 | Multi-shape MFMA (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
-| `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM |
-| `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
+| `test_asm_gemm` | 5 | Hand-written assembly MFMA GEMM across GFX908, GFX90A, GFX950 |
 | `test_cycle_model` | 13 | MFMA shadow, s_waitcnt stalls, bank conflicts, utilization, per-SIMD interleaving |
-| `test_cache_model` | 5 | L1/L2 cache hit/miss, eviction, stats |
+| `test_cache_model` | 6 | L1/L2/L3 cache hit/miss, eviction, stats |
+| `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 | `test_hijack_vector_add` | 2 | Dynamic runtime & driver vector add interception and CPU routing |
 | `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
+| `test_debugger` | 7 | GDB/MI protocol parser, DWARF line-to-PC mapping, debugger expressions |
+| `test_cov5` | 2 | Code Object Version 5 and memory fault handling |
+| `test_hip_runtime` | 11 | Extended HIP runtime APIs (peer access, streams, device properties MI100/200/300/350) |
+| `test_hip_symbols` | 2 | `__hipRegisterVar`, symbols, and `hipModuleLoadData` in-memory loading |
+| `test_cdna4_gemm` | 2 | AMD Instinct MI-350 / CDNA4 / GFX950 hardware kernel loading and execution |
 
 ---
 

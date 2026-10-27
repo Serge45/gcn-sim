@@ -107,3 +107,15 @@ target_link_libraries(test_cdna4_gemm gcnsim GTest::gtest GTest::gtest_main)
 add_test(NAME test_cdna4_gemm COMMAND test_cdna4_gemm
          --hsaco ${CMAKE_BINARY_DIR}/tools/cdna4_gemm/cdna4_gemm.co)
 add_dependencies(test_cdna4_gemm cdna4_gemm_co)
+
+# real_rocm_app (Real ROCm host application for gcndb GDB/MI integration tests)
+find_program(HIPCC hipcc PATHS /opt/rocm/bin /opt/rocm-7.0.0/bin)
+if(HIPCC)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/real_rocm_app
+        COMMAND ${HIPCC} -g --offload-arch=gfx90a ${CMAKE_CURRENT_SOURCE_DIR}/real_rocm_app.cpp -o ${CMAKE_CURRENT_BINARY_DIR}/real_rocm_app
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/real_rocm_app.cpp
+        COMMENT "Compiling real_rocm_app with hipcc"
+    )
+    add_custom_target(real_rocm_app_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/real_rocm_app)
+endif()

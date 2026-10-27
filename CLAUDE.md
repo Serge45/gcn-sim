@@ -7,9 +7,9 @@ Read it fully before making any changes.
 
 ## What this project is
 
-`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx908 (MI-100 / CDNA1), gfx90a (MI-200 / CDNA2), and gfx942 (MI-300 / CDNA3) GPU kernels.
-It loads compiled HSACO ELF binaries, decodes gfx908/gfx90a/gfx942 machine code, and executes it on the host CPU
-with no GPU or GPU driver dependency.
+`gcn-sim` is a CPU-based instruction-level simulator for AMD gfx908 (MI-100 / CDNA1), gfx90a (MI-200 / CDNA2), gfx942 (MI-300 / CDNA3), and gfx950 (MI-350 / CDNA4) GPU kernels.
+It loads compiled HSACO ELF binaries, decodes gfx908/gfx90a/gfx942/gfx950 machine code, and executes it on the host CPU
+with no GPU or GPU driver dependency. Compatible with ROCm 6.x and ROCm 7.0 (LLVM 20.0) toolchains.
 
 Key entry point: `include/gcnsim/gcnsim.h` — three public functions:
 `module_load`, `module_get_function`, `launch_kernel`.
@@ -38,10 +38,16 @@ ctest --test-dir build -V
 ./build/tests/test_tensile_gemm --hsaco build/tools/tensile_style_gemm/tensile_style_gemm.co
 ./build/tests/test_hijack_vector_add --hsaco build/tools/vector_add/vector_add.hsaco
 ./build/tests/test_hijack_asm_gemm --asm-co build/tools/asm_gemm_mfma/asm_gemm_mfma.co
+./build/tests/test_debugger
+./build/tests/test_cov5 --hsaco build/tools/cov5_kernel/cov5_kernel.hsaco
+./build/tests/test_hip_runtime
+./build/tests/test_hip_symbols
+./build/tests/test_cdna4_gemm --hsaco build/tools/cdna4_gemm/cdna4_gemm.co
 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
+python3 tests/test_mi_flow.py
 ```
 
-**Expected:** 17 CTest suites passing (100% pass rate).
+**Expected:** 18 CTest suites passing (100% pass rate, 158 tests) + GDB/MI integration tests.
 Always run the full test suite after any change to `src/` or `include/`.
 
 ---

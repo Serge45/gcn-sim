@@ -3,9 +3,17 @@ import os
 import time
 
 def test_cgdb_flow():
+    # Setup runtime library search path
+    env = os.environ.copy()
+    rocm_lib_paths = ["/opt/rocm/lib", "/opt/rocm-7.0.0/lib", "/opt/rocm-6.1.3/lib"]
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    additional_paths = [p for p in rocm_lib_paths if os.path.exists(p)]
+    if additional_paths:
+        env["LD_LIBRARY_PATH"] = ":".join(additional_paths + ([existing_ld] if existing_ld else []))
+
     # 1. Start gcndb in MI mode
     cmd = ["./build/gcndb", "--interpreter=mi", "--args", "./build/tests/real_rocm_app"]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
 
     def send(msg):
         print(f"SEND: {msg}")
