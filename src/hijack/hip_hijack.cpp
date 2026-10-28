@@ -1085,6 +1085,7 @@ gcnsim::hipError_t hipLaunchKernel(
     }
 
     cfg.enable_cycle_counting = true;
+    cfg.trace_path = std::getenv("GCNSIM_TRACE");
     uint64_t kernel_cycles = 0;
     gcnsim::KernelStats stats;
     std::string err;
@@ -1254,6 +1255,7 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     }
 
     cfg.enable_cycle_counting = true;
+    cfg.trace_path = std::getenv("GCNSIM_TRACE");
     uint64_t kernel_cycles = 0;
     gcnsim::KernelStats stats;
     std::string err;

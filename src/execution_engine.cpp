@@ -45,8 +45,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     // Open trace file if requested (Chrome Trace Event Format)
     FILE* trace_file = nullptr;
-    if (cfg.trace_path && cfg.enable_cycle_counting) {
-        trace_file = fopen(cfg.trace_path, "w");
+    const char* trace_path = cfg.trace_path ? cfg.trace_path : std::getenv("GCNSIM_TRACE");
+    if (trace_path && cfg.enable_cycle_counting) {
+        trace_file = fopen(trace_path, "w");
         if (trace_file) {
             fprintf(trace_file, "{\"traceEvents\":[\n");
             fprintf(trace_file,
