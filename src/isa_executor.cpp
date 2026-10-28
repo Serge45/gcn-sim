@@ -931,6 +931,14 @@ static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst,
     return { addr, oob };
 }
 
+static inline uint64_t smem_addr(const WavefrontState& wave, const Instruction& inst) {
+    uint64_t base = read_src_scalar64(wave, inst.src[0]);
+    uint64_t soff = (inst.src[1].kind == Operand::Kind::SGPR)
+        ? (uint64_t)read_src_scalar(wave, inst.src[1])
+        : (uint64_t)(int64_t)inst.smem_offset;
+    return base + soff;
+}
+
 // Execute exactly one instruction and return status.
 // Used by CU-level interleaving scheduler.
 // Returns ENDED, BARRIER_HIT, or RUNNING (instruction executed, ready for more).
@@ -1043,10 +1051,9 @@ WaveStatus step_wavefront(WavefrontState& wave) {
     return WaveStatus::RUNNING;
 }
 
-// Run one wavefront until s_endpgm or s_barrier.
-// Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier.
-WaveStatus run_wavefront(WavefrontState& wave) {
-    static constexpr uint64_t MAX_INSNS = 1000000ULL; // safety limit
+// Run one wavefront until s_endpgm or s_barrier, or until max_insns slice is reached.
+// Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier, RUNNING if max_insns reached.
+WaveStatus run_wavefront(WavefrontState& wave, uint64_t max_insns) {
     uint64_t count = 0;
     const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
     while (true) {
@@ -1154,10 +1161,14 @@ WaveStatus run_wavefront(WavefrontState& wave) {
         }
         execute_instruction(wave, inst);
         if (inst.opcode == Opcode::S_ENDPGM) return WaveStatus::ENDED;
-        if (++count >= MAX_INSNS) {
-            return WaveStatus::ENDED;
+        if (++count >= max_insns) {
+            return WaveStatus::RUNNING;
         }
     }
+}
+
+WaveStatus run_wavefront(WavefrontState& wave) {
+    return run_wavefront(wave, 1000000ULL);
 }
 
 void execute_instruction(WavefrontState& wave, const Instruction& inst) {
@@ -1841,72 +1852,78 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // SMEM — stores and atomics
     // -----------------------------------------------------------------------
     case Opcode::S_STORE_DWORD: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         mem_store_u32(addr, wave.sgpr[inst.dst.index]);
         break;
     }
     case Opcode::S_STORE_DWORDX2: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         mem_store_u32(addr,     wave.sgpr[inst.dst.index]);
         mem_store_u32(addr + 4, wave.sgpr[inst.dst.index + 1]);
         break;
     }
     case Opcode::S_STORE_DWORDX4: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 4; i++)
             mem_store_u32(addr + i * 4, wave.sgpr[inst.dst.index + i]);
         break;
     }
     case Opcode::S_ATOMIC_ADD: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t val = mem_load_u32(addr);
         uint32_t addend = wave.sgpr[inst.dst.index];
         mem_store_u32(addr, val + addend);
         break;
     }
     case Opcode::S_ATOMIC_SUB: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t val = mem_load_u32(addr);
         mem_store_u32(addr, val - wave.sgpr[inst.dst.index]);
         break;
     }
     case Opcode::S_ATOMIC_AND: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t val = mem_load_u32(addr);
         mem_store_u32(addr, val & wave.sgpr[inst.dst.index]);
         break;
     }
     case Opcode::S_ATOMIC_OR: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t val = mem_load_u32(addr);
         mem_store_u32(addr, val | wave.sgpr[inst.dst.index]);
         break;
     }
     case Opcode::S_ATOMIC_XOR: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t val = mem_load_u32(addr);
         mem_store_u32(addr, val ^ wave.sgpr[inst.dst.index]);
         break;
     }
     case Opcode::S_ATOMIC_SWAP: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t old = mem_load_u32(addr);
         mem_store_u32(addr, wave.sgpr[inst.dst.index]);
         wave.sgpr[inst.dst.index] = old;
         break;
     }
+    case Opcode::S_ATOMIC_DEC: {
+        uint64_t addr = smem_addr(wave, inst);
+        uint32_t old = mem_load_u32(addr);
+        uint32_t max_val = wave.sgpr[inst.dst.index];
+        mem_store_u32(addr, ((old == 0) || (old > max_val)) ? max_val : (old - 1));
+        wave.sgpr[inst.dst.index] = old;
+        break;
+    }
+    case Opcode::S_ATOMIC_INC: {
+        uint64_t addr = smem_addr(wave, inst);
+        uint32_t old = mem_load_u32(addr);
+        uint32_t max_val = wave.sgpr[inst.dst.index];
+        mem_store_u32(addr, (old >= max_val) ? 0 : (old + 1));
+        wave.sgpr[inst.dst.index] = old;
+        break;
+    }
     case Opcode::S_ATOMIC_CMPSWAP: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         uint32_t old = mem_load_u32(addr);
         uint32_t cmp = wave.sgpr[inst.dst.index + 1];
         uint32_t val = wave.sgpr[inst.dst.index];
@@ -1915,35 +1932,30 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     case Opcode::S_BUFFER_LOAD_DWORD: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         wave.sgpr[inst.dst.index] = mem_load_u32(addr);
         break;
     }
     case Opcode::S_BUFFER_LOAD_DWORDX2: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         wave.sgpr[inst.dst.index]     = mem_load_u32(addr);
         wave.sgpr[inst.dst.index + 1] = mem_load_u32(addr + 4);
         break;
     }
     case Opcode::S_BUFFER_LOAD_DWORDX4: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 4; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
     }
     case Opcode::S_BUFFER_LOAD_DWORDX8: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 8; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
     }
     case Opcode::S_BUFFER_LOAD_DWORDX16: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 16; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
@@ -1985,35 +1997,30 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // Scalar memory
     // -----------------------------------------------------------------------
     case Opcode::S_LOAD_DWORD: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         wave.sgpr[inst.dst.index] = mem_load_u32(addr);
         break;
     }
     case Opcode::S_LOAD_DWORDX2: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         wave.sgpr[inst.dst.index]     = mem_load_u32(addr);
         wave.sgpr[inst.dst.index + 1] = mem_load_u32(addr + 4);
         break;
     }
     case Opcode::S_LOAD_DWORDX4: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 4; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
     }
     case Opcode::S_LOAD_DWORDX8: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 8; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
     }
     case Opcode::S_LOAD_DWORDX16: {
-        uint64_t base = read_src_scalar64(wave, inst.src[0]);
-        uint64_t addr = base + (uint64_t)(int64_t)inst.smem_offset;
+        uint64_t addr = smem_addr(wave, inst);
         for (int i = 0; i < 16; i++)
             wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
         break;
@@ -7735,7 +7742,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     default: {
         static std::unordered_set<int> warned_ops;
         if (warned_ops.insert((int)inst.opcode).second) {
-            fprintf(stderr, "[UNIMPLEMENTED OPCODE] %s (id %d)\n", opcode_name(inst.opcode), (int)inst.opcode);
+            fprintf(stderr, "[UNIMPLEMENTED OPCODE] %s (id %d) enc=[%08X %08X] pc=%#lx\n",
+                    opcode_name(inst.opcode), (int)inst.opcode, inst.encoding[0], inst.encoding[1], (unsigned long)wave.pc);
         }
         break;
     }

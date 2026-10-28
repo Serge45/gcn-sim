@@ -333,19 +333,19 @@ static Opcode smem_opcode(uint32_t op) {
         case 24: return Opcode::S_BUFFER_STORE_DWORD;
         case 25: return Opcode::S_BUFFER_STORE_DWORDX2;
         case 26: return Opcode::S_BUFFER_STORE_DWORDX4;
-        case 64: return Opcode::S_ATOMIC_SWAP;
-        case 65: return Opcode::S_ATOMIC_CMPSWAP;
-        case 66: return Opcode::S_ATOMIC_ADD;
-        case 67: return Opcode::S_ATOMIC_SUB;
-        case 68: return Opcode::S_ATOMIC_SMIN;
-        case 69: return Opcode::S_ATOMIC_UMIN;
-        case 70: return Opcode::S_ATOMIC_SMAX;
-        case 71: return Opcode::S_ATOMIC_UMAX;
-        case 72: return Opcode::S_ATOMIC_AND;
-        case 73: return Opcode::S_ATOMIC_OR;
-        case 74: return Opcode::S_ATOMIC_XOR;
-        case 75: return Opcode::S_ATOMIC_INC;
-        case 76: return Opcode::S_ATOMIC_DEC;
+        case 64: case 128: return Opcode::S_ATOMIC_SWAP;
+        case 65: case 129: return Opcode::S_ATOMIC_CMPSWAP;
+        case 66: case 130: return Opcode::S_ATOMIC_ADD;
+        case 67: case 131: return Opcode::S_ATOMIC_SUB;
+        case 68: case 132: return Opcode::S_ATOMIC_SMIN;
+        case 69: case 133: return Opcode::S_ATOMIC_UMIN;
+        case 70: case 134: return Opcode::S_ATOMIC_SMAX;
+        case 71: case 135: return Opcode::S_ATOMIC_UMAX;
+        case 72: case 136: return Opcode::S_ATOMIC_AND;
+        case 73: case 137: return Opcode::S_ATOMIC_OR;
+        case 74: case 138: return Opcode::S_ATOMIC_XOR;
+        case 75: case 139: return Opcode::S_ATOMIC_INC;
+        case 76: case 140: return Opcode::S_ATOMIC_DEC;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -1206,6 +1206,8 @@ Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908) {
             inst.smem_offset = (int32_t)w1;
         } else {
             inst.smem_offset = 0;
+            inst.src[1].kind = Operand::Kind::SGPR;
+            inst.src[1].index = w1 & 0x7F;
         }
         return inst;
     }

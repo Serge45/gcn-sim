@@ -22,7 +22,7 @@ void init_wavefront(WavefrontState& wave,
                     uint32_t wave_in_wg, uint32_t waves_per_wg,
                     uint32_t block_x, uint32_t block_y, uint32_t block_z);
 
-WaveStatus run_wavefront(WavefrontState& wave);
+WaveStatus run_wavefront(WavefrontState& wave, uint64_t max_insns = 10000ULL);
 WaveStatus step_wavefront(WavefrontState& wave);
 
 bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
@@ -139,8 +139,146 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     }
     std::vector<uint64_t> cu_wall_cycles(num_cus, 0);
     uint32_t current_wg = 0;
+    uint32_t total_wgs = wg_count_x * wg_count_y * wg_count_z;
+    constexpr uint32_t NUM_SIMDS = 4;
 
     try {
+        if (total_wgs > 1 && waves_per_wg <= NUM_SIMDS) {
+            struct ActiveWg {
+                uint32_t wg_flat = 0;
+                uint32_t wg_x = 0, wg_y = 0, wg_z = 0;
+                uint32_t cu_id = 0;
+                std::vector<uint8_t> lds_buf;
+                std::vector<std::unique_ptr<WavefrontState>> waves;
+                std::vector<std::vector<uint8_t>> scratch_bufs;
+                std::vector<bool> ended;
+                std::vector<bool> at_barrier;
+                bool active = false;
+            };
+
+            auto init_active_wg = [&](ActiveWg& awg, uint32_t flat_idx) {
+                awg.wg_flat = flat_idx;
+                awg.wg_x = flat_idx % wg_count_x;
+                awg.wg_y = (flat_idx / wg_count_x) % wg_count_y;
+                awg.wg_z = flat_idx / (wg_count_x * wg_count_y);
+                awg.cu_id = flat_idx % num_cus;
+                awg.lds_buf.assign(lds_bytes, 0);
+                uint8_t* lds_ptr = lds_bytes > 0 ? awg.lds_buf.data() : nullptr;
+
+                awg.waves.resize(waves_per_wg);
+                awg.scratch_bufs.resize(waves_per_wg);
+                awg.ended.assign(waves_per_wg, false);
+                awg.at_barrier.assign(waves_per_wg, false);
+
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    awg.waves[w] = std::make_unique<WavefrontState>();
+                    init_wavefront(*awg.waves[w], *kernel.descriptor,
+                                   kernarg,
+                                   kernel.code_ptr,
+                                   kernel.code_size,
+                                   awg.wg_x, awg.wg_y, awg.wg_z,
+                                   w, waves_per_wg,
+                                   block_x, block_y, block_z);
+                    awg.waves[w]->lds_ptr  = lds_ptr;
+                    awg.waves[w]->lds_size = lds_bytes;
+                    awg.waves[w]->is_gfx908 = kernel.is_gfx908;
+                    awg.waves[w]->is_gfx942 = kernel.is_gfx942;
+                    awg.waves[w]->is_gfx950 = kernel.is_gfx950;
+                    awg.waves[w]->accum_offset = kernel.accum_offset;
+
+                    awg.scratch_bufs[w].resize(scratch_per_wave, 0);
+                    awg.waves[w]->scratch_ptr      = scratch_per_wave > 0 ? awg.scratch_bufs[w].data() : nullptr;
+                    awg.waves[w]->scratch_size     = scratch_per_wave;
+                    awg.waves[w]->scratch_per_lane = scratch_per_lane;
+
+                    awg.waves[w]->count_cycles = cfg.enable_cycle_counting;
+                    awg.waves[w]->global_mem_latency = cfg.global_mem_latency;
+                    awg.waves[w]->smem_latency = cfg.smem_latency;
+                    awg.waves[w]->cache = global_cache.get();
+                    awg.waves[w]->trace_file = trace_file;
+                    awg.waves[w]->trace_wave_id = w;
+                    awg.waves[w]->trace_wg_flat_id = awg.wg_flat;
+                    awg.waves[w]->debug_hook = cfg.debug_hook;
+                }
+                awg.active = true;
+            };
+
+            uint32_t max_active = std::min(total_wgs, num_cus);
+            std::vector<ActiveWg> active_wgs(max_active);
+            uint32_t next_launch_idx = 0;
+            for (uint32_t i = 0; i < max_active; i++) {
+                init_active_wg(active_wgs[i], next_launch_idx++);
+            }
+
+            uint32_t completed_wgs = 0;
+            while (completed_wgs < total_wgs) {
+                for (uint32_t i = 0; i < max_active; i++) {
+                    auto& awg = active_wgs[i];
+                    if (!awg.active) continue;
+
+                    uint32_t active_waves = 0;
+                    uint32_t barrier_count = 0;
+                    for (uint32_t w = 0; w < waves_per_wg; w++) {
+                        if (awg.ended[w]) continue;
+                        active_waves++;
+                        if (awg.at_barrier[w]) {
+                            barrier_count++;
+                            continue;
+                        }
+                        WaveStatus status = run_wavefront(*awg.waves[w], 10000ULL);
+                        if (status == WaveStatus::ENDED) {
+                            awg.ended[w] = true;
+                        } else if (status == WaveStatus::BARRIER_HIT) {
+                            awg.at_barrier[w] = true;
+                            barrier_count++;
+                        }
+                    }
+
+                    if (barrier_count > 0 && barrier_count == active_waves) {
+                        for (uint32_t w = 0; w < waves_per_wg; w++) {
+                            awg.at_barrier[w] = false;
+                        }
+                    }
+
+                    bool all_done = true;
+                    for (uint32_t w = 0; w < waves_per_wg; w++) {
+                        if (!awg.ended[w]) { all_done = false; break; }
+                    }
+
+                    if (all_done) {
+                        if (cfg.enable_cycle_counting) {
+                            uint64_t max_cc = 0;
+                            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                                max_cc = std::max(max_cc, awg.waves[w]->cycle_count);
+                            }
+                            cu_wall_cycles[awg.cu_id] += max_cc;
+                        }
+                        for (uint32_t w = 0; w < waves_per_wg; w++) {
+                            accum_mfma_cycles += awg.waves[w]->mfma_total_exec_cycles;
+                            accum_valu_cycles += awg.waves[w]->valu_total_issue_cycles;
+                            accum_wave_cycles += awg.waves[w]->cycle_count;
+                            if (trace_file && awg.waves[w]->cycle_count > 0) {
+                                double cc = (double)awg.waves[w]->cycle_count;
+                                double mfma_util = (double)awg.waves[w]->mfma_total_exec_cycles / cc * 100.0;
+                                double valu_util = (double)awg.waves[w]->valu_total_issue_cycles / cc * 100.0;
+                                fprintf(trace_file,
+                                    ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
+                                    "\"name\":\"thread_name\","
+                                    "\"args\":{\"name\":\"wave%u/SIMD%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                                    awg.wg_flat, w, w, w % NUM_SIMDS, valu_util, mfma_util);
+                            }
+                        }
+
+                        completed_wgs++;
+                        if (next_launch_idx < total_wgs) {
+                            init_active_wg(awg, next_launch_idx++);
+                        } else {
+                            awg.active = false;
+                        }
+                    }
+                }
+            }
+        } else {
         for (uint32_t wg_z = 0; wg_z < wg_count_z; wg_z++)
         for (uint32_t wg_y = 0; wg_y < wg_count_y; wg_y++)
         for (uint32_t wg_x = 0; wg_x < wg_count_x; wg_x++) {
@@ -347,6 +485,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             }
         }
         current_wg++;
+    }
     }
     if (total_cycles && cfg.enable_cycle_counting) {
         *total_cycles = *std::max_element(cu_wall_cycles.begin(), cu_wall_cycles.end());
