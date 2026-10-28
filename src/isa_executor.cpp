@@ -921,12 +921,49 @@ static inline bool addr_is_valid(uint64_t addr) {
 
 static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst, int lane) {
     uint32_t srd_idx = inst.src[1].index;
-    uint64_t base = (uint64_t)wave.sgpr[srd_idx] |
-                    ((uint64_t)(wave.sgpr[srd_idx + 1] & 0xFFFF) << 32);
-    uint32_t voff = inst.mubuf_offen ? wave.vgpr[inst.src[0].index][lane] : 0;
+    uint32_t srd_w0 = wave.sgpr[srd_idx];
+    uint32_t srd_w1 = wave.sgpr[srd_idx + 1];
+    uint32_t srd_w2 = wave.sgpr[srd_idx + 2];
+
+    uint64_t base = (uint64_t)srd_w0 | ((uint64_t)(srd_w1 & 0xFFFF) << 32);
+    uint32_t stride = (srd_w1 >> 16) & 0x3FFF;
+    uint32_t num_records = srd_w2;
+
+    uint32_t vindex = 0;
+    uint32_t voffset = 0;
+
+    if (inst.mubuf_idxen && inst.mubuf_offen) {
+        vindex = wave.vgpr[inst.src[0].index][lane];
+        voffset = wave.vgpr[inst.src[0].index + 1][lane];
+    } else if (inst.mubuf_idxen) {
+        vindex = wave.vgpr[inst.src[0].index][lane];
+    } else if (inst.mubuf_offen) {
+        voffset = wave.vgpr[inst.src[0].index][lane];
+    }
+
     uint32_t soff = read_src_scalar(wave, inst.mubuf_soffset);
-    uint64_t addr = base + (uint64_t)voff + soff + inst.mubuf_offset;
-    bool oob = (base == 0) || !addr_is_valid(addr);
+
+    bool oob = (base == 0);
+    uint64_t effective_offset = 0;
+
+    if (stride == 0) {
+        effective_offset = (uint64_t)voffset + (uint64_t)soff + (uint64_t)inst.mubuf_offset;
+        // In AMD GPU, offsets with bit 31 set (>= 0x80000000) or >= num_records (when num_records >= 0x80000000) are OOB sentinels.
+        if (voffset >= 0x80000000u || (num_records >= 0x80000000u && effective_offset >= num_records)) {
+            oob = true;
+        }
+    } else {
+        if (num_records > 0 && vindex >= num_records) {
+            oob = true;
+        }
+        effective_offset = (uint64_t)vindex * stride + (uint64_t)voffset + (uint64_t)soff + (uint64_t)inst.mubuf_offset;
+    }
+
+    uint64_t addr = base + effective_offset;
+    if (!addr_is_valid(addr)) {
+        oob = true;
+    }
+
     if (oob) addr = (uint64_t)(uintptr_t)mubuf_oob_zero;
     return { addr, oob };
 }
