@@ -172,6 +172,15 @@ static Opcode sop2_opcode(uint32_t op) {
         case 39: return Opcode::S_BFE_U64;
         case 40: return Opcode::S_BFE_I64;
         case 42: return Opcode::S_ABSDIFF_I32;
+        case 44: return Opcode::S_MUL_HI_U32;
+        case 45: return Opcode::S_MUL_HI_I32;
+        case 46: return Opcode::S_LSHL1_ADD_U32;
+        case 47: return Opcode::S_LSHL2_ADD_U32;
+        case 48: return Opcode::S_LSHL3_ADD_U32;
+        case 49: return Opcode::S_LSHL4_ADD_U32;
+        case 50: return Opcode::S_PACK_LL_B32_B16;
+        case 51: return Opcode::S_PACK_LH_B32_B16;
+        case 52: return Opcode::S_PACK_HH_B32_B16;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -180,28 +189,30 @@ static Opcode sop1_opcode(uint32_t op) {
     switch (op) {
         case 0:  return Opcode::S_MOV_B32;
         case 1:  return Opcode::S_MOV_B64;
-        case 2:  return Opcode::S_NOT_B32;
-        case 3:  return Opcode::S_NOT_B64;
-        case 4:  return Opcode::S_BREV_B32;
-        case 5:  return Opcode::S_BREV_B64;
-        case 6:  return Opcode::S_BCNT0_I32_B32;
-        case 7:  return Opcode::S_BCNT0_I32_B64;
-        case 8:  return Opcode::S_BCNT1_I32_B32;
-        case 9:  return Opcode::S_BCNT1_I32_B64;
-        case 10: return Opcode::S_FF0_I32_B32;
-        case 11: return Opcode::S_FF0_I32_B64;
-        case 12: return Opcode::S_FF1_I32_B32;
-        case 13: return Opcode::S_FF1_I32_B64;
-        case 14: return Opcode::S_FLBIT_I32_B32;
-        case 15: return Opcode::S_FLBIT_I32_B64;
-        case 16: return Opcode::S_FLBIT_I32;
-        case 17: return Opcode::S_FLBIT_I32_I64;
-        case 18: return Opcode::S_SEXT_I32_I8;
-        case 19: return Opcode::S_SEXT_I32_I16;
-        case 20: return Opcode::S_BITSET0_B32;
-        case 21: return Opcode::S_BITSET0_B64;
-        case 22: return Opcode::S_BITSET1_B32;
-        case 23: return Opcode::S_BITSET1_B64;
+        case 2:  return Opcode::S_CMOV_B32;
+        case 3:  return Opcode::S_CMOV_B64;
+        case 4:  return Opcode::S_NOT_B32;
+        case 5:  return Opcode::S_NOT_B64;
+        case 8:  return Opcode::S_BREV_B32;
+        case 9:  return Opcode::S_BREV_B64;
+        case 10: return Opcode::S_BCNT0_I32_B32;
+        case 11: return Opcode::S_BCNT0_I32_B64;
+        case 12: return Opcode::S_BCNT1_I32_B32;
+        case 13: return Opcode::S_BCNT1_I32_B64;
+        case 14: return Opcode::S_FF0_I32_B32;
+        case 15: return Opcode::S_FF0_I32_B64;
+        case 16: return Opcode::S_FF1_I32_B32;
+        case 17: return Opcode::S_FF1_I32_B64;
+        case 18: return Opcode::S_FLBIT_I32_B32;
+        case 19: return Opcode::S_FLBIT_I32_B64;
+        case 20: return Opcode::S_FLBIT_I32;
+        case 21: return Opcode::S_FLBIT_I32_I64;
+        case 22: return Opcode::S_SEXT_I32_I8;
+        case 23: return Opcode::S_SEXT_I32_I16;
+        case 24: return Opcode::S_BITSET0_B32;
+        case 25: return Opcode::S_BITSET0_B64;
+        case 26: return Opcode::S_BITSET1_B32;
+        case 27: return Opcode::S_BITSET1_B64;
         case 28: return Opcode::S_GETPC_B64;      // 0x1C
         case 29: return Opcode::S_SETPC_B64;      // 0x1D
         case 30: return Opcode::S_SWAPPC_B64;     // 0x1E
@@ -212,6 +223,7 @@ static Opcode sop1_opcode(uint32_t op) {
         case 35: return Opcode::S_ANDN2_SAVEEXEC_B64; // 0x23
         case 36: return Opcode::S_ORN2_SAVEEXEC_B64;  // 0x24
         case 40: return Opcode::S_ABS_I32;
+        case 44: return Opcode::S_ABS_I32;
         case 50: return Opcode::S_MOVRELS_B32;
         case 51: return Opcode::S_MOVRELS_B64;
         case 52: return Opcode::S_MOVRELD_B32;
@@ -236,6 +248,7 @@ static Opcode sopp_opcode(uint32_t op) {
         case 12: return Opcode::S_WAITCNT;
         case 13: return Opcode::S_SETHALT;
         case 14: return Opcode::S_SLEEP;
+        case 15: return Opcode::S_SETPRIO;
         case 16: return Opcode::S_SENDMSG;
         case 17: return Opcode::S_SENDMSGHALT;
         case 18: return Opcode::S_TRAP;
@@ -292,6 +305,10 @@ static Opcode sopc_opcode(uint32_t op) {
         case 13: return Opcode::S_BITCMP1_B32;
         case 14: return Opcode::S_BITCMP0_B64;
         case 15: return Opcode::S_BITCMP1_B64;
+        case 16: return Opcode::S_SETVSKIP;
+        case 17: return Opcode::S_SET_GPR_IDX_ON;
+        case 18: return Opcode::S_CMP_EQ_U64;
+        case 19: return Opcode::S_CMP_LG_U64;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -372,8 +389,8 @@ static Opcode vop2_opcode(uint32_t op) {
         case 37: return Opcode::V_MADMK_F32;
         case 38: return Opcode::V_MADAK_F32;
         case 52: return Opcode::V_ADD_U32;
-        case 53: return Opcode::V_SUB_CO_U32;
-        case 54: return Opcode::V_SUBREV_CO_U32;
+        case 53: return Opcode::V_SUB_U32;
+        case 54: return Opcode::V_SUBREV_U32;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -389,46 +406,64 @@ static Opcode vop1_opcode(uint32_t op) {
         case 7:   return Opcode::V_CVT_U32_F32;
         case 8:   return Opcode::V_CVT_I32_F32;
         case 9:   return Opcode::V_CVT_F16_F32;
-        case 10:  return Opcode::V_CVT_F32_F16;
-        case 11:  return Opcode::V_CVT_F32_F64;   // note: some tables have this swapped
+        case 10:  return Opcode::V_CVT_F16_F32;
+        case 11:  return Opcode::V_CVT_F32_F16;
         case 12:  return Opcode::V_CVT_F64_F32;
+        case 15:  return Opcode::V_CVT_F32_F64;
+        case 16:  return Opcode::V_CVT_F64_F32;
         case 17:  return Opcode::V_CVT_F32_UBYTE0;
         case 18:  return Opcode::V_CVT_F32_UBYTE1;
         case 19:  return Opcode::V_CVT_F32_UBYTE2;
         case 20:  return Opcode::V_CVT_F32_UBYTE3;
         case 21:  return Opcode::V_CVT_U32_F64;
         case 22:  return Opcode::V_CVT_F64_U32;
-        case 33:  return Opcode::V_FRACT_F32;
-        case 34:  return Opcode::V_TRUNC_F32;
-        case 35:  return Opcode::V_CEIL_F32;
-        case 36:  return Opcode::V_RNDNE_F32;
-        case 37:  return Opcode::V_FLOOR_F32;
-        case 38:  return Opcode::V_EXP_F32;
-        case 39:  return Opcode::V_LOG_F32;
-        case 42:  return Opcode::V_RCP_F32;
-        case 43:  return Opcode::V_RCP_IFLAG_F32;
-        case 44:  return Opcode::V_RSQ_F32;
-        case 45:  return Opcode::V_RCP_F64;
-        case 47:  return Opcode::V_RSQ_F64;
-        case 48:  return Opcode::V_SQRT_F32;
-        case 49:  return Opcode::V_SQRT_F64;
-        case 51:  return Opcode::V_SIN_F32;
-        case 52:  return Opcode::V_COS_F32;
-        case 53:  return Opcode::V_NOT_B32;
-        case 54:  return Opcode::V_BFREV_B32;
-        case 55:  return Opcode::V_FFBH_U32;
-        case 56:  return Opcode::V_FFBL_B32;
-        case 57:  return Opcode::V_FFBH_I32;
-        case 58:  return Opcode::V_FREXP_EXP_I32_F64;
-        case 59:  return Opcode::V_FREXP_MANT_F64;
-        case 60:  return Opcode::V_FRACT_F64;
-        case 61:  return Opcode::V_FREXP_EXP_I32_F32;
-        case 62:  return Opcode::V_FREXP_MANT_F32;
-        case 63:  return Opcode::V_CLREXCP;
-        case 74:  return Opcode::V_TRUNC_F64;
-        case 75:  return Opcode::V_CEIL_F64;
-        case 76:  return Opcode::V_RNDNE_F64;
-        case 77:  return Opcode::V_FLOOR_F64;
+        // GFX90a VOP1 opcodes
+        case 27:  return Opcode::V_FRACT_F32;
+        case 28:  return Opcode::V_TRUNC_F32;
+        case 29:  return Opcode::V_CEIL_F32;
+        case 30:  return Opcode::V_RNDNE_F32;
+        case 31:  return Opcode::V_FLOOR_F32;
+        case 32:  return Opcode::V_EXP_F32;
+        case 33:  return Opcode::V_LOG_F32;
+        case 34:  return Opcode::V_RCP_F32;
+        case 35:  return Opcode::V_RCP_IFLAG_F32;
+        case 36:  return Opcode::V_RSQ_F32;
+        case 37:  return Opcode::V_RCP_F64;
+        case 38:  return Opcode::V_RSQ_F64;
+        case 39:  return Opcode::V_SQRT_F32;
+        case 40:  return Opcode::V_SQRT_F64;
+        case 41:  return Opcode::V_SIN_F32;
+        case 42:  return Opcode::V_COS_F32;
+        case 43:  return Opcode::V_NOT_B32;
+        case 44:  return Opcode::V_BFREV_B32;
+        case 45:  return Opcode::V_FFBH_U32;
+        case 46:  return Opcode::V_FFBL_B32;
+        case 47:  return Opcode::V_FFBH_I32;
+        case 48:  return Opcode::V_FREXP_EXP_I32_F64;
+        case 49:  return Opcode::V_FREXP_MANT_F64;
+        case 50:  return Opcode::V_FRACT_F64;
+        case 51:  return Opcode::V_FREXP_EXP_I32_F32;
+        case 52:  return Opcode::V_FREXP_MANT_F32;
+        case 53:  return Opcode::V_CLREXCP;
+        case 56:  return Opcode::V_MOV_B64;
+        case 57:  return Opcode::V_CVT_F16_U16;
+        case 58:  return Opcode::V_CVT_F16_I16;
+        case 59:  return Opcode::V_CVT_U16_F16;
+        case 60:  return Opcode::V_CVT_I16_F16;
+        case 61:  return Opcode::V_RCP_F16;
+        case 62:  return Opcode::V_SQRT_F16;
+        case 63:  return Opcode::V_RSQ_F16;
+        case 64:  return Opcode::V_LOG_F16;
+        case 65:  return Opcode::V_EXP_F16;
+        case 66:  return Opcode::V_FREXP_MANT_F16;
+        case 67:  return Opcode::V_FREXP_EXP_I16_F16;
+        case 68:  return Opcode::V_FLOOR_F16;
+        case 69:  return Opcode::V_CEIL_F16;
+        case 70:  return Opcode::V_TRUNC_F16;
+        case 71:  return Opcode::V_RNDNE_F16;
+        case 72:  return Opcode::V_FRACT_F16;
+        case 73:  return Opcode::V_SIN_F16;
+        case 74:  return Opcode::V_COS_F16;
         case 79:  return Opcode::V_PRNG_B32;
         case 84:  return Opcode::V_ACCVGPR_READ_B32;
         case 86:  return Opcode::V_ACCVGPR_WRITE_B32;
@@ -439,14 +474,23 @@ static Opcode vop1_opcode(uint32_t op) {
     }
 }
 
-static Opcode vopc_opcode(uint32_t op) {
-    // f32 comparisons: ops 0x10-0x1F (GFX9 canonical range 0x40-0x4F for VOPC)
-    // i32 comparisons: 0xC0-0xC7, u32: 0xC8-0xCF
-    // i64: 0xE0-0xE7, u64: 0xE8-0xEF
-    // f64: 0x50-0x5F
-    if (op >= 0x10 && op <= 0x1F) {
-        // f32
-        switch (op - 0x10) {
+static bool is_vop3_vopc_cmpx(uint32_t op) {
+    return (op >= 0x30 && op <= 0x3F) || // f16 cmpx
+           (op >= 0x50 && op <= 0x5F) || // f32 cmpx
+           (op >= 0x70 && op <= 0x7F) || // f64 cmpx
+           (op >= 0xB0 && op <= 0xBF) || // i16/u16 cmpx
+           (op >= 0xD0 && op <= 0xDF) || // i32/u32 cmpx
+           (op >= 0xF0 && op <= 0xFF);   // i64/u64 cmpx
+}
+
+static Opcode vop3_vopc_opcode(uint32_t op) {
+    if (is_vop3_vopc_cmpx(op)) {
+        op -= 0x10;
+    }
+
+    // VOP3 f32 comparisons: 0x40-0x4F
+    if (op >= 0x40 && op <= 0x4F) {
+        switch (op - 0x40) {
             case 0: return Opcode::V_CMP_F_F32;
             case 1: return Opcode::V_CMP_LT_F32;
             case 2: return Opcode::V_CMP_EQ_F32;
@@ -465,9 +509,9 @@ static Opcode vopc_opcode(uint32_t op) {
             case 15: return Opcode::V_CMP_TRU_F32;
         }
     }
-    if (op >= 0x20 && op <= 0x2F) {
-        // f64
-        switch (op - 0x20) {
+    // VOP3 f64 comparisons: 0x60-0x6F
+    if (op >= 0x60 && op <= 0x6F) {
+        switch (op - 0x60) {
             case 0: return Opcode::V_CMP_F_F64;
             case 1: return Opcode::V_CMP_LT_F64;
             case 2: return Opcode::V_CMP_EQ_F64;
@@ -484,18 +528,6 @@ static Opcode vopc_opcode(uint32_t op) {
             case 13: return Opcode::V_CMP_NEQ_F64;
             case 14: return Opcode::V_CMP_NLT_F64;
             case 15: return Opcode::V_CMP_TRU_F64;
-        }
-    }
-    // Alternate encodings used in disassembly output
-    if (op >= 0x40 && op <= 0x4F) {
-        switch (op - 0x40) {
-            case 1: return Opcode::V_CMP_LT_F32;
-            case 2: return Opcode::V_CMP_EQ_F32;
-            case 3: return Opcode::V_CMP_LE_F32;
-            case 4: return Opcode::V_CMP_GT_F32;
-            case 5: return Opcode::V_CMP_LG_F32;
-            case 6: return Opcode::V_CMP_GE_F32;
-            default: break;
         }
     }
     switch (op) {
@@ -527,17 +559,17 @@ static Opcode vopc_opcode(uint32_t op) {
         case 0xEC: return Opcode::V_CMP_GT_U64;
         case 0xED: return Opcode::V_CMP_NE_U64;
         case 0xEE: return Opcode::V_CMP_GE_U64;
-        // Legacy aliases
-        case 0x91: return Opcode::V_CMP_LT_U32;
-        case 0x92: return Opcode::V_CMP_EQ_U32;
-        case 0x93: return Opcode::V_CMP_LE_U32;
-        case 0x94: return Opcode::V_CMP_GT_U32;
-        case 0x95: return Opcode::V_CMP_NE_U32;
-        case 0x96: return Opcode::V_CMP_GE_U32;
-        case 0x81: return Opcode::V_CMP_LT_I32;
-        case 0x86: return Opcode::V_CMP_GE_I32;
         default:   return Opcode::UNKNOWN;
     }
+}
+
+static bool is_vopc_cmpx(uint32_t op) {
+    return is_vop3_vopc_cmpx(op);
+}
+
+static Opcode vopc_opcode(uint32_t op) {
+    // Both 32-bit VOPC and 64-bit VOP3 use the same GCN/CDNA comparison opcode mapping:
+    return vop3_vopc_opcode(op);
 }
 
 // VOP3 opcode space (10-bit field):
@@ -623,6 +655,7 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x296: return Opcode::V_CVT_PKRTZ_F16_F32;  // gfx90a encoding
         case 0x297: return Opcode::V_CVT_PK_U16_U32;     // gfx90a encoding
         case 0x298: return Opcode::V_CVT_PK_I16_I32;     // gfx90a encoding
+        case 0x2A0: return Opcode::V_PACK_B32_F16;
         case 0x1E8: return Opcode::V_MAD_U64_U32;
         case 0x1E9: return Opcode::V_MAD_I64_I32;
         case 0x228: return Opcode::V_MAD_U64_U32;
@@ -637,6 +670,7 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x2F5: return Opcode::V_MAD_F32;
         case 0x25B: return Opcode::V_PERMLANE16_B32;
         case 0x25C: return Opcode::V_PERMLANEX16_B32;
+        case 0x1ED:
         case 0x2EC: return Opcode::V_PERM_B32;
         case 0x2EE: return Opcode::V_XAD_U32;
         // VOP3B carry-chain
@@ -657,6 +691,11 @@ static Opcode vop3_opcode(uint32_t op) {
         // GFX90a AGPR ops (VOP3 op space, op >= 960 but not MFMA)
         case 0x3D8: return Opcode::V_ACCVGPR_READ_B32;
         case 0x3D9: return Opcode::V_ACCVGPR_WRITE_B32;
+        // CDNA packed FP32 / B32 ops (VOP3 op space)
+        case 0x3B0: return Opcode::V_PK_FMA_F32;
+        case 0x3B1: return Opcode::V_PK_MUL_F32;
+        case 0x3B2: return Opcode::V_PK_ADD_F32;
+        case 0x3B3: return Opcode::V_PK_MOV_B32;
         default: {
             // VOP3->VOP2: GFX9/GFX90a encodes VOP2 op N as VOP3 op 0x100+N.
             // Range 0x100-0x13F covers VOP2 ops 0-63 (primary GFX9 encoding).
@@ -724,6 +763,7 @@ static Opcode vop3p_opcode(uint32_t op) {
 }
 
 static Opcode flat_opcode(uint32_t op, bool is_global, bool is_scratch) {
+    (void)is_scratch;
     if (is_global) {
         switch (op) {
             case 0x10: return Opcode::GLOBAL_LOAD_UBYTE;
@@ -805,11 +845,15 @@ static Opcode mubuf_opcode(uint32_t op) {
         case 22: return Opcode::BUFFER_LOAD_DWORDX3;
         case 23: return Opcode::BUFFER_LOAD_DWORDX4;
         case 24: return Opcode::BUFFER_STORE_BYTE;
-        case 25: return Opcode::BUFFER_STORE_SHORT;
+        case 25: return Opcode::BUFFER_STORE_BYTE;
+        case 26: return Opcode::BUFFER_STORE_SHORT;
+        case 27: return Opcode::BUFFER_STORE_SHORT_D16_HI;
         case 28: return Opcode::BUFFER_STORE_DWORD;
         case 29: return Opcode::BUFFER_STORE_DWORDX2;
         case 30: return Opcode::BUFFER_STORE_DWORDX3;
         case 31: return Opcode::BUFFER_STORE_DWORDX4;
+        case 36: return Opcode::BUFFER_LOAD_SHORT_D16;
+        case 37: return Opcode::BUFFER_LOAD_SHORT_D16_HI;
         case 48: return Opcode::BUFFER_ATOMIC_SWAP;
         case 49: return Opcode::BUFFER_ATOMIC_CMPSWAP;
         case 50: return Opcode::BUFFER_ATOMIC_ADD;
@@ -912,6 +956,8 @@ static Opcode ds_opcode(uint32_t op) {
         case 81:  return Opcode::DS_CMPST_F64;
         case 82:  return Opcode::DS_MIN_F64;
         case 83:  return Opcode::DS_MAX_F64;
+        case 90:  return Opcode::DS_READ_U16_D16;
+        case 91:  return Opcode::DS_READ_U16_D16_HI;
         case 96:  return Opcode::DS_ADD_RTN_U64;
         case 97:  return Opcode::DS_SUB_RTN_U64;
         case 98:  return Opcode::DS_RSUB_RTN_U64;
@@ -927,8 +973,10 @@ static Opcode ds_opcode(uint32_t op) {
         case 119: return Opcode::DS_READ2_B64;
         case 120: return Opcode::DS_READ2ST64_B64;
         case 126: return Opcode::DS_CONDXCHG32_RTN_B64;
+        case 222:
         case 223: return Opcode::DS_WRITE_B128;
-        case 254: return Opcode::DS_READ_B128;
+        case 254:
+        case 255: return Opcode::DS_READ_B128;
         default:  return Opcode::UNKNOWN;
     }
 }
@@ -1356,6 +1404,7 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         switch (inst.opcode) {
             case Opcode::BUFFER_STORE_BYTE:
             case Opcode::BUFFER_STORE_SHORT:
+            case Opcode::BUFFER_STORE_SHORT_D16_HI:
             case Opcode::BUFFER_STORE_DWORD:
             case Opcode::BUFFER_STORE_DWORDX2:
             case Opcode::BUFFER_STORE_DWORDX3:
@@ -1492,17 +1541,6 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         // v_pk_mov_b32 (VOP3P-MAI, op=0x3B3=947) is encoded with [31:26]=0x34.
         Opcode oc = vop3_opcode(op);
         if (oc == Opcode::UNKNOWN) {
-            // v_pk_mov_b32: op=947 (0x3B3), moves packed 32-bit pair
-            if (op == 0x3B3) {
-                inst.format    = InstFormat::VOP3A;
-                inst.opcode    = Opcode::V_PK_MOV_B32;
-                inst.dst.kind  = Operand::Kind::VGPR;
-                inst.dst.index = vdst;
-                inst.src[0] = decode_src(src0, nullptr);
-                inst.src[1] = decode_src(src1, nullptr);
-                inst.op_sel = (w0 >> 11) & 0x3;
-                return inst;
-            }
             // Try MFMA: MFMA ops occupy op range 940..1023
             if (op >= 940 && op <= 1023) {
                 Opcode mc = mfma_opcode(op, is_gfx950);
@@ -1529,8 +1567,6 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         inst.opcode = oc;
 
         bool is_vop3b = (inst.opcode == Opcode::V_ADD_CO_U32 ||
-                         inst.opcode == Opcode::V_SUB_U32 ||
-                         inst.opcode == Opcode::V_SUBREV_U32 ||
                          inst.opcode == Opcode::V_ADDC_CO_U32 ||
                          inst.opcode == Opcode::V_SUB_CO_U32 ||
                          inst.opcode == Opcode::V_SUBREV_CO_U32 ||
@@ -1544,11 +1580,16 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
             inst.dst.kind  = Operand::Kind::VGPR;
             inst.dst.index = vdst;
             inst.dst2 = decode_sdst(sdst);
-        } else if (vopc_opcode(op) != Opcode::UNKNOWN) {
+        } else if (vop3_vopc_opcode(op) != Opcode::UNKNOWN) {
             // VOPC ops encoded in VOP3A: 8-bit VOPC op in the 10-bit op field.
-            // The destination is an SGPR pair encoded in the vdst field.
+            // The destination is an SGPR pair encoded in the vdst field (or EXEC for cmpx).
             inst.format = InstFormat::VOP3A;
-            inst.dst    = decode_sdst(vdst);
+            inst.opcode = vop3_vopc_opcode(op);
+            if (is_vop3_vopc_cmpx(op)) {
+                inst.dst.kind = Operand::Kind::EXEC;
+            } else {
+                inst.dst = decode_sdst(vdst);
+            }
         } else {
             inst.format = InstFormat::VOP3A;
             inst.dst.kind  = Operand::Kind::VGPR;
@@ -1565,6 +1606,16 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         inst.abs_  = (w0 >> 8) & 0x7;  // word0 bits [10:8]
         inst.neg   = (w1 >> 29) & 0x7; // word1 bits [31:29]
         inst.omod  = (w1 >> 27) & 0x3; // word1 bits [28:27]
+
+        // CDNA packed FP32/B32 op_sel and op_sel_hi
+        if (inst.opcode == Opcode::V_PK_FMA_F32 ||
+            inst.opcode == Opcode::V_PK_MUL_F32 ||
+            inst.opcode == Opcode::V_PK_ADD_F32 ||
+            inst.opcode == Opcode::V_PK_MOV_B32 ||
+            inst.opcode == Opcode::V_PACK_B32_F16) {
+            inst.op_sel    = (w0 >> 11) & 0x7;
+            inst.op_sel_hi = ((w1 >> 27) & 0x3) | (((w0 >> 14) & 0x1) << 2);
+        }
 
         // GFX90a AGPR ops encoded in VOP3A:
         // v_accvgpr_write_b32: dst is AGPR, src0 is VGPR or inline const
@@ -1589,7 +1640,11 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         uint32_t src0 = w0 & 0x1FF;
 
         inst.opcode = vop1_opcode(op);
-        inst.dst    = decode_vdst(vdst);
+        if (inst.opcode == Opcode::V_READFIRSTLANE_B32) {
+            inst.dst = decode_sdst(vdst & 0x7F);
+        } else {
+            inst.dst = decode_vdst(vdst);
+        }
 
         // Check for SDWA/DPP sub-encodings
         if ((src0 & 0xFF) == 0xF9) {
@@ -1652,7 +1707,7 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
         uint32_t src0  = w0 & 0x1FF;
 
         inst.opcode = vopc_opcode(op);
-        inst.dst.kind = Operand::Kind::VCC;
+        inst.dst.kind = is_vopc_cmpx(op) ? Operand::Kind::EXEC : Operand::Kind::VCC;
 
         // Check for SDWA/DPP sub-encodings
         if ((src0 & 0xFF) == 0xF9) {
@@ -1865,10 +1920,21 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_BFE_U64:              return "s_bfe_u64";
         case Opcode::S_BFE_I64:              return "s_bfe_i64";
         case Opcode::S_ABSDIFF_I32:          return "s_absdiff_i32";
+        case Opcode::S_MUL_HI_U32:           return "s_mul_hi_u32";
+        case Opcode::S_MUL_HI_I32:           return "s_mul_hi_i32";
+        case Opcode::S_LSHL1_ADD_U32:        return "s_lshl1_add_u32";
+        case Opcode::S_LSHL2_ADD_U32:        return "s_lshl2_add_u32";
+        case Opcode::S_LSHL3_ADD_U32:        return "s_lshl3_add_u32";
+        case Opcode::S_LSHL4_ADD_U32:        return "s_lshl4_add_u32";
+        case Opcode::S_PACK_LL_B32_B16:      return "s_pack_ll_b32_b16";
+        case Opcode::S_PACK_LH_B32_B16:      return "s_pack_lh_b32_b16";
+        case Opcode::S_PACK_HH_B32_B16:      return "s_pack_hh_b32_b16";
         case Opcode::S_CSELECT_B32:          return "s_cselect_b32";
         case Opcode::S_CSELECT_B64:          return "s_cselect_b64";
         case Opcode::S_MOV_B32:              return "s_mov_b32";
         case Opcode::S_MOV_B64:              return "s_mov_b64";
+        case Opcode::S_CMOV_B32:             return "s_cmov_b32";
+        case Opcode::S_CMOV_B64:             return "s_cmov_b64";
         case Opcode::S_NOT_B32:              return "s_not_b32";
         case Opcode::S_NOT_B64:              return "s_not_b64";
         case Opcode::S_BREV_B32:             return "s_brev_b32";
@@ -1878,6 +1944,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_FF0_I32_B32:          return "s_ff0_i32_b32";
         case Opcode::S_FF1_I32_B32:          return "s_ff1_i32_b32";
         case Opcode::S_FLBIT_I32_B32:        return "s_flbit_i32_b32";
+        case Opcode::S_FLBIT_I32:            return "s_flbit_i32";
         case Opcode::S_SEXT_I32_I8:          return "s_sext_i32_i8";
         case Opcode::S_SEXT_I32_I16:         return "s_sext_i32_i16";
         case Opcode::S_ABS_I32:              return "s_abs_i32";
@@ -1907,6 +1974,14 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_CMP_GT_U32:           return "s_cmp_gt_u32";
         case Opcode::S_CMP_LE_U32:           return "s_cmp_le_u32";
         case Opcode::S_CMP_LG_U32:           return "s_cmp_lg_u32";
+        case Opcode::S_CMP_EQ_U64:           return "s_cmp_eq_u64";
+        case Opcode::S_CMP_LG_U64:           return "s_cmp_lg_u64";
+        case Opcode::S_BITCMP0_B32:          return "s_bitcmp0_b32";
+        case Opcode::S_BITCMP1_B32:          return "s_bitcmp1_b32";
+        case Opcode::S_BITCMP0_B64:          return "s_bitcmp0_b64";
+        case Opcode::S_BITCMP1_B64:          return "s_bitcmp1_b64";
+        case Opcode::S_SETVSKIP:             return "s_setvskip";
+        case Opcode::S_SET_GPR_IDX_ON:       return "s_set_gpr_idx_on";
         case Opcode::S_NOP:                  return "s_nop";
         case Opcode::S_ENDPGM:               return "s_endpgm";
         case Opcode::S_BRANCH:               return "s_branch";
@@ -1918,6 +1993,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_CBRANCH_EXECNZ:       return "s_cbranch_execnz";
         case Opcode::S_BARRIER:              return "s_barrier";
         case Opcode::S_WAITCNT:              return "s_waitcnt";
+        case Opcode::S_SETPRIO:              return "s_setprio";
         case Opcode::S_SENDMSG:              return "s_sendmsg";
         case Opcode::S_TRAP:                 return "s_trap";
         case Opcode::S_ICACHE_INV:           return "s_icache_inv";
@@ -1932,6 +2008,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::S_STORE_DWORDX4:        return "s_store_dwordx4";
         case Opcode::S_ATOMIC_ADD:           return "s_atomic_add";
         case Opcode::V_MOV_B32:              return "v_mov_b32";
+        case Opcode::V_MOV_B64:              return "v_mov_b64";
         case Opcode::V_PK_MOV_B32:           return "v_pk_mov_b32";
         case Opcode::V_READFIRSTLANE_B32:    return "v_readfirstlane_b32";
         case Opcode::V_CVT_F32_I32:          return "v_cvt_f32_i32";
@@ -1950,6 +2027,7 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_EXP_F32:              return "v_exp_f32";
         case Opcode::V_LOG_F32:              return "v_log_f32";
         case Opcode::V_RCP_F32:              return "v_rcp_f32";
+        case Opcode::V_RCP_IFLAG_F32:        return "v_rcp_iflag_f32";
         case Opcode::V_RSQ_F32:              return "v_rsq_f32";
         case Opcode::V_SQRT_F32:             return "v_sqrt_f32";
         case Opcode::V_SQRT_F64:             return "v_sqrt_f64";
@@ -2058,6 +2136,9 @@ const char* opcode_name(Opcode op) {
         case Opcode::DS_READ_B32:            return "ds_read_b32";
         case Opcode::DS_WRITE_B64:           return "ds_write_b64";
         case Opcode::DS_READ_B64:            return "ds_read_b64";
+        case Opcode::DS_READ_U16:            return "ds_read_u16";
+        case Opcode::DS_READ_U16_D16:        return "ds_read_u16_d16";
+        case Opcode::DS_READ_U16_D16_HI:     return "ds_read_u16_d16_hi";
         case Opcode::DS_ADD_U32:             return "ds_add_u32";
         case Opcode::DS_ADD_RTN_U32:         return "ds_add_rtn_u32";
         case Opcode::DS_BPERMUTE_B32:        return "ds_bpermute_b32";
@@ -2065,12 +2146,19 @@ const char* opcode_name(Opcode op) {
         case Opcode::V_PERMLANE16_B32:       return "v_permlane16_b32";
         case Opcode::V_PERMLANEX16_B32:      return "v_permlanex16_b32";
         case Opcode::V_PERM_B32:             return "v_perm_b32";
+        case Opcode::V_PACK_B32_F16:         return "v_pack_b32_f16";
         case Opcode::V_CVT_PKRTZ_F16_F32:    return "v_cvt_pkrtz_f16_f32";
         case Opcode::BUFFER_LOAD_DWORD:      return "buffer_load_dword";
         case Opcode::BUFFER_LOAD_DWORDX2:    return "buffer_load_dwordx2";
         case Opcode::BUFFER_LOAD_DWORDX4:    return "buffer_load_dwordx4";
+        case Opcode::BUFFER_LOAD_SHORT_D16:  return "buffer_load_short_d16";
+        case Opcode::BUFFER_LOAD_SHORT_D16_HI: return "buffer_load_short_d16_hi";
+        case Opcode::BUFFER_STORE_BYTE:      return "buffer_store_byte";
+        case Opcode::BUFFER_STORE_SHORT:     return "buffer_store_short";
+        case Opcode::BUFFER_STORE_SHORT_D16_HI: return "buffer_store_short_d16_hi";
         case Opcode::BUFFER_STORE_DWORD:     return "buffer_store_dword";
         case Opcode::BUFFER_STORE_DWORDX2:   return "buffer_store_dwordx2";
+        case Opcode::BUFFER_STORE_DWORDX3:   return "buffer_store_dwordx3";
         case Opcode::BUFFER_STORE_DWORDX4:   return "buffer_store_dwordx4";
         case Opcode::BUFFER_ATOMIC_ADD:      return "buffer_atomic_add";
         case Opcode::V_MFMA_F32_32X32X1F32:  return "v_mfma_f32_32x32x1f32";

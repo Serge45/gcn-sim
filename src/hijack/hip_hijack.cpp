@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <algorithm>
 #include <elf.h>
@@ -291,11 +292,13 @@ gcnsim::hipError_t hipMemcpyDtoDAsync(void* dst, const void* src, size_t sizeByt
 }
 
 static thread_local int g_current_device = 0;
+static uint64_t g_simulated_gpu_cycles = 0;
 
 struct EventInternal {
     bool recorded = false;
     uint32_t flags = 0;
     std::chrono::steady_clock::time_point time_point;
+    uint64_t simulated_cycles = 0;
 };
 
 // Stream Interceptors
@@ -394,6 +397,7 @@ gcnsim::hipError_t hipEventRecord(gcnsim::hipEvent_t event, gcnsim::hipStream_t 
     auto* ev = reinterpret_cast<EventInternal*>(event);
     ev->recorded = true;
     ev->time_point = std::chrono::steady_clock::now();
+    ev->simulated_cycles = g_simulated_gpu_cycles;
     return gcnsim::hipSuccess;
 }
 
@@ -417,6 +421,14 @@ gcnsim::hipError_t hipEventElapsedTime(float* ms, gcnsim::hipEvent_t start, gcns
     auto* ev_start = reinterpret_cast<EventInternal*>(start);
     auto* ev_stop = reinterpret_cast<EventInternal*>(stop);
     if (!ev_start->recorded || !ev_stop->recorded) return gcnsim::hipErrorInvalidValue;
+    if (ev_stop->simulated_cycles > ev_start->simulated_cycles) {
+        gcnsim::hipDeviceProp_t prop;
+        hipGetDeviceProperties(&prop, g_current_device);
+        uint32_t clk_khz = prop.clockRate > 0 ? prop.clockRate : 2100000;
+        uint64_t diff_cycles = ev_stop->simulated_cycles - ev_start->simulated_cycles;
+        *ms = static_cast<float>(diff_cycles) / static_cast<float>(clk_khz);
+        return gcnsim::hipSuccess;
+    }
     auto dur = std::chrono::duration_cast<std::chrono::microseconds>(ev_stop->time_point - ev_start->time_point);
     *ms = static_cast<float>(dur.count()) / 1000.0f;
     return gcnsim::hipSuccess;
@@ -946,12 +958,15 @@ gcnsim::hipError_t hipLaunchKernel(
         return gcnsim::hipSuccess;
     }
 
+    cfg.enable_cycle_counting = true;
+    uint64_t kernel_cycles = 0;
     std::string err;
-    bool ok = gcnsim::launch_kernel(*ki, cfg, err);
+    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles);
     if (!ok) {
         std::cerr << "[gcnsim_hip] launch_kernel failed: " << err << std::endl;
         return gcnsim::hipErrorLaunchFailure;
     }
+    g_simulated_gpu_cycles += kernel_cycles;
     return gcnsim::hipSuccess;
 }
 
@@ -1091,19 +1106,40 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         return gcnsim::hipErrorInvalidValue;
     }
 
+    if (ki) {
+        fprintf(stderr, "[HIJACK] Launching kernel: %s\n", ki->name.c_str());
+        fprintf(stderr, "[HIJACK] grid=(%u, %u, %u) block=(%u, %u, %u)\n",
+                cfg.grid_x, cfg.grid_y, cfg.grid_z,
+                cfg.block_x, cfg.block_y, cfg.block_z);
+    }
+
+    if (cfg.kernarg) {
+        fprintf(stderr, "[KERNARG DUMP] size=%zu\n", cfg.kernarg_size);
+        const uint32_t* ka32 = reinterpret_cast<const uint32_t*>(cfg.kernarg);
+        for (size_t i = 0; i < cfg.kernarg_size / 4; i += 4) {
+            fprintf(stderr, "  ka[%02zu..%02zu]: 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                    i, i+3, ka32[i], ka32[i+1], ka32[i+2], ka32[i+3]);
+        }
+    }
+
     if (attach_debugger_if_needed(ki, cfg)) {
         return gcnsim::hipSuccess;
     }
 
+    cfg.enable_cycle_counting = true;
+    uint64_t kernel_cycles = 0;
     std::string err;
-    bool ok = gcnsim::launch_kernel(*ki, cfg, err);
+    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles);
     if (!ok) {
         std::cerr << "[gcnsim_hip] launch_kernel failed: " << err << std::endl;
         return gcnsim::hipErrorLaunchFailure;
     }
+    g_simulated_gpu_cycles += kernel_cycles;
 
     return gcnsim::hipSuccess;
 }
+
+static std::vector<gcnsim::HsacoModule*> g_loaded_modules;
 
 gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname) {
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
@@ -1115,6 +1151,55 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
 
     std::string err;
     std::string path_to_load = fname;
+
+    // 1. Fallback for -xnack- / -xnack+ if .hsaco path doesn't exist directly
+    if (!std::ifstream(path_to_load).is_open() && path_to_load.size() > 6 && path_to_load.substr(path_to_load.size() - 6) == ".hsaco") {
+        std::string try_xnack_neg = path_to_load.substr(0, path_to_load.size() - 6) + "-xnack-.hsaco";
+        if (std::ifstream(try_xnack_neg).is_open()) {
+            path_to_load = try_xnack_neg;
+        } else {
+            std::string try_xnack_pos = path_to_load.substr(0, path_to_load.size() - 6) + "-xnack+.hsaco";
+            if (std::ifstream(try_xnack_pos).is_open()) {
+                path_to_load = try_xnack_pos;
+            }
+        }
+    }
+
+    // 2. Handle CCOB (Compressed Code Object Bundle) from Tensile
+    std::ifstream check_file(path_to_load, std::ios::binary);
+    if (check_file.is_open()) {
+        char magic[4] = {0};
+        check_file.read(magic, 4);
+        if (magic[0] == 'C' && magic[1] == 'C' && magic[2] == 'O' && magic[3] == 'B') {
+            check_file.close();
+            const char* env_arch = std::getenv("GCN_SIM_ARCH");
+            std::string arch = env_arch ? env_arch : "gfx90a";
+            auto colon = arch.find(':');
+            if (colon != std::string::npos) arch = arch.substr(0, colon);
+
+            size_t last_slash = path_to_load.find_last_of("/\\");
+            std::string base_name = (last_slash != std::string::npos) ? path_to_load.substr(last_slash + 1) : path_to_load;
+            std::string unbundled = "/tmp/gcnsim_" + base_name + "_" + arch + ".co";
+
+            std::ifstream test_unbundled(unbundled);
+            if (!test_unbundled.is_open()) {
+                std::string bundler = "/opt/rocm/lib/llvm/bin/clang-offload-bundler";
+                if (!std::ifstream(bundler).is_open()) bundler = "/opt/rocm/bin/clang-offload-bundler";
+                std::string cmd = bundler + " --unbundle --type=o --input=\"" + path_to_load + "\" --targets=hip-amdgcn-amd-amdhsa--" + arch + " -output=\"" + unbundled + "\" --allow-missing-bundles 2>/dev/null";
+                int ret = std::system(cmd.c_str());
+                (void)ret;
+                if (!std::ifstream(unbundled).is_open()) {
+                    cmd = bundler + " --unbundle --type=o --input=\"" + path_to_load + "\" --targets=hipv4-amdgcn-amd-amdhsa--" + arch + " -output=\"" + unbundled + "\" --allow-missing-bundles 2>/dev/null";
+                    ret = std::system(cmd.c_str());
+                    (void)ret;
+                }
+            }
+            if (std::ifstream(unbundled).is_open()) {
+                path_to_load = unbundled;
+            }
+        }
+    }
+
     auto mod = gcnsim::load_hsaco(path_to_load, err);
     if (!mod && !path_to_load.empty() && path_to_load[0] != '/') {
         std::string err2;
@@ -1135,6 +1220,7 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
     }
 
     auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
+    g_loaded_modules.push_back(heap_mod);
     *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
     return gcnsim::hipSuccess;
 }
@@ -1181,6 +1267,7 @@ gcnsim::hipError_t hipModuleLoadData(gcnsim::hipModule_t* module, const void* im
     }
 
     auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
+    g_loaded_modules.push_back(heap_mod);
     *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
     return gcnsim::hipSuccess;
 }
@@ -1202,17 +1289,30 @@ gcnsim::hipError_t hipModuleGetFunction(gcnsim::hipFunction_t* function, gcnsim:
         if (real_func) return real_func(function, module, name);
         return gcnsim::hipErrorLaunchFailure;
     }
-    if (!function || !module || !name) return gcnsim::hipErrorInvalidValue;
+    if (!function || !name) return gcnsim::hipErrorInvalidValue;
 
     auto* heap_mod = reinterpret_cast<gcnsim::HsacoModule*>(module);
-    for (const auto& k : heap_mod->kernels) {
-        if (k.name == name) {
-            *function = reinterpret_cast<gcnsim::hipFunction_t>(const_cast<gcnsim::KernelInfo*>(&k));
-            return gcnsim::hipSuccess;
+    if (heap_mod) {
+        for (const auto& k : heap_mod->kernels) {
+            if (k.name == name) {
+                *function = reinterpret_cast<gcnsim::hipFunction_t>(const_cast<gcnsim::KernelInfo*>(&k));
+                return gcnsim::hipSuccess;
+            }
         }
     }
 
-    std::cerr << "[gcnsim_hip] hipModuleGetFunction: kernel " << name << " not found in module" << std::endl;
+    // Fallback: search across all loaded modules
+    for (auto* m : g_loaded_modules) {
+        if (m == heap_mod) continue;
+        for (const auto& k : m->kernels) {
+            if (k.name == name) {
+                *function = reinterpret_cast<gcnsim::hipFunction_t>(const_cast<gcnsim::KernelInfo*>(&k));
+                return gcnsim::hipSuccess;
+            }
+        }
+    }
+
+    std::cerr << "[gcnsim_hip] hipModuleGetFunction: kernel " << name << " not found in module (searched " << g_loaded_modules.size() << " modules)" << std::endl;
     return gcnsim::hipErrorNotFound;
 }
 

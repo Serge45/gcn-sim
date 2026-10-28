@@ -131,6 +131,12 @@ void init_wavefront(WavefrontState& wave,
         sgpr_idx += 1;
     }
 
+    // According to AMD HSA ABI, Work-group ID SGPRs begin after all User SGPRs
+    uint32_t user_sgpr_count = (rsrc2 >> RSRC2_USER_SGPR_COUNT_SHIFT) & RSRC2_USER_SGPR_COUNT_MASK;
+    if (user_sgpr_count > (uint32_t)sgpr_idx) {
+        sgpr_idx = user_sgpr_count;
+    }
+
     // Work-group IDs
     if (rsrc2 & RSRC2_ENABLE_SGPR_WORKGROUP_ID_X) {
         wave.sgpr[sgpr_idx++] = wg_id_x;

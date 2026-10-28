@@ -118,4 +118,15 @@ if(HIPCC)
         COMMENT "Compiling real_rocm_app with hipcc"
     )
     add_custom_target(real_rocm_app_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/real_rocm_app)
+
+    # hipblaslt_gemm_bench (Production hipBLASLt GEMM benchmark on gcn-sim)
+    if(EXISTS "/opt/rocm/lib/libhipblaslt.so" OR EXISTS "/opt/rocm-7.0.0/lib/libhipblaslt.so")
+        add_custom_command(
+            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hipblaslt_gemm_bench
+            COMMAND ${HIPCC} -O2 --offload-arch=gfx90a ${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt_gemm_bench.cpp -lhipblaslt -o ${CMAKE_CURRENT_BINARY_DIR}/hipblaslt_gemm_bench
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt_gemm_bench.cpp
+            COMMENT "Compiling hipblaslt_gemm_bench with hipcc"
+        )
+        add_custom_target(hipblaslt_gemm_bench_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hipblaslt_gemm_bench)
+    endif()
 endif()
