@@ -26,7 +26,7 @@ WaveStatus run_wavefront(WavefrontState& wave);
 WaveStatus step_wavefront(WavefrontState& wave);
 
 bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
-                   uint64_t* total_cycles) {
+                   uint64_t* total_cycles, KernelStats* stats) {
     if (!kernel.descriptor) {
         error_msg = "Kernel descriptor is null";
         return false;
@@ -37,6 +37,11 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     }
 
     if (total_cycles) *total_cycles = 0;
+    if (stats) *stats = KernelStats();
+
+    uint64_t accum_mfma_cycles = 0;
+    uint64_t accum_valu_cycles = 0;
+    uint64_t accum_wave_cycles = 0;
 
     // Open trace file if requested (Chrome Trace Event Format)
     FILE* trace_file = nullptr;
@@ -266,6 +271,11 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             if (cfg.enable_cycle_counting) {
                 cu_wall_cycles[cu_id] += cu_wall;
             }
+            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                accum_mfma_cycles += waves[w]->mfma_total_exec_cycles;
+                accum_valu_cycles += waves[w]->valu_total_issue_cycles;
+                accum_wave_cycles += waves[w]->cycle_count;
+            }
             if (trace_file) {
                 uint32_t wg_flat = wg_z * wg_count_y * wg_count_x +
                                    wg_y * wg_count_x + wg_x;
@@ -319,6 +329,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                                    wg_y * wg_count_x + wg_x;
                 for (uint32_t w = 0; w < waves_per_wg; w++) {
                     max_cc = std::max(max_cc, waves[w]->cycle_count);
+                    accum_mfma_cycles += waves[w]->mfma_total_exec_cycles;
+                    accum_valu_cycles += waves[w]->valu_total_issue_cycles;
+                    accum_wave_cycles += waves[w]->cycle_count;
                     if (trace_file && waves[w]->cycle_count > 0) {
                         double cc = (double)waves[w]->cycle_count;
                         double mfma_util = (double)waves[w]->mfma_total_exec_cycles / cc * 100.0;
@@ -337,6 +350,19 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     }
     if (total_cycles && cfg.enable_cycle_counting) {
         *total_cycles = *std::max_element(cu_wall_cycles.begin(), cu_wall_cycles.end());
+    }
+    if (stats) {
+        stats->total_cycles = (total_cycles && cfg.enable_cycle_counting) ? *total_cycles : 0;
+        stats->total_mfma_cycles = accum_mfma_cycles;
+        stats->total_valu_cycles = accum_valu_cycles;
+        stats->total_wave_cycles = accum_wave_cycles;
+        stats->mfma_utilization = (accum_wave_cycles > 0)
+            ? static_cast<double>(accum_mfma_cycles) / static_cast<double>(accum_wave_cycles)
+            : 0.0;
+        stats->valu_utilization = (accum_wave_cycles > 0)
+            ? static_cast<double>(accum_valu_cycles) / static_cast<double>(accum_wave_cycles)
+            : 0.0;
+        stats->compute_intensity = std::min(1.0, stats->mfma_utilization + 0.5 * stats->valu_utilization);
     }
     } catch (const MemoryFaultException& ex) {
         error_msg = ex.what();

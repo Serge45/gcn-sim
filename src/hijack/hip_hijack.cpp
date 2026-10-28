@@ -293,12 +293,128 @@ gcnsim::hipError_t hipMemcpyDtoDAsync(void* dst, const void* src, size_t sizeByt
 
 static thread_local int g_current_device = 0;
 static uint64_t g_simulated_gpu_cycles = 0;
+static double   g_simulated_gpu_time_ms = 0.0;
+
+struct ArchClockSpec {
+    uint32_t boost_khz;
+    uint32_t base_khz;
+};
+
+static ArchClockSpec get_arch_clock_spec(const std::string& arch) {
+    if (arch.find("gfx950") != std::string::npos || arch.find("mi350") != std::string::npos || arch.find("mi355") != std::string::npos) {
+        return { 2100000, 1650000 }; // MI350X: 2.1 GHz Boost, 1.65 GHz Base
+    }
+    if (arch.find("gfx942") != std::string::npos || arch.find("mi300") != std::string::npos) {
+        return { 2100000, 1700000 }; // MI300X: 2.1 GHz Boost, 1.70 GHz Base
+    }
+    if (arch.find("gfx908") != std::string::npos || arch.find("mi100") != std::string::npos) {
+        return { 1502000, 1087000 }; // MI100: 1.502 GHz Boost, 1.087 GHz Base
+    }
+    // Default to gfx90a / MI250X
+    return { 1700000, 1300000 }; // MI250X: 1.7 GHz Boost, 1.3 GHz Base
+}
+
+static uint32_t resolve_device_clock_khz(const std::string& arch) {
+    auto spec = get_arch_clock_spec(arch);
+
+    // 1. User fixed frequency override (GCN_SIM_CLOCK_MHZ / GCN_SIM_SCLK)
+    const char* env_mhz = std::getenv("GCN_SIM_CLOCK_MHZ");
+    if (!env_mhz) env_mhz = std::getenv("GCN_SIM_SCLK");
+    if (env_mhz) {
+        double mhz = std::atof(env_mhz);
+        if (mhz > 0.0) return static_cast<uint32_t>(mhz * 1000.0);
+    }
+    const char* env_khz = std::getenv("GCN_SIM_CLOCK_KHZ");
+    if (env_khz) {
+        uint32_t khz = std::strtoul(env_khz, nullptr, 10);
+        if (khz > 0) return khz;
+    }
+
+    // 2. User clock scaling factor (GCN_SIM_CLOCK_FACTOR / GCN_SIM_CLOCK_SCALE)
+    const char* env_factor = std::getenv("GCN_SIM_CLOCK_FACTOR");
+    if (!env_factor) env_factor = std::getenv("GCN_SIM_CLOCK_SCALE");
+    if (env_factor) {
+        double factor = std::atof(env_factor);
+        if (factor > 0.0) {
+            factor = std::max(0.1, std::min(2.0, factor));
+            return static_cast<uint32_t>(spec.boost_khz * factor);
+        }
+    }
+
+    // Default to peak boost clock
+    return spec.boost_khz;
+}
+
+static uint32_t resolve_effective_kernel_clock_khz(const std::string& arch, const gcnsim::KernelStats& stats) {
+    // 1. Fixed clock override
+    const char* env_mhz = std::getenv("GCN_SIM_CLOCK_MHZ");
+    if (!env_mhz) env_mhz = std::getenv("GCN_SIM_SCLK");
+    if (env_mhz) {
+        double mhz = std::atof(env_mhz);
+        if (mhz > 0.0) return static_cast<uint32_t>(mhz * 1000.0);
+    }
+    const char* env_khz = std::getenv("GCN_SIM_CLOCK_KHZ");
+    if (env_khz) {
+        uint32_t khz = std::strtoul(env_khz, nullptr, 10);
+        if (khz > 0) return khz;
+    }
+
+    // 2. Clock factor override
+    const char* env_factor = std::getenv("GCN_SIM_CLOCK_FACTOR");
+    if (!env_factor) env_factor = std::getenv("GCN_SIM_CLOCK_SCALE");
+    if (env_factor) {
+        double factor = std::atof(env_factor);
+        if (factor > 0.0) {
+            factor = std::max(0.1, std::min(2.0, factor));
+            auto spec = get_arch_clock_spec(arch);
+            return static_cast<uint32_t>(spec.boost_khz * factor);
+        }
+    }
+
+    // 3. Dynamic DVFS / Power Throttling Model
+    const char* env_dvfs = std::getenv("GCN_SIM_DVFS");
+    if (!env_dvfs) env_dvfs = std::getenv("GCN_SIM_POWER_MODEL");
+    bool dvfs_enabled = env_dvfs && (std::string(env_dvfs) == "1" || std::string(env_dvfs) == "true" || std::string(env_dvfs) == "on");
+
+    auto spec = get_arch_clock_spec(arch);
+    if (dvfs_enabled) {
+        // As compute_intensity goes from 0.0 to 1.0, clock scales from boost down to base
+        double throttle_drop = static_cast<double>(spec.boost_khz - spec.base_khz) * stats.compute_intensity;
+        uint32_t effective_khz = spec.boost_khz - static_cast<uint32_t>(throttle_drop);
+        effective_khz = std::max(spec.base_khz, std::min(spec.boost_khz, effective_khz));
+        return effective_khz;
+    }
+
+    return spec.boost_khz;
+}
+
+static void record_kernel_completion(const gcnsim::KernelInfo* ki, uint64_t kernel_cycles, const gcnsim::KernelStats& stats) {
+    const char* env_arch = std::getenv("GCN_SIM_ARCH");
+    std::string arch_str = env_arch ? env_arch : "gfx90a";
+    uint32_t eff_clk_khz = resolve_effective_kernel_clock_khz(arch_str, stats);
+    double kernel_ms = (eff_clk_khz > 0)
+        ? (static_cast<double>(kernel_cycles) / static_cast<double>(eff_clk_khz))
+        : 0.0;
+    g_simulated_gpu_cycles += kernel_cycles;
+    g_simulated_gpu_time_ms += kernel_ms;
+
+    const char* env_dvfs = std::getenv("GCN_SIM_DVFS");
+    if (!env_dvfs) env_dvfs = std::getenv("GCN_SIM_POWER_MODEL");
+    if (env_dvfs && (std::string(env_dvfs) == "1" || std::string(env_dvfs) == "true" || std::string(env_dvfs) == "on")) {
+        auto spec = get_arch_clock_spec(arch_str);
+        fprintf(stderr, "[gcnsim DVFS] Kernel '%s': compute intensity = %.1f%% (MFMA: %.1f%%, VALU: %.1f%%) -> throttled clock = %.1f MHz (Boost: %.1f MHz, Base: %.1f MHz)\n",
+                ki ? ki->name.c_str() : "unknown", stats.compute_intensity * 100.0,
+                stats.mfma_utilization * 100.0, stats.valu_utilization * 100.0,
+                eff_clk_khz / 1000.0, spec.boost_khz / 1000.0, spec.base_khz / 1000.0);
+    }
+}
 
 struct EventInternal {
     bool recorded = false;
     uint32_t flags = 0;
     std::chrono::steady_clock::time_point time_point;
     uint64_t simulated_cycles = 0;
+    double simulated_ms = 0.0;
 };
 
 // Stream Interceptors
@@ -398,6 +514,7 @@ gcnsim::hipError_t hipEventRecord(gcnsim::hipEvent_t event, gcnsim::hipStream_t 
     ev->recorded = true;
     ev->time_point = std::chrono::steady_clock::now();
     ev->simulated_cycles = g_simulated_gpu_cycles;
+    ev->simulated_ms = g_simulated_gpu_time_ms;
     return gcnsim::hipSuccess;
 }
 
@@ -421,6 +538,10 @@ gcnsim::hipError_t hipEventElapsedTime(float* ms, gcnsim::hipEvent_t start, gcns
     auto* ev_start = reinterpret_cast<EventInternal*>(start);
     auto* ev_stop = reinterpret_cast<EventInternal*>(stop);
     if (!ev_start->recorded || !ev_stop->recorded) return gcnsim::hipErrorInvalidValue;
+    if (ev_stop->simulated_ms > ev_start->simulated_ms) {
+        *ms = static_cast<float>(ev_stop->simulated_ms - ev_start->simulated_ms);
+        return gcnsim::hipSuccess;
+    }
     if (ev_stop->simulated_cycles > ev_start->simulated_cycles) {
         gcnsim::hipDeviceProp_t prop;
         hipGetDeviceProperties(&prop, g_current_device);
@@ -512,7 +633,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI350X");
         std::strncpy(prop->gcnArchName, "gfx950:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 288ULL * 1024 * 1024 * 1024; // 288 GB HBM3e
-        prop->clockRate = 2100000;       // 2.1 GHz Boost in kHz
+        prop->clockRate = resolve_device_clock_khz("gfx950");
         prop->memoryClockRate = 3200000; // 3.2 GHz in kHz
         prop->multiProcessorCount = 256; // 256 CUs (32 active CUs x 8 XCDs)
         prop->l2CacheSize = 32 * 1024 * 1024; // 32 MB L2
@@ -525,7 +646,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI300X");
         std::strncpy(prop->gcnArchName, "gfx942:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 192ULL * 1024 * 1024 * 1024; // 192 GB HBM3
-        prop->clockRate = 2100000;       // 2.1 GHz Boost
+        prop->clockRate = resolve_device_clock_khz("gfx942");
         prop->memoryClockRate = 2600000; // 2.6 GHz in kHz
         prop->multiProcessorCount = 304; // 304 CUs
         prop->l2CacheSize = 32 * 1024 * 1024; // 32 MB L2
@@ -538,7 +659,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI100");
         std::strncpy(prop->gcnArchName, "gfx908:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 32ULL * 1024 * 1024 * 1024; // 32 GB HBM2
-        prop->clockRate = 1502000;       // 1.502 GHz Boost in kHz
+        prop->clockRate = resolve_device_clock_khz("gfx908");
         prop->memoryClockRate = 1200000; // 1.2 GHz in kHz
         prop->multiProcessorCount = 120; // 120 CUs
         prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2
@@ -551,7 +672,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
         std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e per GCD
-        prop->clockRate = 1700000;       // 1.7 GHz in kHz
+        prop->clockRate = resolve_device_clock_khz("gfx90a");
         prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
         prop->multiProcessorCount = 110; // 110 CUs per GCD
         prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 per GCD
@@ -631,7 +752,12 @@ gcnsim::hipError_t hipDeviceGetAttribute(int* pi, gcnsim::hipDeviceAttribute_t a
         case gcnsim::hipDeviceAttributeTotalConstantMemory: *pi = 2147483647; break;
         case gcnsim::hipDeviceAttributeWarpSize: *pi = 64; break;
         case gcnsim::hipDeviceAttributeMaxRegistersPerBlock: *pi = 65536; break;
-        case gcnsim::hipDeviceAttributeClockRate: *pi = 1700000; break;
+        case gcnsim::hipDeviceAttributeClockRate: {
+            gcnsim::hipDeviceProp_t prop;
+            hipGetDeviceProperties(&prop, deviceId);
+            *pi = prop.clockRate;
+            break;
+        }
         case gcnsim::hipDeviceAttributeMemoryClockRate: *pi = 1600000; break;
         case gcnsim::hipDeviceAttributeMemoryBusWidth: *pi = 8192; break;
         case gcnsim::hipDeviceAttributeMultiprocessorCount: *pi = 110; break;
@@ -960,13 +1086,14 @@ gcnsim::hipError_t hipLaunchKernel(
 
     cfg.enable_cycle_counting = true;
     uint64_t kernel_cycles = 0;
+    gcnsim::KernelStats stats;
     std::string err;
-    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles);
+    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles, &stats);
     if (!ok) {
         std::cerr << "[gcnsim_hip] launch_kernel failed: " << err << std::endl;
         return gcnsim::hipErrorLaunchFailure;
     }
-    g_simulated_gpu_cycles += kernel_cycles;
+    record_kernel_completion(ki, kernel_cycles, stats);
     return gcnsim::hipSuccess;
 }
 
@@ -1128,13 +1255,14 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
 
     cfg.enable_cycle_counting = true;
     uint64_t kernel_cycles = 0;
+    gcnsim::KernelStats stats;
     std::string err;
-    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles);
+    bool ok = gcnsim::launch_kernel(*ki, cfg, err, &kernel_cycles, &stats);
     if (!ok) {
         std::cerr << "[gcnsim_hip] launch_kernel failed: " << err << std::endl;
         return gcnsim::hipErrorLaunchFailure;
     }
-    g_simulated_gpu_cycles += kernel_cycles;
+    record_kernel_completion(ki, kernel_cycles, stats);
 
     return gcnsim::hipSuccess;
 }
