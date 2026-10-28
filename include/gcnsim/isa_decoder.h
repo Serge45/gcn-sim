@@ -537,6 +537,7 @@ enum class Opcode {
     DS_WRITE_ADDTID_B32,
     DS_WRITE_B8,
     DS_WRITE_B16,
+    DS_WRITE_B16_D16_HI,
     DS_ADD_RTN_U32,
     DS_SUB_RTN_U32,
     DS_RSUB_RTN_U32,
@@ -859,7 +860,7 @@ struct Instruction {
 
 // Decode one instruction at pc; returns decoded struct.
 // size_bytes is 4 or 8 — caller advances PC by that amount.
-Instruction decode(const uint8_t* pc, bool is_gfx950 = false);
+Instruction decode(const uint8_t* pc, bool is_gfx950 = false, bool is_gfx908 = false);
 
 const char* opcode_name(Opcode op);
 const char* format_name(InstFormat fmt);

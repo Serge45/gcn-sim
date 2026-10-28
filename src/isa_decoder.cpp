@@ -956,6 +956,7 @@ static Opcode ds_opcode(uint32_t op) {
         case 81:  return Opcode::DS_CMPST_F64;
         case 82:  return Opcode::DS_MIN_F64;
         case 83:  return Opcode::DS_MAX_F64;
+        case 85:  return Opcode::DS_WRITE_B16_D16_HI;
         case 90:  return Opcode::DS_READ_U16_D16;
         case 91:  return Opcode::DS_READ_U16_D16_HI;
         case 96:  return Opcode::DS_ADD_RTN_U64;
@@ -1111,7 +1112,7 @@ static void parse_waitcnt(uint32_t simm16, uint8_t& vmcnt, uint8_t& lgkmcnt) {
 // Main decode function
 // ---------------------------------------------------------------------------
 
-Instruction decode(const uint8_t* pc, bool is_gfx950) {
+Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908) {
     Instruction inst;
     uint32_t w0 = read_u32_le(pc);
     inst.encoding[0] = w0;
@@ -1550,10 +1551,10 @@ Instruction decode(const uint8_t* pc, bool is_gfx950) {
                 if (mc != Opcode::UNKNOWN) {
                     inst.format = InstFormat::MFMA;
                     inst.opcode = mc;
-                    // GFX90a: bit 15 of word 0 = "acc" flag.
+                    // GFX908 always targets AGPR; GFX90a: bit 15 of word 0 = "acc" flag.
                     // 0 = accumulator is VGPR (HIP compiler path, vdst = VGPR index).
                     // 1 = accumulator is AGPR (assembly path, vdst = AGPR index).
-                    bool is_agpr = (w0 >> 15) & 1;
+                    bool is_agpr = is_gfx908 || ((w0 >> 15) & 1);
                     inst.dst.kind  = is_agpr ? Operand::Kind::AGPR : Operand::Kind::VGPR;
                     inst.dst.index = vdst;
                     inst.src[0] = decode_src(src0, nullptr);
@@ -2133,6 +2134,8 @@ const char* opcode_name(Opcode op) {
         case Opcode::FLAT_STORE_DWORD:       return "flat_store_dword";
         case Opcode::FLAT_STORE_DWORDX2:     return "flat_store_dwordx2";
         case Opcode::DS_WRITE_B32:           return "ds_write_b32";
+        case Opcode::DS_WRITE_B16:           return "ds_write_b16";
+        case Opcode::DS_WRITE_B16_D16_HI:    return "ds_write_b16_d16_hi";
         case Opcode::DS_READ_B32:            return "ds_read_b32";
         case Opcode::DS_WRITE_B64:           return "ds_write_b64";
         case Opcode::DS_READ_B64:            return "ds_read_b64";
