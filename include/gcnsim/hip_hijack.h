@@ -11,8 +11,31 @@
 #include <iomanip>
 #include <cctype>
 #include "elf_loader.h"
+#include "memory_model.h"
 
 namespace gcnsim {
+
+inline bool is_hijack_verbose() {
+    const char* env = std::getenv("GCNSIM_VERBOSE");
+    return env && (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0 || std::strcmp(env, "on") == 0);
+}
+
+inline std::string canonical_isa_arch(const std::string& raw_arch) {
+    if (raw_arch.find("gfx950") != std::string::npos || raw_arch.find("mi350") != std::string::npos || raw_arch.find("mi355") != std::string::npos) {
+        return "gfx950";
+    }
+    if (raw_arch.find("gfx942") != std::string::npos || raw_arch.find("mi300") != std::string::npos) {
+        return "gfx942";
+    }
+    if (raw_arch.find("gfx908") != std::string::npos || raw_arch.find("mi100") != std::string::npos) {
+        return "gfx908";
+    }
+    if (raw_arch.find("gfx90a") != std::string::npos || raw_arch.find("mi210") != std::string::npos || raw_arch.find("mi250") != std::string::npos) {
+        return "gfx90a";
+    }
+    auto colon = raw_arch.find(':');
+    return (colon != std::string::npos) ? raw_arch.substr(0, colon) : (raw_arch.empty() ? "gfx90a" : raw_arch);
+}
 
 // --- Mocked HIP Types (to keep this portable and independent of host ROCm installs) ---
 
@@ -344,7 +367,7 @@ public:
                                   triple.find("hipv4-amdgcn-amd-amdhsa") != std::string::npos);
             if (is_hip_target) {
                 const char* env_arch = std::getenv("GCN_SIM_ARCH");
-                std::string target_arch = env_arch ? env_arch : "";
+                std::string target_arch = env_arch ? canonical_isa_arch(env_arch) : "";
                 bool match = false;
                 if (!target_arch.empty()) {
                     match = (triple.find(target_arch) != std::string::npos);
@@ -367,9 +390,11 @@ public:
 
     void RegisterFatBinary(void** handle, const void* data) {
         auto* header = reinterpret_cast<const FatBinaryHeader*>(data);
-        std::cout << "[gcnsim_hip] RegisterFatBinary: magic=0x" << std::hex << header->magic 
-                  << std::dec << ", version=" << header->version 
-                  << ", size=" << header->size << ", ptr=" << header->binary << std::endl;
+        if (is_hijack_verbose()) {
+            std::cout << "[gcnsim_hip] RegisterFatBinary: magic=0x" << std::hex << header->magic 
+                      << std::dec << ", version=" << header->version 
+                      << ", size=" << header->size << ", ptr=" << header->binary << std::endl;
+        }
 
         const void* hsaco_data = header->binary;
         size_t hsaco_size = header->size;
@@ -378,12 +403,14 @@ public:
             const void* extracted_data = nullptr;
             size_t extracted_size = 0;
             if (parse_clang_offload_bundle(header->binary, extracted_data, extracted_size)) {
-                std::cout << "[gcnsim_hip] Successfully parsed Clang Offload Bundle! Found gfx90a target: "
-                          << "offset=" << (reinterpret_cast<const char*>(extracted_data) - reinterpret_cast<const char*>(header->binary))
-                          << ", size=" << extracted_size << std::endl;
+                if (is_hijack_verbose()) {
+                    std::cout << "[gcnsim_hip] Successfully parsed Clang Offload Bundle! Found target: "
+                              << "offset=" << (reinterpret_cast<const char*>(extracted_data) - reinterpret_cast<const char*>(header->binary))
+                              << ", size=" << extracted_size << std::endl;
+                }
                 hsaco_data = extracted_data;
                 hsaco_size = extracted_size;
-            } else {
+            } else if (is_hijack_verbose()) {
                 std::cout << "[gcnsim_hip] Warning: magic is HIPF but could not parse Clang Offload Bundle. Using raw pointer." << std::endl;
             }
         }
@@ -438,8 +465,17 @@ public:
         int global
     ) {
         (void)fatBinHandle; (void)deviceVar; (void)ext;
-        void* dev_alloc = std::malloc(size);
-        if (hostVar && dev_alloc) {
+        void* dev_alloc = nullptr;
+        size_t alloc_size = std::max<size_t>(1, size);
+        if (posix_memalign(&dev_alloc, 256, alloc_size) != 0) {
+            dev_alloc = std::malloc(alloc_size);
+        }
+        if (dev_alloc) {
+            MemoryManager::Get().RegisterRegion(
+                reinterpret_cast<uint64_t>(dev_alloc), alloc_size,
+                deviceName ? deviceName : "device_var");
+        }
+        if (hostVar && dev_alloc && size > 0) {
             std::memcpy(dev_alloc, hostVar, size);
         }
         RegisteredVar rv{

@@ -98,3 +98,18 @@ TEST(CacheModel, CDNA3_L3InfinityCache) {
     EXPECT_EQ(cache.access(0x1000), CacheHitLevel::L3);
     EXPECT_EQ(cache.l3_hits(), 1u);
 }
+
+TEST(CacheModel, PerCuL1IsolationWithSharedL2) {
+    CacheConfig cfg;
+    CacheModel cache(cfg, 4); // 4 CUs
+
+    // CU 0 accesses 0x4000 -> cold miss (HBM), populates CU 0's L1 and shared L2
+    EXPECT_EQ(cache.access(0x4000, 0), CacheHitLevel::HBM);
+    // CU 0 accesses 0x4000 again -> L1 hit on CU 0
+    EXPECT_EQ(cache.access(0x4000, 0), CacheHitLevel::L1);
+
+    // CU 1 accesses 0x4000 -> misses CU 1's private L1, hits shared L2!
+    EXPECT_EQ(cache.access(0x4000, 1), CacheHitLevel::L2);
+    // CU 1 accesses 0x4000 again -> now L1 hit on CU 1
+    EXPECT_EQ(cache.access(0x4000, 1), CacheHitLevel::L1);
+}

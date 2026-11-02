@@ -67,8 +67,10 @@ struct WavefrontState {
     uint64_t pipe_smem_ready = 0;
     uint64_t mfma_total_exec_cycles = 0; // accumulated MFMA execution cycles (for utilization)
     uint64_t valu_total_issue_cycles = 0; // accumulated VALU+MFMA issue cycles (for utilization)
-    // Cache model (shared per-workgroup for L1, global for L2); nullptr = no cache sim
+    // Cache model (per-CU L1, shared L2/L3); nullptr = no cache sim
     CacheModel* cache = nullptr;
+    uint32_t cu_id = 0;                  // CU index this wavefront is scheduled on
+    uint32_t waves_per_wg = 1;           // total waves per workgroup
     // Trace output (Chrome Trace Event Format); nullptr = no tracing
     FILE*    trace_file = nullptr;
     uint32_t trace_wave_id = 0;          // wave index within workgroup

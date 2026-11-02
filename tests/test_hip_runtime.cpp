@@ -138,6 +138,34 @@ TEST_F(HipRuntimeTest, DeviceAttributes) {
     // Invalid parameters
     EXPECT_EQ(hipDeviceGetAttribute(nullptr, gcnsim::hipDeviceAttributeWarpSize, 0), gcnsim::hipErrorInvalidValue);
     EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeWarpSize, -1), gcnsim::hipErrorInvalidValue);
+
+    // Verify dynamic arch-aware attributes (MI350X / gfx950 and MI210)
+    setenv("GCN_SIM_ARCH", "gfx950", 1);
+    EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeMultiprocessorCount, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(val, 256);
+    EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeMaxSharedMemoryPerBlock, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(val, 163840);
+    EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeL2CacheSize, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(val, 32 * 1024 * 1024);
+    EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeComputeCapabilityMinor, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(val, 5);
+
+    setenv("GCN_SIM_ARCH", "mi210", 1);
+    EXPECT_EQ(hipDeviceGetAttribute(&val, gcnsim::hipDeviceAttributeMultiprocessorCount, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(val, 104);
+    unsetenv("GCN_SIM_ARCH");
+}
+
+TEST_F(HipRuntimeTest, MallocAlignmentAndZeroSize) {
+    void* zero_ptr = reinterpret_cast<void*>(0x1234);
+    EXPECT_EQ(hipMalloc(&zero_ptr, 0), gcnsim::hipSuccess);
+    EXPECT_EQ(zero_ptr, nullptr);
+
+    void* aligned_ptr = nullptr;
+    EXPECT_EQ(hipMalloc(&aligned_ptr, 1024), gcnsim::hipSuccess);
+    ASSERT_NE(aligned_ptr, nullptr);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(aligned_ptr) % 4096, 0u);
+    EXPECT_EQ(hipFree(aligned_ptr), gcnsim::hipSuccess);
 }
 
 TEST_F(HipRuntimeTest, PeerAccess) {

@@ -220,16 +220,28 @@ void __hipRegisterSurface(
 
 // Memory Allocation Interceptors
 gcnsim::hipError_t hipMalloc(void** devPtr, size_t size) {
-    std::cout << "[gcnsim_hip] hipMalloc called!" << std::endl;
+    if (gcnsim::is_hijack_verbose()) {
+        std::cout << "[gcnsim_hip] hipMalloc called (size=" << size << ")" << std::endl;
+    }
     if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
         static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void**, size_t)>("hipMalloc");
         if (real_func) return real_func(devPtr, size);
         return gcnsim::hipErrorLaunchFailure;
     }
     if (!devPtr) return gcnsim::hipErrorInvalidValue;
-    
-    *devPtr = std::malloc(size);
-    return *devPtr ? gcnsim::hipSuccess : gcnsim::hipErrorMemoryAllocation;
+    if (size == 0) {
+        *devPtr = nullptr;
+        return gcnsim::hipSuccess;
+    }
+
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, 4096, size) != 0 || !ptr) {
+        *devPtr = nullptr;
+        return gcnsim::hipErrorMemoryAllocation;
+    }
+    *devPtr = ptr;
+    gcnsim::MemoryManager::Get().RegisterRegion(reinterpret_cast<uint64_t>(ptr), size, "hipMalloc");
+    return gcnsim::hipSuccess;
 }
 
 gcnsim::hipError_t hipFree(void* devPtr) {
@@ -239,6 +251,7 @@ gcnsim::hipError_t hipFree(void* devPtr) {
         return gcnsim::hipErrorLaunchFailure;
     }
     if (devPtr) {
+        gcnsim::MemoryManager::Get().UnregisterRegion(reinterpret_cast<uint64_t>(devPtr));
         std::free(devPtr);
     }
     return gcnsim::hipSuccess;
@@ -309,6 +322,9 @@ static ArchClockSpec get_arch_clock_spec(const std::string& arch) {
     }
     if (arch.find("gfx908") != std::string::npos || arch.find("mi100") != std::string::npos) {
         return { 1502000, 1087000 }; // MI100: 1.502 GHz Boost, 1.087 GHz Base
+    }
+    if (arch.find("mi210") != std::string::npos) {
+        return { 1700000, 1200000 }; // MI210 (PCIe 300W): 1.7 GHz Boost, 1.2 GHz Base
     }
     // Default to gfx90a / MI250X
     return { 1700000, 1300000 }; // MI250X: 1.7 GHz Boost, 1.3 GHz Base
@@ -668,6 +684,19 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->minor = 0;
         prop->sharedMemPerBlock = 65536; // 64 KB
         prop->maxSharedMemoryPerMultiProcessor = 65536;
+    } else if (env_arch && std::string(env_arch) == "mi210") {
+        std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI210");
+        std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
+        prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e
+        prop->clockRate = resolve_device_clock_khz("mi210");
+        prop->memoryClockRate = 1600000; // 1.6 GHz in kHz
+        prop->multiProcessorCount = 104; // 104 CUs on MI210
+        prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2
+        prop->memoryBusWidth = 4096;
+        prop->major = 9;
+        prop->minor = 0;
+        prop->sharedMemPerBlock = 65536; // 64 KB
+        prop->maxSharedMemoryPerMultiProcessor = 65536;
     } else {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI250X (GCD %d)", deviceId);
         std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
@@ -735,45 +764,39 @@ gcnsim::hipError_t hipDeviceGetAttribute(int* pi, gcnsim::hipDeviceAttribute_t a
         return gcnsim::hipErrorLaunchFailure;
     }
     if (!pi) return gcnsim::hipErrorInvalidValue;
-    int max_dev = 2;
-    const char* env_count = std::getenv("GCNSIM_DEVICE_COUNT");
-    if (env_count) max_dev = std::max(1, std::atoi(env_count));
-    if (deviceId < 0 || deviceId >= max_dev) return gcnsim::hipErrorInvalidValue;
+    gcnsim::hipDeviceProp_t prop;
+    gcnsim::hipError_t err = hipGetDeviceProperties(&prop, deviceId);
+    if (err != gcnsim::hipSuccess) return err;
 
     switch (attr) {
-        case gcnsim::hipDeviceAttributeMaxThreadsPerBlock: *pi = 1024; break;
-        case gcnsim::hipDeviceAttributeMaxBlockDimX: *pi = 1024; break;
-        case gcnsim::hipDeviceAttributeMaxBlockDimY: *pi = 1024; break;
-        case gcnsim::hipDeviceAttributeMaxBlockDimZ: *pi = 1024; break;
-        case gcnsim::hipDeviceAttributeMaxGridDimX: *pi = 2147483647; break;
-        case gcnsim::hipDeviceAttributeMaxGridDimY: *pi = 65535; break;
-        case gcnsim::hipDeviceAttributeMaxGridDimZ: *pi = 65535; break;
-        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerBlock: *pi = 65536; break;
-        case gcnsim::hipDeviceAttributeTotalConstantMemory: *pi = 2147483647; break;
-        case gcnsim::hipDeviceAttributeWarpSize: *pi = 64; break;
-        case gcnsim::hipDeviceAttributeMaxRegistersPerBlock: *pi = 65536; break;
-        case gcnsim::hipDeviceAttributeClockRate: {
-            gcnsim::hipDeviceProp_t prop;
-            hipGetDeviceProperties(&prop, deviceId);
-            *pi = prop.clockRate;
-            break;
-        }
-        case gcnsim::hipDeviceAttributeMemoryClockRate: *pi = 1600000; break;
-        case gcnsim::hipDeviceAttributeMemoryBusWidth: *pi = 8192; break;
-        case gcnsim::hipDeviceAttributeMultiprocessorCount: *pi = 110; break;
-        case gcnsim::hipDeviceAttributeComputeMode: *pi = 0; break;
-        case gcnsim::hipDeviceAttributeL2CacheSize: *pi = 8 * 1024 * 1024; break;
-        case gcnsim::hipDeviceAttributeMaxThreadsPerMultiProcessor: *pi = 2048; break;
-        case gcnsim::hipDeviceAttributeComputeCapabilityMajor: *pi = 9; break;
-        case gcnsim::hipDeviceAttributeComputeCapabilityMinor: *pi = 0; break;
-        case gcnsim::hipDeviceAttributeConcurrentKernels: *pi = 1; break;
-        case gcnsim::hipDeviceAttributePciBusId: *pi = 3; break;
-        case gcnsim::hipDeviceAttributePciDeviceId: *pi = deviceId; break;
-        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerMultiprocessor: *pi = 65536; break;
-        case gcnsim::hipDeviceAttributeIsMultiGpuBoard: *pi = 1; break;
-        case gcnsim::hipDeviceAttributeIntegrated: *pi = 0; break;
-        case gcnsim::hipDeviceAttributeCooperativeLaunch: *pi = 1; break;
-        case gcnsim::hipDeviceAttributeCooperativeMultiDeviceLaunch: *pi = 1; break;
+        case gcnsim::hipDeviceAttributeMaxThreadsPerBlock: *pi = prop.maxThreadsPerBlock; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimX: *pi = prop.maxThreadsDim[0]; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimY: *pi = prop.maxThreadsDim[1]; break;
+        case gcnsim::hipDeviceAttributeMaxBlockDimZ: *pi = prop.maxThreadsDim[2]; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimX: *pi = prop.maxGridSize[0]; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimY: *pi = prop.maxGridSize[1]; break;
+        case gcnsim::hipDeviceAttributeMaxGridDimZ: *pi = prop.maxGridSize[2]; break;
+        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerBlock: *pi = static_cast<int>(prop.sharedMemPerBlock); break;
+        case gcnsim::hipDeviceAttributeTotalConstantMemory: *pi = static_cast<int>(prop.totalConstMem); break;
+        case gcnsim::hipDeviceAttributeWarpSize: *pi = prop.warpSize; break;
+        case gcnsim::hipDeviceAttributeMaxRegistersPerBlock: *pi = prop.regsPerBlock; break;
+        case gcnsim::hipDeviceAttributeClockRate: *pi = prop.clockRate; break;
+        case gcnsim::hipDeviceAttributeMemoryClockRate: *pi = prop.memoryClockRate; break;
+        case gcnsim::hipDeviceAttributeMemoryBusWidth: *pi = prop.memoryBusWidth; break;
+        case gcnsim::hipDeviceAttributeMultiprocessorCount: *pi = prop.multiProcessorCount; break;
+        case gcnsim::hipDeviceAttributeComputeMode: *pi = prop.computeMode; break;
+        case gcnsim::hipDeviceAttributeL2CacheSize: *pi = prop.l2CacheSize; break;
+        case gcnsim::hipDeviceAttributeMaxThreadsPerMultiProcessor: *pi = prop.maxThreadsPerMultiProcessor; break;
+        case gcnsim::hipDeviceAttributeComputeCapabilityMajor: *pi = prop.major; break;
+        case gcnsim::hipDeviceAttributeComputeCapabilityMinor: *pi = prop.minor; break;
+        case gcnsim::hipDeviceAttributeConcurrentKernels: *pi = prop.concurrentKernels; break;
+        case gcnsim::hipDeviceAttributePciBusId: *pi = prop.pciBusID; break;
+        case gcnsim::hipDeviceAttributePciDeviceId: *pi = prop.pciDeviceID; break;
+        case gcnsim::hipDeviceAttributeMaxSharedMemoryPerMultiprocessor: *pi = static_cast<int>(prop.maxSharedMemoryPerMultiProcessor); break;
+        case gcnsim::hipDeviceAttributeIsMultiGpuBoard: *pi = prop.isMultiGpuBoard; break;
+        case gcnsim::hipDeviceAttributeIntegrated: *pi = prop.integrated; break;
+        case gcnsim::hipDeviceAttributeCooperativeLaunch: *pi = prop.cooperativeLaunch; break;
+        case gcnsim::hipDeviceAttributeCooperativeMultiDeviceLaunch: *pi = prop.cooperativeMultiDeviceLaunch; break;
         default: *pi = 0; break;
     }
     return gcnsim::hipSuccess;
@@ -1006,7 +1029,9 @@ gcnsim::hipError_t hipLaunchKernel(
     size_t sharedMemBytes,
     gcnsim::hipStream_t stream
 ) {
-    std::cout << "[gcnsim_hip] hipLaunchKernel called!" << std::endl;
+    if (gcnsim::is_hijack_verbose()) {
+        std::cout << "[gcnsim_hip] hipLaunchKernel called!" << std::endl;
+    }
     (void)sharedMemBytes;
     (void)stream;
 
@@ -1026,7 +1051,9 @@ gcnsim::hipError_t hipLaunchKernel(
         std::cerr << "[gcnsim_hip] ResolveKernelInfo failed for kernel: " << k_name << std::endl;
         return gcnsim::hipErrorInvalidDeviceFunction;
     }
-    std::cout << "[gcnsim_hip] ResolveKernelInfo succeeded for kernel: " << k_name << "!" << std::endl;
+    if (gcnsim::is_hijack_verbose()) {
+        std::cout << "[gcnsim_hip] ResolveKernelInfo succeeded for kernel: " << k_name << "!" << std::endl;
+    }
 
     // Pack arguments using metadata offsets and sizes
     uint32_t kernarg_size = ki->descriptor ? ki->descriptor->kernarg_size : 0;
@@ -1079,6 +1106,12 @@ gcnsim::hipError_t hipLaunchKernel(
     cfg.block_z = dimBlocks.z;
     cfg.kernarg = kernarg_buffer.data();
     cfg.kernarg_size = kernarg_buffer.size();
+    {
+        gcnsim::hipDeviceProp_t prop;
+        if (hipGetDeviceProperties(&prop, g_current_device) == gcnsim::hipSuccess && prop.multiProcessorCount > 0) {
+            cfg.num_cus = static_cast<uint32_t>(prop.multiProcessorCount);
+        }
+    }
 
     if (attach_debugger_if_needed(ki, cfg)) {
         return gcnsim::hipSuccess;
@@ -1126,9 +1159,6 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     uint32_t flags
 ) {
     (void)sharedMemBytes;
-    (void)hStream;
-    (void)startEvent;
-    (void)stopEvent;
     (void)flags;
 
     // Wait: if dynamic interception is globally disabled, call the real one!
@@ -1234,23 +1264,39 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         return gcnsim::hipErrorInvalidValue;
     }
 
-    if (ki) {
-        fprintf(stderr, "[HIJACK] Launching kernel: %s\n", ki->name.c_str());
-        fprintf(stderr, "[HIJACK] grid=(%u, %u, %u) block=(%u, %u, %u)\n",
-                cfg.grid_x, cfg.grid_y, cfg.grid_z,
-                cfg.block_x, cfg.block_y, cfg.block_z);
-    }
+    if (gcnsim::is_hijack_verbose()) {
+        if (ki) {
+            fprintf(stderr, "[HIJACK] Launching kernel: %s\n", ki->name.c_str());
+            fprintf(stderr, "[HIJACK] grid=(%u, %u, %u) block=(%u, %u, %u)\n",
+                    cfg.grid_x, cfg.grid_y, cfg.grid_z,
+                    cfg.block_x, cfg.block_y, cfg.block_z);
+        }
 
-    if (cfg.kernarg) {
-        fprintf(stderr, "[KERNARG DUMP] size=%zu\n", cfg.kernarg_size);
-        const uint32_t* ka32 = reinterpret_cast<const uint32_t*>(cfg.kernarg);
-        for (size_t i = 0; i < cfg.kernarg_size / 4; i += 4) {
-            fprintf(stderr, "  ka[%02zu..%02zu]: 0x%08x 0x%08x 0x%08x 0x%08x\n",
-                    i, i+3, ka32[i], ka32[i+1], ka32[i+2], ka32[i+3]);
+        if (cfg.kernarg) {
+            fprintf(stderr, "[KERNARG DUMP] size=%zu\n", cfg.kernarg_size);
+            const uint32_t* ka32 = reinterpret_cast<const uint32_t*>(cfg.kernarg);
+            for (size_t i = 0; i < cfg.kernarg_size / 4; i += 4) {
+                fprintf(stderr, "  ka[%02zu..%02zu]: 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                        i, i+3, ka32[i], ka32[i+1], ka32[i+2], ka32[i+3]);
+            }
         }
     }
 
+    {
+        gcnsim::hipDeviceProp_t prop;
+        if (hipGetDeviceProperties(&prop, g_current_device) == gcnsim::hipSuccess && prop.multiProcessorCount > 0) {
+            cfg.num_cus = static_cast<uint32_t>(prop.multiProcessorCount);
+        }
+    }
+
+    if (startEvent) {
+        hipEventRecord(startEvent, hStream);
+    }
+
     if (attach_debugger_if_needed(ki, cfg)) {
+        if (stopEvent) {
+            hipEventRecord(stopEvent, hStream);
+        }
         return gcnsim::hipSuccess;
     }
 
@@ -1265,6 +1311,10 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         return gcnsim::hipErrorLaunchFailure;
     }
     record_kernel_completion(ki, kernel_cycles, stats);
+
+    if (stopEvent) {
+        hipEventRecord(stopEvent, hStream);
+    }
 
     return gcnsim::hipSuccess;
 }
@@ -1303,9 +1353,7 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
         if (magic[0] == 'C' && magic[1] == 'C' && magic[2] == 'O' && magic[3] == 'B') {
             check_file.close();
             const char* env_arch = std::getenv("GCN_SIM_ARCH");
-            std::string arch = env_arch ? env_arch : "gfx90a";
-            auto colon = arch.find(':');
-            if (colon != std::string::npos) arch = arch.substr(0, colon);
+            std::string arch = gcnsim::canonical_isa_arch(env_arch ? env_arch : "gfx90a");
 
             size_t last_slash = path_to_load.find_last_of("/\\");
             std::string base_name = (last_slash != std::string::npos) ? path_to_load.substr(last_slash + 1) : path_to_load;
@@ -1454,6 +1502,9 @@ gcnsim::hipError_t hipModuleUnload(gcnsim::hipModule_t module) {
     }
     if (module) {
         auto* heap_mod = reinterpret_cast<gcnsim::HsacoModule*>(module);
+        g_loaded_modules.erase(
+            std::remove(g_loaded_modules.begin(), g_loaded_modules.end(), heap_mod),
+            g_loaded_modules.end());
         delete heap_mod;
     }
     return gcnsim::hipSuccess;

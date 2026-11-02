@@ -26,10 +26,7 @@ struct MemoryRegion {
 
 class MemoryManager {
 public:
-    static MemoryManager& Get() {
-        static MemoryManager instance;
-        return instance;
-    }
+    static MemoryManager& Get();
 
     void RegisterRegion(uint64_t base, size_t size, const std::string& tag = "") {
         std::lock_guard<std::mutex> lock(mutex_);

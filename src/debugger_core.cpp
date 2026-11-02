@@ -87,7 +87,8 @@ std::string Debugger::get_frame_info(const WavefrontState& wave, const std::stri
 }
 
 int Debugger::get_thread_id(const WavefrontState& wave) {
-    return wave.trace_wave_id + 1;
+    uint32_t wpw = std::max(1u, wave.waves_per_wg);
+    return static_cast<int>(wave.trace_wg_flat_id * wpw + wave.trace_wave_id + 1);
 }
 
 std::string Debugger::evaluate_expr(const WavefrontState& wave, const std::string& expr) {
@@ -283,11 +284,15 @@ void Debugger::print_source_context(const std::string& filepath, uint32_t line_n
 }
 
 void Debugger::debug_hook_impl(WavefrontState& wave) {
-    if (waves.empty() || waves[0]->workgroup_id[0] != wave.workgroup_id[0]) {
-        waves.clear(); active_wave_idx = 0;
-    }
     bool found = false;
-    for (auto* w : waves) if (w == &wave) { found = true; break; }
+    int tid = get_thread_id(wave);
+    for (size_t i = 0; i < waves.size(); ++i) {
+        if (waves[i] == &wave || get_thread_id(*waves[i]) == tid) {
+            waves[i] = &wave;
+            found = true;
+            break;
+        }
+    }
     if (!found) waves.push_back(&wave);
 
     bool is_bkpt = false;

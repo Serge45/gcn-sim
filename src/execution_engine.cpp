@@ -12,6 +12,11 @@
 
 namespace gcnsim {
 
+MemoryManager& MemoryManager::Get() {
+    static MemoryManager instance;
+    return instance;
+}
+
 // Forward declarations
 void init_wavefront(WavefrontState& wave,
                     const KernelDescriptor& kd,
@@ -106,7 +111,32 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     const uint8_t* kernarg = kernarg_buf.data();
 
-    // Create shared cache model (L1 is per-workgroup, L2 shared, L3 Infinity Cache on CDNA3)
+    struct ScopedMemRegistrations {
+        std::vector<uint64_t> bases;
+        void add(const void* ptr, size_t sz, const char* tag) {
+            if (ptr && sz > 0 && MemoryManager::Get().IsStrictMode()) {
+                uint64_t b = reinterpret_cast<uint64_t>(ptr);
+                MemoryManager::Get().RegisterRegion(b, sz, tag);
+                bases.push_back(b);
+            }
+        }
+        ~ScopedMemRegistrations() {
+            for (uint64_t b : bases) {
+                MemoryManager::Get().UnregisterRegion(b);
+            }
+        }
+    } mem_guard;
+    mem_guard.add(kernarg, kernarg_size, "kernarg");
+
+    uint32_t num_cus = cfg.num_cus;
+    if (num_cus == 0) {
+        if (kernel.is_gfx950) num_cus = 256;
+        else if (kernel.is_gfx942) num_cus = 304;
+        else if (kernel.is_gfx908) num_cus = 120;
+        else num_cus = 104;
+    }
+
+    // Create cache model (per-CU L1, shared L2, L3 Infinity Cache on CDNA3/CDNA4)
     std::unique_ptr<CacheModel> global_cache;
     if (cfg.enable_cycle_counting) {
         CacheConfig ccfg;
@@ -121,7 +151,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             ccfg.l2_size_bytes = 8 * 1024 * 1024; // 8 MB L2
             ccfg.enable_l3 = false;
         }
-        global_cache = std::make_unique<CacheModel>(ccfg);
+        global_cache = std::make_unique<CacheModel>(ccfg, num_cus);
     }
 
     // Determine LDS size from kernel descriptor
@@ -131,20 +161,44 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
     uint32_t scratch_per_wave = scratch_per_lane * WAVE_SIZE;
 
-    uint32_t num_cus = cfg.num_cus;
-    if (num_cus == 0) {
-        if (kernel.is_gfx950) num_cus = 256;
-        else if (kernel.is_gfx942) num_cus = 304;
-        else if (kernel.is_gfx908) num_cus = 120;
-        else num_cus = 104;
-    }
     std::vector<uint64_t> cu_wall_cycles(num_cus, 0);
     uint32_t current_wg = 0;
     uint32_t total_wgs = wg_count_x * wg_count_y * wg_count_z;
     constexpr uint32_t NUM_SIMDS = 4;
 
+    auto sync_barrier_cycles = [&](std::vector<std::unique_ptr<WavefrontState>>& waves,
+                                   const std::vector<bool>& ended) -> uint64_t {
+        uint64_t max_barrier_cc = 0;
+        for (uint32_t w = 0; w < waves_per_wg; w++) {
+            if (!ended[w]) {
+                max_barrier_cc = std::max(max_barrier_cc, waves[w]->cycle_count);
+            }
+        }
+        if (cfg.enable_cycle_counting) {
+            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                if (ended[w]) continue;
+                if (max_barrier_cc > waves[w]->cycle_count) {
+                    uint64_t stall_dur = max_barrier_cc - waves[w]->cycle_count;
+                    if (trace_file) {
+                        fprintf(trace_file,
+                            ",\n{\"ph\":\"X\",\"pid\":%u,\"tid\":%u,"
+                            "\"cat\":\"STALL\",\"name\":\"stall:barrier\","
+                            "\"ts\":%llu,\"dur\":%llu,"
+                            "\"args\":{\"pc\":\"0x%llx\"}}",
+                            waves[w]->trace_wg_flat_id, waves[w]->trace_wave_id,
+                            (unsigned long long)waves[w]->cycle_count,
+                            (unsigned long long)stall_dur,
+                            (unsigned long long)waves[w]->pc);
+                    }
+                    waves[w]->cycle_count = max_barrier_cc;
+                }
+            }
+        }
+        return max_barrier_cc;
+    };
+
     try {
-        if (total_wgs > 1 && waves_per_wg <= NUM_SIMDS) {
+        if (total_wgs > 1) {
             struct ActiveWg {
                 uint32_t wg_flat = 0;
                 uint32_t wg_x = 0, wg_y = 0, wg_z = 0;
@@ -196,6 +250,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     awg.waves[w]->global_mem_latency = cfg.global_mem_latency;
                     awg.waves[w]->smem_latency = cfg.smem_latency;
                     awg.waves[w]->cache = global_cache.get();
+                    awg.waves[w]->cu_id = awg.cu_id;
+                    awg.waves[w]->waves_per_wg = waves_per_wg;
                     awg.waves[w]->trace_file = trace_file;
                     awg.waves[w]->trace_wave_id = w;
                     awg.waves[w]->trace_wg_flat_id = awg.wg_flat;
@@ -236,6 +292,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     }
 
                     if (barrier_count > 0 && barrier_count == active_waves) {
+                        sync_barrier_cycles(awg.waves, awg.ended);
                         for (uint32_t w = 0; w < waves_per_wg; w++) {
                             awg.at_barrier[w] = false;
                         }
@@ -249,8 +306,21 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     if (all_done) {
                         if (cfg.enable_cycle_counting) {
                             uint64_t max_cc = 0;
-                            for (uint32_t w = 0; w < waves_per_wg; w++) {
-                                max_cc = std::max(max_cc, awg.waves[w]->cycle_count);
+                            if (waves_per_wg <= NUM_SIMDS) {
+                                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                                    max_cc = std::max(max_cc, awg.waves[w]->cycle_count);
+                                }
+                            } else {
+                                uint64_t simd_max_cc[NUM_SIMDS] = {};
+                                uint64_t simd_issue_sum[NUM_SIMDS] = {};
+                                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                                    uint32_t s = w % NUM_SIMDS;
+                                    simd_max_cc[s] = std::max(simd_max_cc[s], awg.waves[w]->cycle_count);
+                                    simd_issue_sum[s] += awg.waves[w]->insn_count * 4;
+                                }
+                                for (uint32_t s = 0; s < NUM_SIMDS; s++) {
+                                    max_cc = std::max(max_cc, std::max(simd_max_cc[s], simd_issue_sum[s]));
+                                }
                             }
                             cu_wall_cycles[awg.cu_id] += max_cc;
                         }
@@ -318,6 +388,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->global_mem_latency = cfg.global_mem_latency;
             waves[w]->smem_latency = cfg.smem_latency;
             waves[w]->cache = global_cache.get();
+            waves[w]->cu_id = cu_id;
+            waves[w]->waves_per_wg = waves_per_wg;
             waves[w]->trace_file = trace_file;
             waves[w]->trace_wave_id = w;
             waves[w]->trace_wg_flat_id =
@@ -352,6 +424,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                 if (active == 0) break;
 
                 if (all_at_barrier) {
+                    uint64_t max_b_cc = sync_barrier_cycles(waves, ended);
+                    for (uint32_t s = 0; s < NUM_SIMDS; s++) {
+                        simd_cycle[s] = std::max(simd_cycle[s], max_b_cc);
+                    }
                     for (uint32_t w = 0; w < waves_per_wg; w++)
                         at_barrier[w] = false;
                     continue;
@@ -449,6 +525,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     } else {
                         barrier_count++;
                     }
+                }
+
+                if (barrier_count > 0) {
+                    sync_barrier_cycles(waves, ended);
                 }
 
                 if (active_count == 0) {

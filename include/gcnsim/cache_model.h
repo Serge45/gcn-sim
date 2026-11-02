@@ -74,21 +74,24 @@ private:
 class CacheModel {
 public:
     CacheModel() = default;
-    explicit CacheModel(const CacheConfig& cfg);
+    explicit CacheModel(const CacheConfig& cfg, uint32_t num_cus = 1);
 
-    // Probe L1 then L2. Returns the hit level.
-    CacheHitLevel access(uint64_t addr);
+    // Probe per-CU L1 then shared L2 (and L3 if enabled). Returns the hit level.
+    CacheHitLevel access(uint64_t addr, uint32_t cu_id = 0);
 
-    // Stats
-    uint64_t l1_hits()   const { return l1_.hits(); }
-    uint64_t l1_misses() const { return l1_.misses(); }
+    const CacheConfig& config() const { return cfg_; }
+
+    // Stats (L1 stats aggregated across all per-CU L1 instances)
+    uint64_t l1_hits()   const;
+    uint64_t l1_misses() const;
     uint64_t l2_hits()   const { return l2_.hits(); }
     uint64_t l2_misses() const { return l2_.misses(); }
     uint64_t l3_hits()   const { return l3_.hits(); }
     uint64_t l3_misses() const { return l3_.misses(); }
 
 private:
-    CacheLevel l1_;
+    CacheConfig cfg_;
+    std::vector<CacheLevel> l1_per_cu_;
     CacheLevel l2_;
     bool       enable_l3_ = false;
     CacheLevel l3_;

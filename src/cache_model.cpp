@@ -52,18 +52,34 @@ bool CacheLevel::access(uint64_t addr) {
 
 // --- CacheModel ---
 
-CacheModel::CacheModel(const CacheConfig& cfg)
-    : l1_(cfg.l1_size_bytes, cfg.l1_ways, cfg.l1_line_bytes)
+CacheModel::CacheModel(const CacheConfig& cfg, uint32_t num_cus)
+    : cfg_(cfg)
+    , l1_per_cu_(std::max(1u, num_cus), CacheLevel(cfg.l1_size_bytes, cfg.l1_ways, cfg.l1_line_bytes))
     , l2_(cfg.l2_size_bytes, cfg.l2_ways, cfg.l2_line_bytes)
     , enable_l3_(cfg.enable_l3)
     , l3_(cfg.enable_l3 ? cfg.l3_size_bytes : 0, cfg.enable_l3 ? cfg.l3_ways : 1, cfg.enable_l3 ? cfg.l3_line_bytes : 64)
 {}
 
-CacheHitLevel CacheModel::access(uint64_t addr) {
-    if (l1_.access(addr)) return CacheHitLevel::L1;
+CacheHitLevel CacheModel::access(uint64_t addr, uint32_t cu_id) {
+    if (!l1_per_cu_.empty()) {
+        auto& l1 = l1_per_cu_[cu_id % l1_per_cu_.size()];
+        if (l1.access(addr)) return CacheHitLevel::L1;
+    }
     if (l2_.access(addr)) return CacheHitLevel::L2;
     if (enable_l3_ && l3_.access(addr)) return CacheHitLevel::L3;
     return CacheHitLevel::HBM;
+}
+
+uint64_t CacheModel::l1_hits() const {
+    uint64_t total = 0;
+    for (const auto& l1 : l1_per_cu_) total += l1.hits();
+    return total;
+}
+
+uint64_t CacheModel::l1_misses() const {
+    uint64_t total = 0;
+    for (const auto& l1 : l1_per_cu_) total += l1.misses();
+    return total;
 }
 
 } // namespace gcnsim

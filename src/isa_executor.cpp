@@ -709,10 +709,10 @@ static void push_vmem_with_cache(WavefrontState& wave, [[maybe_unused]] const In
         if (!dup) lines[n_lines++] = line;
     }
     // Probe cache for each unique line, take worst-case latency
-    CacheConfig cfg;
+    const CacheConfig& cfg = wave.cache->config();
     uint64_t max_lat = 0;
     for (int i = 0; i < n_lines; i++) {
-        CacheHitLevel level = wave.cache->access(lines[i]);
+        CacheHitLevel level = wave.cache->access(lines[i], wave.cu_id);
         uint64_t lat;
         switch (level) {
         case CacheHitLevel::L1:  lat = cfg.l1_hit_cycles; break;
@@ -977,10 +977,10 @@ static inline uint64_t smem_addr(const WavefrontState& wave, const Instruction& 
 }
 
 // Execute exactly one instruction and return status.
-// Used by CU-level interleaving scheduler.
+// Used by CU-level interleaving scheduler and run_wavefront.
 // Returns ENDED, BARRIER_HIT, or RUNNING (instruction executed, ready for more).
 WaveStatus step_wavefront(WavefrontState& wave) {
-    static constexpr uint64_t MAX_INSNS = 1000000ULL;
+    static constexpr uint64_t MAX_INSNS = 100000000ULL;
     if (wave.pc >= wave.kernel_code_size)
         return WaveStatus::ENDED;
     if (wave.insn_count >= MAX_INSNS)
@@ -990,7 +990,7 @@ WaveStatus step_wavefront(WavefrontState& wave) {
         wave.debug_hook(wave);
     }
 
-    const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
+    const bool trace = (getenv("GCNSIM_TRACE_INSN") != nullptr);
     uint64_t pre_pc = wave.pc;
     Instruction inst = decode(wave.kernel_code_ptr + wave.pc, wave.is_gfx950, wave.is_gfx908);
     wave.pc += inst.size_bytes;
@@ -1091,117 +1091,13 @@ WaveStatus step_wavefront(WavefrontState& wave) {
 // Run one wavefront until s_endpgm or s_barrier, or until max_insns slice is reached.
 // Returns ENDED on s_endpgm/out-of-bounds, BARRIER_HIT on s_barrier, RUNNING if max_insns reached.
 WaveStatus run_wavefront(WavefrontState& wave, uint64_t max_insns) {
-    uint64_t count = 0;
-    const bool trace = (getenv("GCNSIM_TRACE") != nullptr);
-    while (true) {
-        if (wave.pc >= wave.kernel_code_size) {
-            return WaveStatus::ENDED;
-        }
-        if (wave.debug_hook) {
-            wave.debug_hook(wave);
-        }
-        uint64_t pre_pc = wave.pc;
-        Instruction inst = decode(wave.kernel_code_ptr + wave.pc, wave.is_gfx950, wave.is_gfx908);
-        wave.pc += inst.size_bytes;
-        if (trace) {
-            fprintf(stderr, "PC=%#llx enc=%08X exec=%#llx op=%s\n",
-                    (unsigned long long)pre_pc,
-                    inst.encoding[0],
-                    (unsigned long long)wave.exec,
-                    opcode_name(inst.opcode));
-        }
-        if (inst.opcode == Opcode::S_BARRIER) {
-            return WaveStatus::BARRIER_HIT;
-        }
-        if (wave.count_cycles) {
-            if (inst.opcode == Opcode::S_WAITCNT) {
-                constexpr uint64_t WAITCNT_ISSUE = 4;
-                uint64_t before = std::max(wave.cycle_count, wave.pipe_salu_ready);
-                wave.cycle_count = before;
-                wave.pipe_salu_ready = before + WAITCNT_ISSUE;
-                wave.cycle_count += WAITCNT_ISSUE;
-                handle_waitcnt_cycles(wave, inst);
-                uint64_t stall = wave.cycle_count - before - WAITCNT_ISSUE;
-                trace_emit(wave, "SALU", "s_waitcnt", before, WAITCNT_ISSUE, pre_pc);
-                trace_stall(wave, "stall:waitcnt", before + WAITCNT_ISSUE, stall, pre_pc);
-            } else if (inst.format == InstFormat::MFMA) {
-                // MFMA: wait for VALU pipe + miSIMD, then issue + open shadow
-                uint64_t before = std::max({wave.cycle_count, wave.pipe_valu_ready, wave.mfma_busy_until});
-                uint64_t stall_dur = before - wave.cycle_count;
-                if (stall_dur > 0) {
-                    trace_stall(wave, "stall:mfma_busy", wave.cycle_count, stall_dur, pre_pc);
-                    wave.cycle_count = before;
-                }
-                constexpr uint64_t MFMA_ISSUE = 4;
-                uint64_t issue_start = wave.cycle_count;
-                wave.pipe_valu_ready = issue_start + MFMA_ISSUE;
-                wave.cycle_count += MFMA_ISSUE;
-                uint32_t exec = mfma_exec_cycles(inst.opcode);
-                uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
-                wave.mfma_busy_until = wave.cycle_count + shadow;
-                wave.mfma_shadow_remaining = shadow;
-                wave.mfma_total_exec_cycles += exec;
-                trace_emit(wave, "MFMA", opcode_name(inst.opcode), issue_start, exec, pre_pc);
-            } else {
-                // Non-MFMA: multi-pipe scheduling + MFMA shadow
-                uint64_t cost = issue_cycles(wave, inst);
-                uint64_t& pipe_ready = pipe_for(wave, inst);
-                uint64_t start = std::max(wave.cycle_count, pipe_ready);
-                pipe_ready = start + cost;
-                // Consume MFMA shadow for the effective advance
-                uint64_t advance = start + cost - wave.cycle_count;
-                if (advance > 0) {
-                    if (wave.mfma_shadow_remaining >= advance) {
-                        wave.mfma_shadow_remaining -= advance;
-                    } else {
-                        wave.cycle_count += advance - wave.mfma_shadow_remaining;
-                        wave.mfma_shadow_remaining = 0;
-                    }
-                }
-                // Count VALU issue cycles (VOP1/2/3/3P/VOPC)
-                switch (inst.format) {
-                case InstFormat::VOP1: case InstFormat::VOP2: case InstFormat::VOPC:
-                case InstFormat::VOP3A: case InstFormat::VOP3B: case InstFormat::VOP3P:
-                    wave.valu_total_issue_cycles += cost;
-                    break;
-                default: break;
-                }
-                // For VMEM with cache model: collect addresses, probe cache
-                bool vmem_handled = false;
-                if (wave.cache) {
-                    bool is_vmem = (inst.format == InstFormat::MUBUF ||
-                                    inst.format == InstFormat::MTBUF ||
-                                    inst.format == InstFormat::FLAT_GLOBAL ||
-                                    inst.format == InstFormat::FLAT_SCRATCH);
-                    if (is_vmem) {
-                        uint64_t addrs[WAVE_SIZE];
-                        int n = 0;
-                        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-                            if (!((wave.exec >> lane) & 1)) continue;
-                            if (inst.format == InstFormat::MUBUF ||
-                                inst.format == InstFormat::MTBUF) {
-                                auto ma = mubuf_addr(wave, inst, lane);
-                                if (!ma.oob) addrs[n++] = ma.addr;
-                            } else {
-                                addrs[n++] = flat_addr(wave, inst, lane);
-                            }
-                        }
-                        push_vmem_with_cache(wave, inst, addrs, n);
-                        vmem_handled = true;
-                    }
-                }
-                if (!vmem_handled)
-                    push_pending(wave, inst);
-                trace_emit(wave, trace_category(inst), opcode_name(inst.opcode),
-                           start, cost, pre_pc);
-            }
-        }
-        execute_instruction(wave, inst);
-        if (inst.opcode == Opcode::S_ENDPGM) return WaveStatus::ENDED;
-        if (++count >= max_insns) {
-            return WaveStatus::RUNNING;
+    for (uint64_t count = 0; count < max_insns; ++count) {
+        WaveStatus status = step_wavefront(wave);
+        if (status != WaveStatus::RUNNING) {
+            return status;
         }
     }
+    return WaveStatus::RUNNING;
 }
 
 WaveStatus run_wavefront(WavefrontState& wave) {

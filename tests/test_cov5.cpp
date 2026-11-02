@@ -87,6 +87,46 @@ TEST_F(Cov5Test, MemoryFaultCaughtGracefully) {
         << "Expected memory fault message, got: " << err;
 }
 
+TEST_F(Cov5Test, StrictMemoryModeEnforcesBounds) {
+    std::string err;
+    auto mod = gcnsim::load_hsaco(hsaco_path, err);
+    ASSERT_TRUE(mod.has_value());
+    const auto& kernel = mod->kernels[0];
+
+    gcnsim::MemoryManager::Get().SetStrictMode(true);
+
+    int out_val = 0;
+    int a_val = 777;
+    int* p_out = &out_val;
+
+    size_t kernarg_size = 272;
+    std::vector<uint8_t> kernargs(kernarg_size, 0);
+    uint64_t ptr_val = reinterpret_cast<uint64_t>(p_out);
+    std::memcpy(kernargs.data() + 0, &ptr_val, 8);
+    std::memcpy(kernargs.data() + 8, &a_val, 4);
+
+    gcnsim::LaunchConfig cfg{};
+    cfg.grid_x = 1; cfg.grid_y = 1; cfg.grid_z = 1;
+    cfg.block_x = 64; cfg.block_y = 1; cfg.block_z = 1;
+    cfg.kernarg = kernargs.data();
+    cfg.kernarg_size = kernargs.size();
+
+    // 1. Unregistered p_out should fault in strict mode
+    bool ok = gcnsim::launch_kernel(kernel, cfg, err);
+    EXPECT_FALSE(ok) << "Expected unregistered pointer to fault in strict mode";
+    EXPECT_NE(err.find("Out of bounds access"), std::string::npos);
+
+    // 2. Registered p_out should succeed in strict mode (kernarg is auto-registered by launch_kernel)
+    gcnsim::MemoryManager::Get().RegisterRegion(ptr_val, sizeof(int), "test_out");
+    err.clear();
+    ok = gcnsim::launch_kernel(kernel, cfg, err);
+    EXPECT_TRUE(ok) << "Expected registered pointer to succeed in strict mode: " << err;
+    EXPECT_EQ(out_val, 777);
+
+    gcnsim::MemoryManager::Get().UnregisterRegion(ptr_val);
+    gcnsim::MemoryManager::Get().SetStrictMode(false);
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--hsaco" && i + 1 < argc) {
