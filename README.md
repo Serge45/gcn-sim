@@ -2,15 +2,15 @@
 
 ![gcn-sim banner](docs/images/gcn_sim_banner.png)
 
-# gcn-sim: AMD Instinct MI-100, MI-200, MI-300 & MI-350 Architectural GPU Simulator
+# gcn-sim: AMD Instinct MI-100, MI-200, MI-300, MI-350 & Radeon RDNA4 Architectural GPU Simulator
 
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
-[![Target Arch](https://img.shields.io/badge/Arch-CDNA1%20%7C%20CDNA2%20%7C%20CDNA3%20%7C%20CDNA4-red.svg)](https://www.amd.com/en/products/accelerators/instinct.html)
+[![Target Arch](https://img.shields.io/badge/Arch-CDNA1%20%7C%20CDNA2%20%7C%20CDNA3%20%7C%20CDNA4%20%7C%20RDNA4-red.svg)](https://www.amd.com/en/products/accelerators/instinct.html)
 [![ROCm Compatibility](https://img.shields.io/badge/ROCm-6.x%20%2F%207.x%20ABI-green.svg)](https://rocm.docs.amd.com/)
 [![Tests](https://img.shields.io/badge/Tests-100%25%20Passing-brightgreen.svg)]()
 [![No GPU Required](https://img.shields.io/badge/Hardware-100%25%20CPU%20Standalone-orange.svg)]()
 
-**A high-fidelity instruction-level and microarchitectural simulator for AMD Instinct MI100 / MI200 / MI300 / MI350 (CDNA1 / CDNA2 / CDNA3 / CDNA4: `gfx908`, `gfx90a`, `gfx940`, `gfx942`, `gfx950`) GPUs.**  
+**A high-fidelity instruction-level and microarchitectural simulator for AMD Instinct MI100 / MI200 / MI300 / MI350 (CDNA1 / CDNA2 / CDNA3 / CDNA4: `gfx908`, `gfx90a`, `gfx940`, `gfx942`, `gfx950`) and Radeon RX 9070 XT (RDNA4: `gfx1201`, `gfx1200`) GPUs.**  
 Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **zero GPU hardware and zero kernel drivers required**.
 
 </div>
@@ -22,8 +22,9 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 - 🚀 **Zero-Recompile Drop-in Replacement (`libamdhip64.so.6`)**:
   - Run production HIP programs (PyTorch kernels, Tensile GEMMs, official ROCm Cookbook samples) simply by setting `LD_LIBRARY_PATH=./build`.
   - Supports Clang Offload Bundles (`__CLANG_OFFLOAD_BUNDLE__`), Fat Binaries, Dynamic Code Objects (COV3–COV6), and ROCm 6.x Symbol Versioning (`hipGetDevicePropertiesR0600@@hip_6.0`).
-- ⚡ **Authentic CDNA2, CDNA3 & CDNA4 Matrix Core (MFMA) Engine**:
+- ⚡ **Authentic CDNA & RDNA4 Matrix Core (MFMA / WMMA) Engine**:
   - Full hardware outer-product math emulation for FP32, FP16, BF16, and INT8 with 64-register ACCVGPR matrix accumulation.
+  - **RDNA4 (`gfx1201`) Wave32 & WMMA v2 Engine**: Native support for Radeon RX 9070 XT Navi 48 (32 WGPs / 64 CUs, Boost Clock 2.97 GHz), Wave32 execution (`warpSize = 32`), GFX12 instruction set, 96-bit VBUFFER/VGLOBAL/VOP3, VOPD (`v_dual_*`) dual-issue execution, and full hardware WMMA v2 emulation (`v_wmma_f32_16x16x16_f16`, `bf16`, `f16`, `iu8`, `iu4`, `fp8_fp8`, `fp8_bf8`, `bf8_fp8`, `bf8_bf8`). Runs official `/opt/rocm/lib/hipblaslt/library/*gfx1201*` GEMM kernels seamlessly.
   - **CDNA4 (`gfx950`) AI Matrix Instructions**: OCP Microscaling `v_mfma_scale_f32` (FP4 E2M1, FP6, FP8 with Block Scale Factors), double-rate FP16 MFMA (`16x16x32`, `32x32x16`), and hardware `v_prng_b32` stochastic rounding generator.
   - **CDNA3 (`gfx942`) New Matrix Instructions**: Native support for OCP FP8 (E4M3 and E5M2 mixed/pure), XF32 (TensorFloat-32 19-bit), and double-rate INT8 (`16x16x32i8`, `32x32x16i8`).
   - **Unified 512-VGPR Register File**: Dynamic `.amdhsa_accum_offset` remapping for CDNA3/CDNA4 unified register addressing without redundant register-file copies.
@@ -38,7 +39,7 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 - 🛠️ **GDB/MI-Compatible Interactive Debugger (`gcndb`)**:
   - Step through raw GCN assembly instructions, place hardware breakpoints, inspect 64-lane EXEC masks, VGPRs, SGPRs, and memory directly in terminal or via GUI debuggers like CGDB and Visual Studio Code.
 - 🖧 **Multi-Architecture Hardware Abstraction**:
-  - Models AMD Instinct MI100 (120 CUs, 32 GB HBM2, 8 MB L2), MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD), MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s), and MI350X 8-XCD (256 CUs, 288 GB HBM3e, 160 KB LDS, 8 TB/s) topologies.
+  - Models AMD Instinct MI100 (120 CUs, 32 GB HBM2, 8 MB L2), MI250X dual-GCD (110 CUs, 64 GB HBM2e per GCD), MI300X 8-XCD (304 CUs, 192 GB HBM3, 256 MB Infinity Cache, 5.3 TB/s), MI350X 8-XCD (256 CUs, 288 GB HBM3e, 160 KB LDS, 8 TB/s), and AMD Radeon RX 9070 XT RDNA4 (32 WGPs / 64 CUs, 64 MB Infinity Cache, 2.97 GHz Boost Clock) topologies.
 
 ---
 
@@ -486,15 +487,19 @@ ctest --test-dir build -V
 ./build/tests/test_hip_runtime
 ./build/tests/test_hip_symbols
 ./build/tests/test_cdna4_gemm --hsaco build/tools/cdna4_gemm/cdna4_gemm.co
+./build/tests/test_rdna4_gfx1201
 
 # Run the real ROCm/hipcc compiled application through the hijack library
 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
+
+# Run official hipBLASLt GEMM benchmark on RDNA4 (gfx1201) or CDNA (gfx90a/gfx942/gfx950)
+GCN_SIM_ARCH=gfx1201 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/hipblaslt_gemm_bench 128 128 128
 
 # Run end-to-end GDB/MI integration tests
 python3 tests/test_mi_flow.py
 ```
 
-Expected output: **158 tests pass across 18 suites**.
+Expected output: **164 tests pass across 19 suites**.
 
 | Test suite | Count | What it covers |
 |---|---|---|
@@ -513,9 +518,10 @@ Expected output: **158 tests pass across 18 suites**.
 | `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
 | `test_debugger` | 7 | GDB/MI protocol parser, DWARF line-to-PC mapping, debugger expressions |
 | `test_cov5` | 2 | Code Object Version 5 and memory fault handling |
-| `test_hip_runtime` | 11 | Extended HIP runtime APIs (peer access, streams, device properties MI100/200/300/350) |
+| `test_hip_runtime` | 11 | Extended HIP runtime APIs (peer access, streams, device properties MI100/200/300/350/RDNA4) |
 | `test_hip_symbols` | 2 | `__hipRegisterVar`, symbols, and `hipModuleLoadData` in-memory loading |
 | `test_cdna4_gemm` | 2 | AMD Instinct MI-350 / CDNA4 / GFX950 hardware kernel loading and execution |
+| `test_rdna4_gfx1201` | 6 | AMD Radeon RX 9070 XT / RDNA4 Wave32 state, VOPD dual-issue, and WMMA v2 GEMM |
 
 ---
 
@@ -699,6 +705,10 @@ All CDNA2 (`gfx90a`), CDNA3 (`gfx942`), and CDNA4 (`gfx950`) MFMA shapes with co
 - **CDNA3 INT8 (Double-Rate)**: `v_mfma_i32_16x16x32i8`, `v_mfma_i32_32x32x16i8`
 - **CDNA3 XF32 (TensorFloat-32)**: `v_mfma_f32_16x16x8_xf32`, `v_mfma_f32_32x32x4_xf32`
 - **CDNA3 FP8 / BF8 (OCP E4M3 / E5M2)**: `v_mfma_f32_16x16x32_fp8_fp8`, `v_mfma_f32_16x16x32_bf8_bf8`, `v_mfma_f32_16x16x32_fp8_bf8`, `v_mfma_f32_16x16x32_bf8_fp8`, and their `32x32x16` counterparts
+- **RDNA4 WMMA (Wave Matrix Multiply-Accumulate)**:
+  - FP16 / BF16: `v_wmma_f32_16x16x16_f16`, `v_wmma_f32_16x16x16_bf16`, `v_wmma_f16_16x16x16_f16`, `v_wmma_bf16_16x16x16_bf16`
+  - INT8 / INT4: `v_wmma_i32_16x16x16_iu8`, `v_wmma_i32_16x16x16_iu4`
+  - FP8 / BF8: `v_wmma_f32_16x16x16_fp8_fp8`, `v_wmma_f32_16x16x16_fp8_bf8`, `v_wmma_f32_16x16x16_bf8_fp8`, `v_wmma_f32_16x16x16_bf8_bf8`
 - **F64**: `v_mfma_f64_4x4x4f64`, `v_mfma_f64_16x16x4f64`
 
 ---
@@ -720,8 +730,9 @@ All CDNA2 (`gfx90a`), CDNA3 (`gfx942`), and CDNA4 (`gfx950`) MFMA shapes with co
 
 The following features were previously listed as future development targets and are now fully implemented and verified in the test suite:
 
-- [x] **Multi-Architecture Expansion (CDNA1 / CDNA2 / CDNA3 / CDNA4)**: Full hardware support for AMD Instinct MI-100 (`gfx908`), MI-200 (`gfx90a`), MI-300 (`gfx942`), and MI-350 (`gfx950`), including topology-aware CU scheduling, CDNA3/4 unified 512-VGPR register allocation (`.amdhsa_accum_offset`), 160 KB LDS, and all new MFMA matrix shapes (FP4 microscaling, FP8, BF8, XF32, double-rate FP16/INT8).
-- [x] **Multi-Tile & Multi-Workgroup GEMM Validation**: Multi-workgroup and multi-tile execution verified with AMD Tensile, rocBLAS, and `amdgpu-arch-gemm` kernels with correct inter-workgroup synchronization.
+- [x] **Multi-Architecture Expansion (CDNA1 / CDNA2 / CDNA3 / CDNA4 & RDNA4)**: Full hardware support for AMD Instinct MI-100 (`gfx908`), MI-200 (`gfx90a`), MI-300 (`gfx942`), MI-350 (`gfx950`), and AMD Radeon RX 9070 XT (`gfx1201`), including topology-aware CU scheduling, CDNA3/4 unified 512-VGPR register allocation (`.amdhsa_accum_offset`), 160 KB LDS, all CDNA MFMA shapes (FP4 microscaling, FP8, BF8, XF32, double-rate FP16/INT8), and RDNA4 Wave32 WMMA v2 matrix instructions.
+- [x] **RDNA4 GFX12 ISA & VOPD Dual-Issue Execution Engine**: Complete support for GFX12 instruction set, 96-bit VBUFFER/VGLOBAL/VOP3, Wave32 lane masks, VOPD dual-issue simultaneous register semantics, and fine-grained `s_wait_*` memory queues.
+- [x] **Multi-Tile & Multi-Workgroup GEMM Validation**: Multi-workgroup and multi-tile execution verified with AMD Tensile, rocBLAS, hipBLASLt (`gfx1201` & `gfx90a`), and `amdgpu-arch-gemm` kernels with correct inter-workgroup synchronization.
 - [x] **Code Object V2 / V3 / V4 / V5 / V6 Support**: End-to-end ELF and MsgPack metadata extraction across legacy and modern ROCm ABI versions (`ROCm 4.x` through `ROCm 7.x`).
 - [x] **Asynchronous Memory Scoreboarding (`s_waitcnt`)**: In-flight memory tracker accurately modeling VMCNT / LGKMCNT counter decrements, barrier stalls, and memory hazard delays.
 - [x] **3-Level Cache & Microarchitectural Hierarchy**: Per-CU vL1D cache, shared L2 cache, 256 MB CDNA3 Infinity Cache (L3), and HBM2/HBM2e/HBM3 latency and set-associative LRU eviction modeling.
