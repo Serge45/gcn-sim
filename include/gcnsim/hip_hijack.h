@@ -21,6 +21,12 @@ inline bool is_hijack_verbose() {
 }
 
 inline std::string canonical_isa_arch(const std::string& raw_arch) {
+    if (raw_arch.find("gfx1201") != std::string::npos || raw_arch.find("rdna4") != std::string::npos || raw_arch.find("9070") != std::string::npos) {
+        return "gfx1201";
+    }
+    if (raw_arch.find("gfx1200") != std::string::npos || raw_arch.find("9060") != std::string::npos) {
+        return "gfx1200";
+    }
     if (raw_arch.find("gfx950") != std::string::npos || raw_arch.find("mi350") != std::string::npos || raw_arch.find("mi355") != std::string::npos) {
         return "gfx950";
     }

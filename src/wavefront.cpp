@@ -23,6 +23,9 @@ void init_wavefront(WavefrontState& wave,
     memset((void*)&wave, 0, offsetof(WavefrontState, lgkm_pending));
     wave.lgkm_pending.clear();
     wave.vm_pending.clear();
+    wave.store_pending.clear();
+    wave.ds_pending.clear();
+    wave.km_pending.clear();
     wave.kernarg_ptr     = kernarg_ptr;
     wave.kernel_code_ptr = code_ptr;
     wave.kernel_code_size = code_size;
@@ -30,7 +33,8 @@ void init_wavefront(WavefrontState& wave,
     wave.workgroup_id[1] = wg_id_y;
     wave.workgroup_id[2] = wg_id_z;
     wave.pc = 0;
-    if (kd.compute_pgm_rsrc3 != 0) {
+    wave.wave_size = (kd.kernel_code_properties & KCP_ENABLE_WAVEFRONT_SIZE32) ? 32 : 64;
+    if (kd.compute_pgm_rsrc3 != 0 && wave.wave_size == 64) {
         wave.accum_offset = ((kd.compute_pgm_rsrc3 & 0x3F) + 1) * 4;
     }
     // lds_ptr and lds_size are set by the execution engine per workgroup
@@ -40,47 +44,53 @@ void init_wavefront(WavefrontState& wave,
     // -----------------------------------------------------------------------
     // EXEC mask — active lanes
     // -----------------------------------------------------------------------
-    uint32_t first_lane    = wave_in_wg * WAVE_SIZE;
+    uint32_t wsize         = wave.wave_size;
+    uint32_t first_lane    = wave_in_wg * wsize;
     uint32_t total_threads = block_x * block_y * block_z;
     uint32_t active_lanes;
     if (first_lane >= total_threads) {
         active_lanes = 0;
     } else {
-        active_lanes = std::min((uint32_t)WAVE_SIZE, total_threads - first_lane);
+        active_lanes = std::min(wsize, total_threads - first_lane);
     }
-    wave.exec = (active_lanes == 64) ? ~0ULL : ((1ULL << active_lanes) - 1);
+    wave.exec = (active_lanes == 64) ? ~0ULL : ((active_lanes == 0) ? 0ULL : ((1ULL << active_lanes) - 1));
 
     // -----------------------------------------------------------------------
     // Per-lane workitem IDs
     // -----------------------------------------------------------------------
-    for (uint32_t lane = 0; lane < (uint32_t)WAVE_SIZE; lane++) {
+    for (uint32_t lane = 0; lane < wsize; lane++) {
         uint32_t flat_id = first_lane + lane;
         wave.workitem_id[lane][0] = flat_id % block_x;
         wave.workitem_id[lane][1] = (flat_id / block_x) % block_y;
         wave.workitem_id[lane][2] = flat_id / (block_x * block_y);
     }
 
-    // VGPR0 = packed work-item IDs (GFX90A / FeaturePackedTID):
+    // VGPR0 = packed work-item IDs (GFX90A+ / RDNA4 FeaturePackedTID):
     //   Bits [9:0]   = workitem_id.x (always initialized)
-    //   Bits [19:10] = workitem_id.y (if enable_vgpr_workitem_id >= 1)
-    //   Bits [29:20] = workitem_id.z (if enable_vgpr_workitem_id >= 2)
+    //   Bits [19:10] = workitem_id.y (if enable_vgpr_workitem_id >= 1 or multi-dim block)
+    //   Bits [29:20] = workitem_id.z (if enable_vgpr_workitem_id >= 2 or multi-dim block)
     uint32_t enable_vgpr_workitem_id = (kd.compute_pgm_rsrc2 >> 11) & 0x3;
-    for (int lane = 0; lane < WAVE_SIZE; lane++) {
+    for (uint32_t lane = 0; lane < wsize; lane++) {
         uint32_t tid_x = wave.workitem_id[lane][0] & 0x3ff;
-        uint32_t tid_y = (enable_vgpr_workitem_id >= 1) ? (wave.workitem_id[lane][1] & 0x3ff) : 0;
-        uint32_t tid_z = (enable_vgpr_workitem_id >= 2) ? (wave.workitem_id[lane][2] & 0x3ff) : 0;
+        uint32_t tid_y = (enable_vgpr_workitem_id >= 1 || wsize == 32) ? (wave.workitem_id[lane][1] & 0x3ff) : 0;
+        uint32_t tid_z = (enable_vgpr_workitem_id >= 2 || wsize == 32) ? (wave.workitem_id[lane][2] & 0x3ff) : 0;
         wave.vgpr[0][lane] = tid_x | (tid_y << 10) | (tid_z << 20);
     }
 
     // VGPR1 = workitem_id.y, VGPR2 = workitem_id.z (for unpacked ABI compatibility)
     if (enable_vgpr_workitem_id >= 1) {
-        for (int lane = 0; lane < WAVE_SIZE; lane++)
+        for (uint32_t lane = 0; lane < wsize; lane++)
             wave.vgpr[1][lane] = wave.workitem_id[lane][1];
     }
     if (enable_vgpr_workitem_id >= 2) {
-        for (int lane = 0; lane < WAVE_SIZE; lane++)
+        for (uint32_t lane = 0; lane < wsize; lane++)
             wave.vgpr[2][lane] = wave.workitem_id[lane][2];
     }
+
+    // Initialize GFX12 architected ttmp registers (ttmp7 = wg_y | (wg_z << 16), ttmp8 = wave_in_wg, ttmp9 = wg_x)
+    wave.sgpr[TTMP_BASE_IDX + 7] = (wg_id_y & 0xFFFFu) | ((wg_id_z & 0xFFFFu) << 16);
+    wave.sgpr[TTMP_BASE_IDX + 8] = (wave_in_wg & 0x1Fu) << 25;
+    wave.sgpr[TTMP_BASE_IDX + 9] = wg_id_x;
 
     // -----------------------------------------------------------------------
     // SGPR initialization based on kernel_code_properties and compute_pgm_rsrc2

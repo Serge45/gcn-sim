@@ -10,11 +10,12 @@ namespace gcnsim { class CacheModel; }
 namespace gcnsim {
 
 static constexpr int WAVE_SIZE     = 64;
-static constexpr int NUM_SGPR      = 108;
+static constexpr int NUM_SGPR      = 124;   // 0..105=SGPR, 106..107=VCC, 108..123=ttmp0..15
 static constexpr int NUM_VGPR      = 512;
 static constexpr int NUM_AGPR      = 256;
 static constexpr int VCC_LO_IDX    = 106;   // sgpr[106] = VCC_LO
 static constexpr int VCC_HI_IDX    = 107;   // sgpr[107] = VCC_HI
+static constexpr int TTMP_BASE_IDX = 108;   // sgpr[108..123] = ttmp0..ttmp15
 
 enum class WaveStatus {
     ENDED,       // s_endpgm or out-of-bounds
@@ -78,14 +79,19 @@ struct WavefrontState {
     // Step-mode instruction counter (safety limit for CU interleaving)
     uint64_t insn_count = 0;
     uint32_t accum_offset = 0;              // GFX942: dynamic AGPR base in VGPR pool
+    uint32_t wave_size    = 64;             // 64 for CDNA/Wave64, 32 for RDNA4/Wave32
     bool     is_gfx908 = false;             // true if target is CDNA1 / gfx908
     bool     is_gfx942 = false;             // true if target is CDNA3 / gfx942
     bool     is_gfx950 = false;             // true if target is CDNA4 / gfx950
+    bool     is_gfx1201 = false;            // true if target is RDNA4 / gfx1201
     uint32_t mfma_scale_a[WAVE_SIZE] = {0}; // CDNA4: scale A factors from v_mfma_ld_scale_b32
     uint32_t mfma_scale_b[WAVE_SIZE] = {0}; // CDNA4: scale B factors from v_mfma_ld_scale_b32
-    // In-flight memory op queues (completion timestamps, drained by s_waitcnt)
-    std::vector<uint64_t> lgkm_pending;  // DS reads/writes and SMEM loads
-    std::vector<uint64_t> vm_pending;    // MUBUF/MTBUF/FLAT/GLOBAL loads/stores
+    // In-flight memory op queues (completion timestamps, drained by s_waitcnt / s_wait_*)
+    std::vector<uint64_t> lgkm_pending;   // DS reads/writes and SMEM loads (GFX9)
+    std::vector<uint64_t> vm_pending;     // MUBUF/MTBUF/FLAT/GLOBAL loads/stores (GFX9) & loadcnt (GFX12)
+    std::vector<uint64_t> store_pending;  // VMEM/FLAT/GLOBAL stores (GFX12 s_wait_storecnt)
+    std::vector<uint64_t> ds_pending;     // DS loads/stores (GFX12 s_wait_dscnt)
+    std::vector<uint64_t> km_pending;     // SMEM loads (GFX12 s_wait_kmcnt)
 
     // Debug hook — if non-null, called at the start of every instruction execution (before decode/execution)
     std::function<void(WavefrontState& wave)> debug_hook = nullptr;

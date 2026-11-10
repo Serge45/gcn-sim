@@ -115,6 +115,9 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     } else if (mach == 0x4F) {
         mod.arch = TargetArch::GFX950;
         mod.is_gfx950 = true;
+    } else if (mach == 0x4E || mach == 0x48 || mach == 0x44) {
+        mod.arch = TargetArch::GFX1201;
+        mod.is_gfx1201 = true;
     } else {
         mod.arch = TargetArch::GFX90A;
     }
@@ -298,7 +301,15 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
             ki.is_gfx908  = mod.is_gfx908;
             ki.is_gfx942  = mod.is_gfx942;
             ki.is_gfx950  = mod.is_gfx950;
-            if (kd && kd->compute_pgm_rsrc3 != 0) {
+            ki.is_gfx1201 = mod.is_gfx1201;
+            if (kd && (kd->kernel_code_properties & KCP_ENABLE_WAVEFRONT_SIZE32)) {
+                ki.wavefront_size = 32;
+            } else if (mod.is_gfx1201) {
+                ki.wavefront_size = 32;
+            } else {
+                ki.wavefront_size = 64;
+            }
+            if (kd && kd->compute_pgm_rsrc3 != 0 && !mod.is_gfx1201) {
                 ki.accum_offset = ((kd->compute_pgm_rsrc3 & 0x3F) + 1) * 4;
             }
 

@@ -8,10 +8,11 @@
 namespace gcnsim {
 
 enum class TargetArch {
-    GFX908, // CDNA1 (MI-100)
-    GFX90A, // CDNA2 (MI-200)
-    GFX942, // CDNA3 (MI-300)
-    GFX950, // CDNA4 (MI-350)
+    GFX908,  // CDNA1 (MI-100)
+    GFX90A,  // CDNA2 (MI-200)
+    GFX942,  // CDNA3 (MI-300)
+    GFX950,  // CDNA4 (MI-350)
+    GFX1201, // RDNA4 (Radeon RX 9070 XT / Navi 48, 32 WGPs)
 };
 
 struct KernelArgInfo {
@@ -33,21 +34,24 @@ struct KernelInfo {
     size_t                  hsaco_size = 0;       // total size of HSACO ELF
     uint32_t                accum_offset = 0;     // AGPR offset in unified VGPRs (from .amdhsa_accum_offset)
     uint32_t                elf_flags = 0;        // ELF e_flags
+    uint32_t                wavefront_size = 64;  // 32 (RDNA4 Wave32) or 64 (CDNA / Wave64)
     TargetArch              arch = TargetArch::GFX90A;
     bool                    is_gfx908 = false;    // true if GFX908/CDNA1
     bool                    is_gfx942 = false;    // true if GFX942/CDNA3
     bool                    is_gfx950 = false;    // true if GFX950/CDNA4
+    bool                    is_gfx1201 = false;   // true if GFX1200/GFX1201/RDNA4
 };
 
 struct HsacoModule {
     std::vector<uint8_t>  elf_data;
     std::vector<KernelInfo> kernels;
-    int cov_version;   // 3=COV3, 4=COV4, 5=COV5
+    int cov_version;   // 3=COV3, 4=COV4, 5=COV5, 6=COV6
     uint32_t elf_flags = 0;
     TargetArch arch = TargetArch::GFX90A;
     bool     is_gfx908 = false;
     bool     is_gfx942 = false;
     bool     is_gfx950 = false;
+    bool     is_gfx1201 = false;
 };
 
 // Load an HSACO ELF file. Returns nullopt on error (sets error_msg).

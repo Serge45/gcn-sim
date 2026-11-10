@@ -314,6 +314,9 @@ struct ArchClockSpec {
 };
 
 static ArchClockSpec get_arch_clock_spec(const std::string& arch) {
+    if (arch.find("gfx1201") != std::string::npos || arch.find("rdna4") != std::string::npos || arch.find("9070") != std::string::npos || arch.find("gfx1200") != std::string::npos) {
+        return { 2970000, 2400000 }; // Radeon RX 9070 XT (Navi 48 XT): 2.97 GHz Boost, 2.40 GHz Game/Base
+    }
     if (arch.find("gfx950") != std::string::npos || arch.find("mi350") != std::string::npos || arch.find("mi355") != std::string::npos) {
         return { 2100000, 1650000 }; // MI350X: 2.1 GHz Boost, 1.65 GHz Base
     }
@@ -641,11 +644,25 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
 
     std::memset(prop, 0, sizeof(*prop));
     const char* env_arch = std::getenv("GCN_SIM_ARCH");
+    bool is_gfx1201 = (env_arch && (std::string(env_arch) == "gfx1201" || std::string(env_arch) == "rdna4" || std::string(env_arch) == "rx9070xt" || std::string(env_arch) == "gfx1200"));
     bool is_gfx950 = (env_arch && (std::string(env_arch) == "gfx950" || std::string(env_arch) == "mi350" || std::string(env_arch) == "mi350x" || std::string(env_arch) == "mi355" || std::string(env_arch) == "mi355x"));
     bool is_gfx942 = (env_arch && (std::string(env_arch) == "gfx942" || std::string(env_arch) == "mi300" || std::string(env_arch) == "mi300x"));
     bool is_gfx908 = (env_arch && (std::string(env_arch) == "gfx908" || std::string(env_arch) == "mi100"));
 
-    if (is_gfx950) {
+    if (is_gfx1201) {
+        std::snprintf(prop->name, sizeof(prop->name), "AMD Radeon RX 9070 XT (RDNA4)");
+        std::strncpy(prop->gcnArchName, "gfx1201", sizeof(prop->gcnArchName) - 1);
+        prop->totalGlobalMem = 16ULL * 1024 * 1024 * 1024; // 16 GB GDDR6
+        prop->clockRate = resolve_device_clock_khz("gfx1201");
+        prop->memoryClockRate = 2500000; // 20 Gbps GDDR6 (2.5 GHz WCK)
+        prop->multiProcessorCount = 32;  // 32 WGPs (64 CUs)
+        prop->l2CacheSize = 8 * 1024 * 1024; // 8 MB L2 (+ 64 MB Infinity Cache)
+        prop->memoryBusWidth = 256;      // 256-bit GDDR6
+        prop->major = 12;
+        prop->minor = 0;
+        prop->sharedMemPerBlock = 65536; // 64 KB per workgroup
+        prop->maxSharedMemoryPerMultiProcessor = 131072; // 128 KB per WGP
+    } else if (is_gfx950) {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI350X");
         std::strncpy(prop->gcnArchName, "gfx950:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 288ULL * 1024 * 1024 * 1024; // 288 GB HBM3e
@@ -712,7 +729,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->maxSharedMemoryPerMultiProcessor = 65536;
     }
     prop->regsPerBlock = 65536;
-    prop->warpSize = 64;
+    prop->warpSize = is_gfx1201 ? 32 : 64;
     prop->maxThreadsPerBlock = 1024;
     prop->maxThreadsDim[0] = 1024;
     prop->maxThreadsDim[1] = 1024;

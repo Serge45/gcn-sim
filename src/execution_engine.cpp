@@ -73,7 +73,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t wg_count_z = (grid_z + block_z - 1) / block_z;
 
     uint32_t threads_per_wg = block_x * block_y * block_z;
-    uint32_t waves_per_wg   = (threads_per_wg + WAVE_SIZE - 1) / WAVE_SIZE;
+    uint32_t wave_sz = kernel.wavefront_size ? kernel.wavefront_size : WAVE_SIZE;
+    if (kernel.is_gfx1201) wave_sz = 32;
+    uint32_t waves_per_wg   = (threads_per_wg + wave_sz - 1) / wave_sz;
 
     // Build a mutable kernarg copy so we can fill in hidden args.
     size_t kernarg_size = kernel.descriptor ? kernel.descriptor->kernarg_size : cfg.kernarg_size;
@@ -133,10 +135,11 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         if (kernel.is_gfx950) num_cus = 256;
         else if (kernel.is_gfx942) num_cus = 304;
         else if (kernel.is_gfx908) num_cus = 120;
+        else if (kernel.is_gfx1201) num_cus = 32; // 32 WGPs (64 CUs) on Radeon RX 9070 XT
         else num_cus = 104;
     }
 
-    // Create cache model (per-CU L1, shared L2, L3 Infinity Cache on CDNA3/CDNA4)
+    // Create cache model (per-CU L1, shared L2, L3 Infinity Cache on CDNA3/CDNA4/RDNA4)
     std::unique_ptr<CacheModel> global_cache;
     if (cfg.enable_cycle_counting) {
         CacheConfig ccfg;
@@ -146,6 +149,12 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             ccfg.enable_l3 = true;
             ccfg.l3_size_bytes = 256 * 1024 * 1024; // 256 MB Infinity Cache
             ccfg.l3_hit_cycles = 180;
+        } else if (kernel.is_gfx1201) {
+            ccfg.l1_size_bytes = 32768; // 32 KB L0/L1 per WGP
+            ccfg.l2_size_bytes = 8 * 1024 * 1024; // 8 MB L2
+            ccfg.enable_l3 = true;
+            ccfg.l3_size_bytes = 64 * 1024 * 1024; // 64 MB 3rd-Gen Infinity Cache
+            ccfg.l3_hit_cycles = 160;
         } else if (kernel.is_gfx908) {
             ccfg.l1_size_bytes = 16384; // 16 KB per CU
             ccfg.l2_size_bytes = 8 * 1024 * 1024; // 8 MB L2
@@ -159,7 +168,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
 
     // Determine scratch (private) size per lane from kernel descriptor
     uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
-    uint32_t scratch_per_wave = scratch_per_lane * WAVE_SIZE;
+    uint32_t scratch_per_wave = scratch_per_lane * wave_sz;
 
     std::vector<uint64_t> cu_wall_cycles(num_cus, 0);
     uint32_t current_wg = 0;
@@ -239,6 +248,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     awg.waves[w]->is_gfx908 = kernel.is_gfx908;
                     awg.waves[w]->is_gfx942 = kernel.is_gfx942;
                     awg.waves[w]->is_gfx950 = kernel.is_gfx950;
+                    awg.waves[w]->is_gfx1201 = kernel.is_gfx1201;
+                    awg.waves[w]->wave_size = wave_sz;
                     awg.waves[w]->accum_offset = kernel.accum_offset;
 
                     awg.scratch_bufs[w].resize(scratch_per_wave, 0);
@@ -377,6 +388,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->is_gfx908 = kernel.is_gfx908;
             waves[w]->is_gfx942 = kernel.is_gfx942;
             waves[w]->is_gfx950 = kernel.is_gfx950;
+            waves[w]->is_gfx1201 = kernel.is_gfx1201;
+            waves[w]->wave_size = wave_sz;
             waves[w]->accum_offset = kernel.accum_offset;
 
             scratch_bufs[w].resize(scratch_per_wave, 0);

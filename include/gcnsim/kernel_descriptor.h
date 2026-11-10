@@ -28,6 +28,7 @@ static constexpr uint16_t KCP_ENABLE_SGPR_KERNARG_SEGMENT_PTR       = (1 << 3); 
 static constexpr uint16_t KCP_ENABLE_SGPR_DISPATCH_ID               = (1 << 4);  // 2 SGPRs
 static constexpr uint16_t KCP_ENABLE_SGPR_FLAT_SCRATCH_INIT         = (1 << 5);  // 2 SGPRs
 static constexpr uint16_t KCP_ENABLE_SGPR_PRIVATE_SEGMENT_SIZE      = (1 << 6);  // 1 SGPR
+static constexpr uint16_t KCP_ENABLE_WAVEFRONT_SIZE32               = (1 << 10); // Wave32 mode (RDNA)
 
 // compute_pgm_rsrc2 bits
 static constexpr uint32_t RSRC2_ENABLE_SGPR_WORKGROUP_ID_X          = (1 << 7);
