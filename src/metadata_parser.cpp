@@ -317,24 +317,30 @@ std::vector<KernelArgInfo> parse_metadata_note(const uint8_t* note_data, size_t 
 
         // Read name (padded to 4 bytes)
         std::string note_name;
-        if (namesz > 0 && pos + namesz <= note_size) {
+        if (namesz > 0 && namesz <= note_size - pos) {
             note_name = std::string(reinterpret_cast<const char*>(note_data + pos),
-                                    namesz > 0 ? namesz - 1 : 0); // strip null terminator
+                                    namesz - 1); // strip null terminator
         }
-        size_t name_padded = (namesz + 3) & ~3u;
+        size_t name_padded = (static_cast<size_t>(namesz) + 3u) & ~size_t(3);
+        if (name_padded > note_size - pos) break;
         pos += name_padded;
 
         // Read descriptor
         const uint8_t* desc_ptr = nullptr;
-        if (descsz > 0 && pos + descsz <= note_size) {
+        if (descsz > 0 && descsz <= note_size - pos) {
             desc_ptr = note_data + pos;
         }
-        size_t desc_padded = (descsz + 3) & ~3u;
-        pos += desc_padded;
+        size_t desc_padded = (static_cast<size_t>(descsz) + 3u) & ~size_t(3);
+        if (desc_padded > note_size - pos) {
+            // Last note might not have trailing padding; still allow desc_ptr if it fit
+            pos = note_size;
+        } else {
+            pos += desc_padded;
+        }
 
         // Check for AMDGPU metadata note
         // Name = "AMDGPU", type = 32 (NT_AMDGPU_METADATA)
-        if (type == NT_AMDGPU_METADATA && desc_ptr && descsz > 0) {
+        if (note_name == "AMDGPU" && type == NT_AMDGPU_METADATA && desc_ptr && descsz > 0) {
             // This is MsgPack metadata
             return parse_kernel_args_from_msgpack(desc_ptr, descsz, kernel_name);
         }

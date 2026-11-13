@@ -78,9 +78,10 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     uint32_t waves_per_wg   = (threads_per_wg + wave_sz - 1) / wave_sz;
 
     // Build a mutable kernarg copy so we can fill in hidden args.
+    // Pad by 64 bytes so wide SMEM loads (s_load_dwordx4/x8/x16) near the tail don't OOB.
     size_t kernarg_size = kernel.descriptor ? kernel.descriptor->kernarg_size : cfg.kernarg_size;
     if (kernarg_size == 0) kernarg_size = cfg.kernarg_size;
-    std::vector<uint8_t> kernarg_buf(kernarg_size, 0);
+    std::vector<uint8_t> kernarg_buf(kernarg_size + 64, 0);
     if (cfg.kernarg && cfg.kernarg_size > 0) {
         size_t copy_sz = std::min(cfg.kernarg_size, kernarg_size);
         memcpy(kernarg_buf.data(), cfg.kernarg, copy_sz);
@@ -523,33 +524,35 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         } else {
             // ≤4 waves (1 per SIMD): run each wave with run_wavefront() (fast path).
             // SIMDs run in parallel; CU wall-clock = max(wave cycle_counts).
-            bool any_active = true;
-            while (any_active) {
-                uint32_t barrier_count = 0;
+            std::vector<bool> at_barrier(waves_per_wg, false);
+            for (;;) {
                 uint32_t active_count  = 0;
+                uint32_t barrier_count = 0;
 
                 for (uint32_t w = 0; w < waves_per_wg; w++) {
                     if (ended[w]) continue;
                     active_count++;
+                    if (at_barrier[w]) {
+                        barrier_count++;
+                        continue;
+                    }
 
                     WaveStatus status = run_wavefront(*waves[w]);
                     if (status == WaveStatus::ENDED) {
                         ended[w] = true;
-                    } else {
+                    } else if (status == WaveStatus::BARRIER_HIT) {
+                        at_barrier[w] = true;
                         barrier_count++;
                     }
+                    // WaveStatus::RUNNING (hit max_insns quantum) continues on next iteration
                 }
 
-                if (barrier_count > 0) {
+                if (active_count == 0) break;
+
+                if (barrier_count > 0 && barrier_count == active_count) {
                     sync_barrier_cycles(waves, ended);
-                }
-
-                if (active_count == 0) {
-                    any_active = false;
-                } else if (barrier_count == 0) {
-                    any_active = false;
                     for (uint32_t w = 0; w < waves_per_wg; w++) {
-                        if (!ended[w]) { any_active = true; break; }
+                        at_barrier[w] = false;
                     }
                 }
             }

@@ -16,7 +16,7 @@ using namespace gcnsim;
 
 static std::unique_ptr<WavefrontState> make_wave_cycles() {
     auto ws = std::make_unique<WavefrontState>();
-    memset((void*)ws.get(), 0, offsetof(WavefrontState, lgkm_pending));
+    ws->reset_zero();
     ws->exec = ~0ULL;
     ws->count_cycles = true;
     return ws;
@@ -207,7 +207,7 @@ static std::vector<uint8_t> build_program(std::initializer_list<uint32_t> words)
 static std::unique_ptr<WavefrontState> make_wave_with_program(
     const std::vector<uint8_t>& prog) {
     auto ws = std::make_unique<WavefrontState>();
-    memset((void*)ws.get(), 0, offsetof(WavefrontState, lgkm_pending));
+    ws->reset_zero();
     ws->lgkm_pending.clear();
     ws->vm_pending.clear();
     ws->exec = ~0ULL;

@@ -105,7 +105,7 @@ TEST_F(TensileStyleGemmTest, SingleTile_128x256x32) {
     const int LDA = K, LDB = N, LDC = N, LDD = N;
     const float alpha = 1.0f, beta = 0.0f;
 
-    std::vector<float> A(M * LDA), B(K * LDB), C(M * LDC, 0.f);
+    std::vector<float> A(M * LDA), B(N * LDB, 0.f), C(M * LDC, 0.f);
     std::vector<float> D_sim(M * LDD, 0.f), D_ref(M * LDD, 0.f);
 
     // Small integer values for exact float32 arithmetic
@@ -182,7 +182,7 @@ TEST_F(TensileStyleGemmTest, AlphaBeta) {
     const int LDA = K, LDB = N, LDC = N, LDD = N;
     const float alpha = 2.0f, beta = 0.5f;
 
-    std::vector<float> A(M * LDA), B(K * LDB), C(M * LDC);
+    std::vector<float> A(M * LDA), B(N * LDB, 0.f), C(M * LDC);
     std::vector<float> D_sim(M * LDD, 0.f), D_ref(M * LDD, 0.f);
 
     for (int i = 0; i < M * LDA; i++) A[i] = (float)(i % 3 + 1);

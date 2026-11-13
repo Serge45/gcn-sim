@@ -114,6 +114,10 @@ target_link_libraries(test_rdna4_gfx1201 gcnsim_hip gcnsim GTest::gtest GTest::g
 add_test(NAME test_rdna4_gfx1201 COMMAND test_rdna4_gfx1201)
 add_dependencies(test_rdna4_gfx1201 gcnsim_hip)
 
+add_executable(test_regression_fixes test_regression_fixes.cpp)
+target_link_libraries(test_regression_fixes PRIVATE gcnsim GTest::gtest_main)
+add_test(NAME test_regression_fixes COMMAND test_regression_fixes)
+
 # real_rocm_app (Real ROCm host application for gcndb GDB/MI integration tests)
 find_program(HIPCC hipcc PATHS /opt/rocm/bin /opt/rocm-7.0.0/bin)
 if(HIPCC)

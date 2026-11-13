@@ -51,7 +51,7 @@ static float f16_to_f32_test(uint16_t h) {
 
 static std::unique_ptr<WavefrontState> make_gfx12_wave() {
     auto ws = std::make_unique<WavefrontState>();
-    std::memset((void*)ws.get(), 0, offsetof(WavefrontState, lgkm_pending));
+    ws->reset_zero();
     ws->wave_size = 32;
     ws->is_gfx1201 = true;
     ws->exec = 0xFFFFFFFFULL;

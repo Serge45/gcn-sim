@@ -274,7 +274,7 @@ TEST_F(AsmGemmMfmaTest, GFX950_MicroscalingFP4_InstructionKernel) {
     };
 
     auto ws = std::make_unique<gcnsim::WavefrontState>();
-    memset((void*)ws.get(), 0, offsetof(gcnsim::WavefrontState, lgkm_pending));
+    ws->reset_zero();
     ws->exec = ~0ULL;
     ws->is_gfx950 = true;
     ws->kernel_code_ptr = reinterpret_cast<const uint8_t*>(code.data());

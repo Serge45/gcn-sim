@@ -36,7 +36,7 @@ label_setup_gl_offsets:
 //Setup global read offsets
 s_lshl_b32 s[16], s[2], 8
 s_lshl_b32 s[17], s[3], 7
-s_mul_i32 s[55], s[21], s[14]
+s_mul_i32 s[55], s[12], s[21]
 s_lshl_b32 s[6], s[55], 2
 s_mul_i32 s[55], s[13], s[23]
 s_lshl_b32 s[10], s[55], 2

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace gcnsim {
@@ -84,12 +85,13 @@ public:
     // Stats (L1 stats aggregated across all per-CU L1 instances)
     uint64_t l1_hits()   const;
     uint64_t l1_misses() const;
-    uint64_t l2_hits()   const { return l2_.hits(); }
-    uint64_t l2_misses() const { return l2_.misses(); }
-    uint64_t l3_hits()   const { return l3_.hits(); }
-    uint64_t l3_misses() const { return l3_.misses(); }
+    uint64_t l2_hits()   const { std::lock_guard<std::mutex> lock(mutex_); return l2_.hits(); }
+    uint64_t l2_misses() const { std::lock_guard<std::mutex> lock(mutex_); return l2_.misses(); }
+    uint64_t l3_hits()   const { std::lock_guard<std::mutex> lock(mutex_); return l3_.hits(); }
+    uint64_t l3_misses() const { std::lock_guard<std::mutex> lock(mutex_); return l3_.misses(); }
 
 private:
+    mutable std::mutex mutex_;
     CacheConfig cfg_;
     std::vector<CacheLevel> l1_per_cu_;
     CacheLevel l2_;

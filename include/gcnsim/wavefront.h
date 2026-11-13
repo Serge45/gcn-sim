@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <functional>
 
@@ -95,6 +96,34 @@ struct WavefrontState {
 
     // Debug hook — if non-null, called at the start of every instruction execution (before decode/execution)
     std::function<void(WavefrontState& wave)> debug_hook = nullptr;
+
+    void reset_zero() {
+        std::memset(sgpr, 0, sizeof(sgpr));
+        std::memset(vgpr, 0, sizeof(vgpr));
+        std::memset(agpr, 0, sizeof(agpr));
+        exec = 0; vcc = 0; scc = 0; m0 = 0;
+        pc = 0; kernarg_ptr = nullptr; kernel_code_ptr = nullptr; kernel_code_size = 0;
+        std::memset(workgroup_id, 0, sizeof(workgroup_id));
+        std::memset(workitem_id, 0, sizeof(workitem_id));
+        lds_ptr = nullptr; lds_size = 0;
+        scratch_ptr = nullptr; scratch_size = 0; scratch_per_lane = 0;
+        count_cycles = false; cycle_count = 0; global_mem_latency = 0; smem_latency = 0;
+        mfma_shadow_remaining = 0; mfma_busy_until = 0;
+        pipe_salu_ready = 0; pipe_valu_ready = 0; pipe_vmem_ready = 0;
+        pipe_lds_ready = 0; pipe_smem_ready = 0;
+        mfma_total_exec_cycles = 0; valu_total_issue_cycles = 0;
+        cache = nullptr; cu_id = 0; waves_per_wg = 0;
+        trace_file = nullptr; trace_wave_id = 0; trace_wg_flat_id = 0;
+        insn_count = 0; accum_offset = 0; wave_size = 0;
+        is_gfx908 = false; is_gfx942 = false; is_gfx950 = false; is_gfx1201 = false;
+        std::memset(mfma_scale_a, 0, sizeof(mfma_scale_a));
+        std::memset(mfma_scale_b, 0, sizeof(mfma_scale_b));
+        lgkm_pending.clear();
+        vm_pending.clear();
+        store_pending.clear();
+        ds_pending.clear();
+        km_pending.clear();
+    }
 };
 
 } // namespace gcnsim

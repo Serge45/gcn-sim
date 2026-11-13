@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <cstring>
 #include <cstdlib>
@@ -329,18 +330,25 @@ public:
         return false;
     }
 
-    bool parse_clang_offload_bundle(const void* bundle_data, const void*& co_data, size_t& co_size) {
+    bool parse_clang_offload_bundle(const void* bundle_data, const void*& co_data, size_t& co_size, size_t bundle_size = 0) {
         if (!bundle_data) return false;
-        const char* ptr = reinterpret_cast<const char*>(bundle_data);
+        const char* base = reinterpret_cast<const char*>(bundle_data);
+        const char* ptr = base;
+        auto has_bytes = [&](size_t need) -> bool {
+            if (bundle_size == 0) return true;
+            size_t off = static_cast<size_t>(ptr - base);
+            return off <= bundle_size && need <= (bundle_size - off);
+        };
 
         // Check magic
         const std::string magic = "__CLANG_OFFLOAD_BUNDLE__";
-        if (std::memcmp(ptr, magic.c_str(), magic.size()) != 0) {
+        if (!has_bytes(magic.size()) || std::memcmp(ptr, magic.c_str(), magic.size()) != 0) {
             return false;
         }
         ptr += magic.size();
 
         uint64_t num_bundles = 0;
+        if (!has_bytes(sizeof(num_bundles))) return false;
         std::memcpy(&num_bundles, ptr, sizeof(num_bundles));
         ptr += sizeof(num_bundles);
 
@@ -354,6 +362,7 @@ public:
             uint64_t size = 0;
             uint64_t triple_len = 0;
 
+            if (!has_bytes(sizeof(offset) + sizeof(size) + sizeof(triple_len))) return false;
             std::memcpy(&offset, ptr, sizeof(offset));
             ptr += sizeof(offset);
             std::memcpy(&size, ptr, sizeof(size));
@@ -361,14 +370,18 @@ public:
             std::memcpy(&triple_len, ptr, sizeof(triple_len));
             ptr += sizeof(triple_len);
 
-            if (triple_len == 0 || triple_len > 1024) {
+            if (triple_len == 0 || triple_len > 1024 || !has_bytes(triple_len)) {
                 return false;
             }
 
             std::string triple(ptr, triple_len);
             ptr += triple_len;
 
-            // Check if this is the AMD GPU target (gfx90a, gfx908, gfx942)
+            if (bundle_size > 0 && (offset > bundle_size || size > bundle_size - offset)) {
+                continue;
+            }
+
+            // Check if this is the AMD GPU target (gfx90a, gfx908, gfx942, gfx950, gfx1201, gfx1200)
             bool is_hip_target = (triple.find("hip-amdgcn-amd-amdhsa") != std::string::npos || 
                                   triple.find("hipv4-amdgcn-amd-amdhsa") != std::string::npos);
             if (is_hip_target) {
@@ -381,10 +394,12 @@ public:
                     match = (triple.find("gfx90a") != std::string::npos ||
                              triple.find("gfx942") != std::string::npos ||
                              triple.find("gfx908") != std::string::npos ||
-                             triple.find("gfx950") != std::string::npos);
+                             triple.find("gfx950") != std::string::npos ||
+                             triple.find("gfx1201") != std::string::npos ||
+                             triple.find("gfx1200") != std::string::npos);
                 }
                 if (match) {
-                    co_data = reinterpret_cast<const void*>(reinterpret_cast<const char*>(bundle_data) + offset);
+                    co_data = reinterpret_cast<const void*>(base + offset);
                     co_size = size;
                     return true;
                 }
@@ -394,7 +409,17 @@ public:
         return false;
     }
 
+    void** AllocateFatBinaryHandle(const void* data) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto slot = std::make_unique<void*>(const_cast<void*>(data));
+        void** handle = slot.get();
+        owned_fatbin_handles_.push_back(std::move(slot));
+        return handle;
+    }
+
     void RegisterFatBinary(void** handle, const void* data) {
+        if (!data) return;
+        std::lock_guard<std::mutex> lock(mutex_);
         auto* header = reinterpret_cast<const FatBinaryHeader*>(data);
         if (is_hijack_verbose()) {
             std::cout << "[gcnsim_hip] RegisterFatBinary: magic=0x" << std::hex << header->magic 
@@ -408,7 +433,7 @@ public:
         if (header->magic == 0x48495046) { // "HIPF"
             const void* extracted_data = nullptr;
             size_t extracted_size = 0;
-            if (parse_clang_offload_bundle(header->binary, extracted_data, extracted_size)) {
+            if (parse_clang_offload_bundle(header->binary, extracted_data, extracted_size, header->size)) {
                 if (is_hijack_verbose()) {
                     std::cout << "[gcnsim_hip] Successfully parsed Clang Offload Bundle! Found target: "
                               << "offset=" << (reinterpret_cast<const char*>(extracted_data) - reinterpret_cast<const char*>(header->binary))
@@ -431,6 +456,7 @@ public:
         const void* hostFun,
         const char* deviceName
     ) {
+        std::lock_guard<std::mutex> lock(mutex_);
         const void* binary = nullptr;
         size_t size = 0;
         
@@ -444,7 +470,7 @@ public:
         }
 
         registered_kernels_[hostFun] = {
-            .name = deviceName,
+            .name = deviceName ? deviceName : "",
             .hsaco_data = binary,
             .hsaco_size = size,
             .loaded_module = std::nullopt,
@@ -453,6 +479,7 @@ public:
     }
 
     const RegisteredKernel* GetRegisteredKernel(const void* hostFun) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = registered_kernels_.find(hostFun);
         if (it != registered_kernels_.end()) {
             return &it->second;
@@ -492,6 +519,7 @@ public:
             .is_global = (global != 0),
             .dev_ptr = dev_alloc
         };
+        std::lock_guard<std::mutex> lock(mutex_);
         registered_vars_[hostVar] = rv;
         if (deviceName && std::strlen(deviceName) > 0) {
             registered_vars_by_name_[deviceName] = hostVar;
@@ -500,6 +528,7 @@ public:
 
     const RegisteredVar* FindRegisteredVar(const void* symbol) const {
         if (!symbol) return nullptr;
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = registered_vars_.find(symbol);
         if (it != registered_vars_.end()) {
             return &it->second;
@@ -513,6 +542,7 @@ public:
     }
 
     const KernelInfo* ResolveKernelInfo(const RegisteredKernel& reg) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (reg.cached_kernel_info) {
             return reg.cached_kernel_info;
         }
@@ -563,12 +593,14 @@ private:
         }
     }
 
+    mutable std::mutex mutex_;
     bool global_enabled_ = true;
     std::vector<std::string> filter_list_;
     
     // Tracks handles to raw data
     const void* last_fatbin_data_ = nullptr;
     size_t last_fatbin_size_ = 0;
+    std::vector<std::unique_ptr<void*>> owned_fatbin_handles_;
     std::unordered_map<void**, std::pair<const void*, size_t>> fatbin_handles_;
     
     // Mapping of host stub pointers to kernels

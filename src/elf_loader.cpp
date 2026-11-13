@@ -115,7 +115,7 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     } else if (mach == 0x4F) {
         mod.arch = TargetArch::GFX950;
         mod.is_gfx950 = true;
-    } else if (mach == 0x4E || mach == 0x48 || mach == 0x44) {
+    } else if (mach == 0x4E || mach == 0x48) {
         mod.arch = TargetArch::GFX1201;
         mod.is_gfx1201 = true;
     } else {
@@ -128,11 +128,12 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     uint16_t shnum = ehdr->e_shnum;
     uint16_t shstrndx = ehdr->e_shstrndx;
 
-    if (shoff == 0 || shnum == 0) {
-        error_msg = "No section headers";
+    if (shoff == 0 || shnum == 0 || shentsize < sizeof(Elf64_Shdr)) {
+        error_msg = "No valid section headers";
         return std::nullopt;
     }
-    if (shoff + (uint64_t)shentsize * shnum > data_size) {
+    uint64_t sh_table_bytes = (uint64_t)shentsize * shnum;
+    if (shoff > data_size || sh_table_bytes > data_size - shoff) {
         error_msg = "Section header table out of bounds";
         return std::nullopt;
     }
@@ -143,7 +144,8 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     };
 
     auto get_section_data = [&](const Elf64_Shdr* shdr) -> const uint8_t* {
-        if (!shdr || shdr->sh_type == SHT_NOBITS || shdr->sh_offset + shdr->sh_size > data_size)
+        if (!shdr || shdr->sh_type == SHT_NOBITS ||
+            shdr->sh_offset > data_size || shdr->sh_size > data_size - shdr->sh_offset)
             return nullptr;
         return data + shdr->sh_offset;
     };
@@ -166,7 +168,7 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
     const Elf64_Shdr* dynsym_shdr  = nullptr;
     const Elf64_Shdr* strtab_shdr  = nullptr;
     const Elf64_Shdr* dynstr_shdr  = nullptr;
-    const Elf64_Shdr* note_shdr    = nullptr;
+    std::vector<const Elf64_Shdr*> note_shdrs;
 
     for (int i = 0; i < shnum; i++) {
         const Elf64_Shdr* shdr = get_shdr(i);
@@ -177,7 +179,7 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
         else if (name == ".dynsym")  dynsym_shdr  = shdr;
         else if (name == ".strtab")  strtab_shdr  = shdr;
         else if (name == ".dynstr")  dynstr_shdr  = shdr;
-        else if (shdr->sh_type == SHT_NOTE) note_shdr = shdr;
+        else if (shdr->sh_type == SHT_NOTE) note_shdrs.push_back(shdr);
     }
 
     // Collect all symbol tables (.symtab and .dynsym)
@@ -190,12 +192,12 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
         return std::nullopt;
     }
 
-    // Parse metadata from .note section for arg info
-    std::vector<uint8_t> note_buf;
-    if (note_shdr) {
-        const uint8_t* nd = get_section_data(note_shdr);
-        if (nd) {
-            note_buf.assign(nd, nd + note_shdr->sh_size);
+    // Collect metadata from .note sections (preferring ".note" or containing AMDGPU)
+    std::vector<std::vector<uint8_t>> note_bufs;
+    for (const auto* nsh : note_shdrs) {
+        const uint8_t* nd = get_section_data(nsh);
+        if (nd && nsh->sh_size > 0) {
+            note_bufs.emplace_back(nd, nd + nsh->sh_size);
         }
     }
 
@@ -269,10 +271,12 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
                 uint64_t sec_vma_start = sh->sh_addr;
                 uint64_t sec_vma_end   = sh->sh_addr + sh->sh_size;
                 if (code_vma >= sec_vma_start && code_vma < sec_vma_end) {
-                    uint64_t code_file_off = sh->sh_offset + (code_vma - sec_vma_start);
-                    if (code_file_off < data_size) {
+                    uint64_t off_in_sec = code_vma - sec_vma_start;
+                    if (sh->sh_offset <= data_size && off_in_sec < data_size - sh->sh_offset) {
+                        uint64_t code_file_off = sh->sh_offset + off_in_sec;
+                        size_t avail = data_size - code_file_off;
                         code_ptr = data + code_file_off;
-                        code_size_from_sec = (size_t)(sec_vma_end - code_vma);
+                        code_size_from_sec = std::min((size_t)(sec_vma_end - code_vma), avail);
                     }
                     break;
                 }
@@ -281,10 +285,11 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
 
             size_t code_size = code_size_from_sec;
 
-            // Parse arg info from metadata
+            // Parse arg info from metadata across all SHT_NOTE sections
             std::vector<KernelArgInfo> args;
-            if (!note_buf.empty()) {
-                args = parse_metadata_note(note_buf.data(), note_buf.size(), kernel_name);
+            for (const auto& nb : note_bufs) {
+                args = parse_metadata_note(nb.data(), nb.size(), kernel_name);
+                if (!args.empty()) break;
             }
 
             KernelInfo ki;
@@ -309,7 +314,7 @@ std::optional<HsacoModule> load_hsaco_from_memory(const uint8_t* memory_data, si
             } else {
                 ki.wavefront_size = 64;
             }
-            if (kd && kd->compute_pgm_rsrc3 != 0 && !mod.is_gfx1201) {
+            if (kd && kd->compute_pgm_rsrc3 != 0 && !mod.is_gfx1201 && !mod.is_gfx908) {
                 ki.accum_offset = ((kd->compute_pgm_rsrc3 & 0x3F) + 1) * 4;
             }
 

@@ -994,6 +994,8 @@ struct Operand {
         EXEC,
         EXEC_LO,
         EXEC_HI,
+        VCCZ,
+        EXECZ,
         SCC,
         M0,
         SRC_SHARED_BASE,

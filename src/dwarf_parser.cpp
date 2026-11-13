@@ -147,7 +147,6 @@ bool DwarfParser::load_from_elf(const uint8_t* data, size_t data_size) {
     const uint8_t* ptr = debug_line_ptr;
 
     while (ptr < debug_line_end) {
-        const uint8_t* unit_start = ptr;
         uint64_t unit_length = read_uint32(ptr);
         bool is_dwarf64 = false;
         if (unit_length == 0xffffffff) {
@@ -159,17 +158,15 @@ bool DwarfParser::load_from_elf(const uint8_t* data, size_t data_size) {
 
         uint16_t version = read_uint16(ptr);
         uint8_t address_size = 8;
-        uint8_t segment_selector_size = 0;
         if (version >= 5) {
             address_size = *ptr++;
-            segment_selector_size = *ptr++;
+            (void)*ptr++; // segment_selector_size
         }
         uint64_t header_length = is_dwarf64 ? read_uint64(ptr) : read_uint32(ptr);
         const uint8_t* header_end = ptr + header_length;
 
         uint8_t min_insn_len = *ptr++;
-        uint8_t max_ops_per_insn = 1;
-        if (version >= 4) max_ops_per_insn = *ptr++;
+        if (version >= 4) (void)*ptr++; // max_ops_per_insn
         uint8_t default_is_stmt = *ptr++;
         int8_t line_base = (int8_t)*ptr++;
         uint8_t line_range = *ptr++;
@@ -274,11 +271,11 @@ bool DwarfParser::load_from_elf(const uint8_t* data, size_t data_size) {
         bool epilogue_begin = false;
         uint64_t isa = 0;
         uint64_t discriminator = 0;
+        (void)column; (void)basic_block; (void)prologue_end; (void)epilogue_begin; (void)isa; (void)discriminator;
 
         auto add_entry = [&]() {
             if (address == 0) return;
             std::string fpath = "";
-            bool found = false;
             size_t f_idx = (version < 5) ? (file > 0 ? file - 1 : 0) : file;
             if (f_idx < files.size()) {
                 std::string fname = files[f_idx].name;
@@ -370,7 +367,7 @@ bool DwarfParser::load_from_elf(const uint8_t* data, size_t data_size) {
                         isa = read_uleb128(ptr, unit_end);
                         break;
                     default: {
-                        if (opcode - 1 < std_opcode_lengths.size()) {
+                        if (opcode >= 1 && static_cast<size_t>(opcode - 1) < std_opcode_lengths.size()) {
                             int num_args = std_opcode_lengths[opcode - 1];
                             for (int a = 0; a < num_args; ++a) read_uleb128(ptr, unit_end);
                         }

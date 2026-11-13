@@ -11,6 +11,9 @@
 #include <fstream>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <unistd.h>
 #include <elf.h>
 #include "gcnsim/hip_hijack.h"
 #include "gcnsim/gcnsim.h"
@@ -80,6 +83,9 @@ static bool attach_debugger_if_needed(const gcnsim::KernelInfo* ki, const gcnsim
         }
 
         gcnsim::set_global_debugger(&db);
+        struct DebuggerResetGuard {
+            ~DebuggerResetGuard() { gcnsim::set_global_debugger(nullptr); }
+        } dbg_reset_guard;
         db.cfg.debug_hook = gcnsim::global_debug_hook;
         db.single_stepping = true; // start paused
         
@@ -131,8 +137,7 @@ void __hipPopCallConfiguration(gcnsim::dim3* gridDim, gcnsim::dim3* blockDim, si
 // Fat Binary Registration Interceptors
 void** __hipRegisterFatBinary(const void* data) {
     if (gcnsim::HijackManager::Get().IsGlobalEnabled()) {
-        static uint64_t dummy_handle = 0xDEADC0DE;
-        void** handle = reinterpret_cast<void**>(&dummy_handle);
+        void** handle = gcnsim::HijackManager::Get().AllocateFatBinaryHandle(data);
         gcnsim::HijackManager::Get().RegisterFatBinary(handle, data);
         return handle;
     }
@@ -305,6 +310,7 @@ gcnsim::hipError_t hipMemcpyDtoDAsync(void* dst, const void* src, size_t sizeByt
 }
 
 static thread_local int g_current_device = 0;
+static std::mutex g_sim_time_mutex;
 static uint64_t g_simulated_gpu_cycles = 0;
 static double   g_simulated_gpu_time_ms = 0.0;
 
@@ -414,8 +420,11 @@ static void record_kernel_completion(const gcnsim::KernelInfo* ki, uint64_t kern
     double kernel_ms = (eff_clk_khz > 0)
         ? (static_cast<double>(kernel_cycles) / static_cast<double>(eff_clk_khz))
         : 0.0;
-    g_simulated_gpu_cycles += kernel_cycles;
-    g_simulated_gpu_time_ms += kernel_ms;
+    {
+        std::lock_guard<std::mutex> lock(g_sim_time_mutex);
+        g_simulated_gpu_cycles += kernel_cycles;
+        g_simulated_gpu_time_ms += kernel_ms;
+    }
 
     const char* env_dvfs = std::getenv("GCN_SIM_DVFS");
     if (!env_dvfs) env_dvfs = std::getenv("GCN_SIM_POWER_MODEL");
@@ -532,8 +541,11 @@ gcnsim::hipError_t hipEventRecord(gcnsim::hipEvent_t event, gcnsim::hipStream_t 
     auto* ev = reinterpret_cast<EventInternal*>(event);
     ev->recorded = true;
     ev->time_point = std::chrono::steady_clock::now();
-    ev->simulated_cycles = g_simulated_gpu_cycles;
-    ev->simulated_ms = g_simulated_gpu_time_ms;
+    {
+        std::lock_guard<std::mutex> lock(g_sim_time_mutex);
+        ev->simulated_cycles = g_simulated_gpu_cycles;
+        ev->simulated_ms = g_simulated_gpu_time_ms;
+    }
     return gcnsim::hipSuccess;
 }
 
@@ -644,10 +656,12 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
 
     std::memset(prop, 0, sizeof(*prop));
     const char* env_arch = std::getenv("GCN_SIM_ARCH");
-    bool is_gfx1201 = (env_arch && (std::string(env_arch) == "gfx1201" || std::string(env_arch) == "rdna4" || std::string(env_arch) == "rx9070xt" || std::string(env_arch) == "gfx1200"));
-    bool is_gfx950 = (env_arch && (std::string(env_arch) == "gfx950" || std::string(env_arch) == "mi350" || std::string(env_arch) == "mi350x" || std::string(env_arch) == "mi355" || std::string(env_arch) == "mi355x"));
-    bool is_gfx942 = (env_arch && (std::string(env_arch) == "gfx942" || std::string(env_arch) == "mi300" || std::string(env_arch) == "mi300x"));
-    bool is_gfx908 = (env_arch && (std::string(env_arch) == "gfx908" || std::string(env_arch) == "mi100"));
+    std::string canon_arch = env_arch ? gcnsim::canonical_isa_arch(env_arch) : "";
+    bool is_gfx1201 = (canon_arch == "gfx1201" || canon_arch == "gfx1200");
+    bool is_gfx950  = (canon_arch == "gfx950");
+    bool is_gfx942  = (canon_arch == "gfx942");
+    bool is_gfx908  = (canon_arch == "gfx908");
+    bool is_mi210   = (env_arch && std::string(env_arch).find("mi210") != std::string::npos);
 
     if (is_gfx1201) {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Radeon RX 9070 XT (RDNA4)");
@@ -701,7 +715,7 @@ gcnsim::hipError_t hipGetDeviceProperties(gcnsim::hipDeviceProp_t* prop, int dev
         prop->minor = 0;
         prop->sharedMemPerBlock = 65536; // 64 KB
         prop->maxSharedMemoryPerMultiProcessor = 65536;
-    } else if (env_arch && std::string(env_arch) == "mi210") {
+    } else if (is_mi210) {
         std::snprintf(prop->name, sizeof(prop->name), "AMD Instinct MI210");
         std::strncpy(prop->gcnArchName, "gfx90a:sramecc+:xnack-", sizeof(prop->gcnArchName) - 1);
         prop->totalGlobalMem = 64ULL * 1024 * 1024 * 1024; // 64 GB HBM2e
@@ -855,15 +869,30 @@ gcnsim::hipError_t hipMemset(void* devPtr, int value, size_t count) {
 }
 
 gcnsim::hipError_t hipMemsetAsync(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, size_t, gcnsim::hipStream_t)>("hipMemsetAsync");
+        if (real_func) return real_func(devPtr, value, count, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)stream;
     return hipMemset(devPtr, value, count);
 }
 
 gcnsim::hipError_t hipMemsetD8(void* devPtr, unsigned char value, size_t count) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, unsigned char, size_t)>("hipMemsetD8");
+        if (real_func) return real_func(devPtr, value, count);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     return hipMemset(devPtr, value, count);
 }
 
 gcnsim::hipError_t hipMemsetD16(void* devPtr, unsigned short value, size_t count) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, unsigned short, size_t)>("hipMemsetD16");
+        if (real_func) return real_func(devPtr, value, count);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     if (!devPtr) return gcnsim::hipErrorInvalidValue;
     unsigned short* p = reinterpret_cast<unsigned short*>(devPtr);
     for (size_t i = 0; i < count; i++) p[i] = value;
@@ -871,6 +900,11 @@ gcnsim::hipError_t hipMemsetD16(void* devPtr, unsigned short value, size_t count
 }
 
 gcnsim::hipError_t hipMemsetD32(void* devPtr, int value, size_t count) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, size_t)>("hipMemsetD32");
+        if (real_func) return real_func(devPtr, value, count);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     if (!devPtr) return gcnsim::hipErrorInvalidValue;
     int* p = reinterpret_cast<int*>(devPtr);
     for (size_t i = 0; i < count; i++) p[i] = value;
@@ -878,30 +912,60 @@ gcnsim::hipError_t hipMemsetD32(void* devPtr, int value, size_t count) {
 }
 
 gcnsim::hipError_t hipMemsetD8Async(void* devPtr, unsigned char value, size_t count, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, unsigned char, size_t, gcnsim::hipStream_t)>("hipMemsetD8Async");
+        if (real_func) return real_func(devPtr, value, count, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)stream;
     return hipMemsetD8(devPtr, value, count);
 }
 
 gcnsim::hipError_t hipMemsetD16Async(void* devPtr, unsigned short value, size_t count, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, unsigned short, size_t, gcnsim::hipStream_t)>("hipMemsetD16Async");
+        if (real_func) return real_func(devPtr, value, count, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)stream;
     return hipMemsetD16(devPtr, value, count);
 }
 
 gcnsim::hipError_t hipMemsetD32Async(void* devPtr, int value, size_t count, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, size_t, gcnsim::hipStream_t)>("hipMemsetD32Async");
+        if (real_func) return real_func(devPtr, value, count, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)stream;
     return hipMemsetD32(devPtr, value, count);
 }
 
 gcnsim::hipError_t hipHostAlloc(void** ptr, size_t size, unsigned int flags) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void**, size_t, unsigned int)>("hipHostAlloc");
+        if (real_func) return real_func(ptr, size, flags);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)flags;
     return hipMalloc(ptr, size);
 }
 
 gcnsim::hipError_t hipHostFree(void* ptr) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*)>("hipHostFree");
+        if (real_func) return real_func(ptr);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     return hipFree(ptr);
 }
 
 gcnsim::hipError_t hipHostGetDevicePointer(void** devPtr, void* hstPtr, unsigned int flags) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void**, void*, unsigned int)>("hipHostGetDevicePointer");
+        if (real_func) return real_func(devPtr, hstPtr, flags);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)flags;
     if (!devPtr || !hstPtr) return gcnsim::hipErrorInvalidValue;
     *devPtr = hstPtr;
@@ -909,6 +973,11 @@ gcnsim::hipError_t hipHostGetDevicePointer(void** devPtr, void* hstPtr, unsigned
 }
 
 gcnsim::hipError_t hipPointerGetAttributes(gcnsim::hipPointerAttribute_t* attributes, const void* ptr) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(gcnsim::hipPointerAttribute_t*, const void*)>("hipPointerGetAttributes");
+        if (real_func) return real_func(attributes, ptr);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     if (!attributes || !ptr) return gcnsim::hipErrorInvalidValue;
     attributes->memoryType = gcnsim::hipMemoryTypeDevice;
     attributes->device = g_current_device;
@@ -920,16 +989,31 @@ gcnsim::hipError_t hipPointerGetAttributes(gcnsim::hipPointerAttribute_t* attrib
 }
 
 gcnsim::hipError_t hipMemcpyPeer(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, const void*, int, size_t)>("hipMemcpyPeer");
+        if (real_func) return real_func(dst, dstDeviceId, src, srcDeviceId, size);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)dstDeviceId; (void)srcDeviceId;
     return hipMemcpy(dst, src, size, gcnsim::hipMemcpyDeviceToDevice);
 }
 
 gcnsim::hipError_t hipMemcpyPeerAsync(void* dst, int dstDeviceId, const void* src, int srcDeviceId, size_t size, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, int, const void*, int, size_t, gcnsim::hipStream_t)>("hipMemcpyPeerAsync");
+        if (real_func) return real_func(dst, dstDeviceId, src, srcDeviceId, size, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)dstDeviceId; (void)srcDeviceId; (void)stream;
     return hipMemcpy(dst, src, size, gcnsim::hipMemcpyDeviceToDevice);
 }
 
 gcnsim::hipError_t hipMemcpy2D(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, size_t, const void*, size_t, size_t, size_t, gcnsim::hipMemcpyKind)>("hipMemcpy2D");
+        if (real_func) return real_func(dst, dpitch, src, spitch, width, height, kind);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)kind;
     if (!dst || !src) return gcnsim::hipErrorInvalidValue;
     for (size_t y = 0; y < height; y++) {
@@ -939,6 +1023,11 @@ gcnsim::hipError_t hipMemcpy2D(void* dst, size_t dpitch, const void* src, size_t
 }
 
 gcnsim::hipError_t hipMemcpy2DAsync(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, size_t, const void*, size_t, size_t, size_t, gcnsim::hipMemcpyKind, gcnsim::hipStream_t)>("hipMemcpy2DAsync");
+        if (real_func) return real_func(dst, dpitch, src, spitch, width, height, kind, stream);
+        return gcnsim::hipErrorLaunchFailure;
+    }
     (void)stream;
     return hipMemcpy2D(dst, dpitch, src, spitch, width, height, kind);
 }
@@ -983,17 +1072,12 @@ gcnsim::hipError_t hipMemcpyToSymbol(const void* symbol, const void* src, size_t
         return gcnsim::hipErrorLaunchFailure;
     }
     const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
-    void* dst_target = nullptr;
-    if (var && var->dev_ptr) {
-        if (offset + count > var->size) return gcnsim::hipErrorInvalidValue;
-        dst_target = static_cast<char*>(var->dev_ptr) + offset;
-        std::memcpy(dst_target, src, count);
-        if (var->host_var) {
-            std::memcpy(static_cast<char*>(const_cast<void*>(var->host_var)) + offset, src, count);
-        }
-    } else {
-        dst_target = static_cast<char*>(const_cast<void*>(symbol)) + offset;
-        std::memcpy(dst_target, src, count);
+    if (!var || !var->dev_ptr) return gcnsim::hipErrorInvalidSymbol;
+    if (offset > var->size || count > var->size - offset) return gcnsim::hipErrorInvalidValue;
+    void* dst_target = static_cast<char*>(var->dev_ptr) + offset;
+    std::memcpy(dst_target, src, count);
+    if (var->host_var) {
+        std::memcpy(static_cast<char*>(const_cast<void*>(var->host_var)) + offset, src, count);
     }
     return gcnsim::hipSuccess;
 }
@@ -1012,13 +1096,9 @@ gcnsim::hipError_t hipMemcpyFromSymbol(void* dst, const void* symbol, size_t cou
         return gcnsim::hipErrorLaunchFailure;
     }
     const auto* var = gcnsim::HijackManager::Get().FindRegisteredVar(symbol);
-    const void* src_target = nullptr;
-    if (var && var->dev_ptr) {
-        if (offset + count > var->size) return gcnsim::hipErrorInvalidValue;
-        src_target = static_cast<const char*>(var->dev_ptr) + offset;
-    } else {
-        src_target = static_cast<const char*>(symbol) + offset;
-    }
+    if (!var || !var->dev_ptr) return gcnsim::hipErrorInvalidSymbol;
+    if (offset > var->size || count > var->size - offset) return gcnsim::hipErrorInvalidValue;
+    const void* src_target = static_cast<const char*>(var->dev_ptr) + offset;
     std::memcpy(dst, src_target, count);
     return gcnsim::hipSuccess;
 }
@@ -1063,6 +1143,13 @@ gcnsim::hipError_t hipLaunchKernel(
         return gcnsim::hipErrorLaunchFailure;
     }
 
+    if (!reg) {
+        if (gcnsim::is_hijack_verbose()) {
+            std::cerr << "[gcnsim_hip] hipLaunchKernel called with unregistered function_address!" << std::endl;
+        }
+        return gcnsim::hipErrorInvalidDeviceFunction;
+    }
+
     const gcnsim::KernelInfo* ki = gcnsim::HijackManager::Get().ResolveKernelInfo(*reg);
     if (!ki) {
         std::cerr << "[gcnsim_hip] ResolveKernelInfo failed for kernel: " << k_name << std::endl;
@@ -1085,25 +1172,29 @@ gcnsim::hipError_t hipLaunchKernel(
     std::vector<uint8_t> kernarg_buffer(kernarg_size, 0);
     size_t param_idx = 0;
     for (const auto& arg : ki->args) {
+        if (arg.offset > kernarg_buffer.size() || arg.size > kernarg_buffer.size() - arg.offset) {
+            if (arg.value_kind.rfind("hidden_", 0) != 0) param_idx++;
+            continue;
+        }
         if (arg.value_kind.rfind("hidden_", 0) == 0) {
             if (arg.value_kind == "hidden_block_count_x") {
                 uint32_t val = numBlocks.x;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             } else if (arg.value_kind == "hidden_block_count_y") {
                 uint32_t val = numBlocks.y;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             } else if (arg.value_kind == "hidden_block_count_z") {
                 uint32_t val = numBlocks.z;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             } else if (arg.value_kind == "hidden_group_size_x") {
-                uint16_t val = dimBlocks.x;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                uint16_t val = static_cast<uint16_t>(dimBlocks.x);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             } else if (arg.value_kind == "hidden_group_size_y") {
-                uint16_t val = dimBlocks.y;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                uint16_t val = static_cast<uint16_t>(dimBlocks.y);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             } else if (arg.value_kind == "hidden_group_size_z") {
-                uint16_t val = dimBlocks.z;
-                std::memcpy(kernarg_buffer.data() + arg.offset, &val, arg.size);
+                uint16_t val = static_cast<uint16_t>(dimBlocks.z);
+                std::memcpy(kernarg_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
             }
             continue;
         }
@@ -1207,6 +1298,10 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     cfg.grid_z  = globalWorkSizeZ;
     cfg.block_x = localWorkSizeX;
     cfg.block_y = localWorkSizeY;
+    if (localWorkSizeX == 0 || localWorkSizeY == 0 || localWorkSizeZ == 0) {
+        return gcnsim::hipErrorInvalidValue;
+    }
+
     cfg.block_z = localWorkSizeZ;
 
     std::vector<uint8_t> unpacked_buffer;
@@ -1225,25 +1320,29 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         unpacked_buffer.assign(kernarg_size, 0);
         size_t param_idx = 0;
         for (const auto& arg : ki->args) {
+            if (arg.offset > unpacked_buffer.size() || arg.size > unpacked_buffer.size() - arg.offset) {
+                if (arg.value_kind.rfind("hidden_", 0) != 0) param_idx++;
+                continue;
+            }
             if (arg.value_kind.rfind("hidden_", 0) == 0) {
                 if (arg.value_kind == "hidden_block_count_x") {
                     uint32_t val = globalWorkSizeX / localWorkSizeX;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 } else if (arg.value_kind == "hidden_block_count_y") {
                     uint32_t val = globalWorkSizeY / localWorkSizeY;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 } else if (arg.value_kind == "hidden_block_count_z") {
                     uint32_t val = globalWorkSizeZ / localWorkSizeZ;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 } else if (arg.value_kind == "hidden_group_size_x") {
-                    uint16_t val = localWorkSizeX;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    uint16_t val = static_cast<uint16_t>(localWorkSizeX);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 } else if (arg.value_kind == "hidden_group_size_y") {
-                    uint16_t val = localWorkSizeY;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    uint16_t val = static_cast<uint16_t>(localWorkSizeY);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 } else if (arg.value_kind == "hidden_group_size_z") {
-                    uint16_t val = localWorkSizeZ;
-                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, arg.size);
+                    uint16_t val = static_cast<uint16_t>(localWorkSizeZ);
+                    std::memcpy(unpacked_buffer.data() + arg.offset, &val, std::min<size_t>(arg.size, sizeof(val)));
                 }
                 continue;
             }
@@ -1261,9 +1360,11 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
 
         for (size_t i = 0; extra[i] != nullptr && extra[i] != HIP_LAUNCH_PARAM_END; ) {
             if (extra[i] == HIP_LAUNCH_PARAM_BUFFER_POINTER) {
+                if (extra[i + 1] == nullptr || extra[i + 1] == HIP_LAUNCH_PARAM_END) break;
                 packed_buffer = extra[i + 1];
                 i += 2;
             } else if (extra[i] == HIP_LAUNCH_PARAM_BUFFER_SIZE) {
+                if (extra[i + 1] == nullptr || extra[i + 1] == HIP_LAUNCH_PARAM_END) break;
                 uintptr_t val = reinterpret_cast<uintptr_t>(extra[i + 1]);
                 if (val < 1048576) {
                     packed_size = static_cast<size_t>(val);
@@ -1278,7 +1379,8 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
         cfg.kernarg = packed_buffer;
         cfg.kernarg_size = packed_size;
     } else {
-        return gcnsim::hipErrorInvalidValue;
+        cfg.kernarg = nullptr;
+        cfg.kernarg_size = 0;
     }
 
     if (gcnsim::is_hijack_verbose()) {
@@ -1336,6 +1438,7 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     return gcnsim::hipSuccess;
 }
 
+static std::mutex g_loaded_modules_mutex;
 static std::vector<gcnsim::HsacoModule*> g_loaded_modules;
 
 gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname) {
@@ -1374,7 +1477,7 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
 
             size_t last_slash = path_to_load.find_last_of("/\\");
             std::string base_name = (last_slash != std::string::npos) ? path_to_load.substr(last_slash + 1) : path_to_load;
-            std::string unbundled = "/tmp/gcnsim_" + base_name + "_" + arch + ".co";
+            std::string unbundled = "/tmp/gcnsim_" + std::to_string(getpid()) + "_" + base_name + "_" + arch + ".co";
 
             std::ifstream test_unbundled(unbundled);
             if (!test_unbundled.is_open()) {
@@ -1415,7 +1518,10 @@ gcnsim::hipError_t hipModuleLoad(gcnsim::hipModule_t* module, const char* fname)
     }
 
     auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
-    g_loaded_modules.push_back(heap_mod);
+    {
+        std::lock_guard<std::mutex> lock(g_loaded_modules_mutex);
+        g_loaded_modules.push_back(heap_mod);
+    }
     *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
     return gcnsim::hipSuccess;
 }
@@ -1462,7 +1568,10 @@ gcnsim::hipError_t hipModuleLoadData(gcnsim::hipModule_t* module, const void* im
     }
 
     auto* heap_mod = new gcnsim::HsacoModule(std::move(*mod));
-    g_loaded_modules.push_back(heap_mod);
+    {
+        std::lock_guard<std::mutex> lock(g_loaded_modules_mutex);
+        g_loaded_modules.push_back(heap_mod);
+    }
     *module = reinterpret_cast<gcnsim::hipModule_t>(heap_mod);
     return gcnsim::hipSuccess;
 }
@@ -1497,17 +1606,22 @@ gcnsim::hipError_t hipModuleGetFunction(gcnsim::hipFunction_t* function, gcnsim:
     }
 
     // Fallback: search across all loaded modules
-    for (auto* m : g_loaded_modules) {
-        if (m == heap_mod) continue;
-        for (const auto& k : m->kernels) {
-            if (k.name == name) {
-                *function = reinterpret_cast<gcnsim::hipFunction_t>(const_cast<gcnsim::KernelInfo*>(&k));
-                return gcnsim::hipSuccess;
+    size_t mod_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_loaded_modules_mutex);
+        mod_count = g_loaded_modules.size();
+        for (auto* m : g_loaded_modules) {
+            if (m == heap_mod) continue;
+            for (const auto& k : m->kernels) {
+                if (k.name == name) {
+                    *function = reinterpret_cast<gcnsim::hipFunction_t>(const_cast<gcnsim::KernelInfo*>(&k));
+                    return gcnsim::hipSuccess;
+                }
             }
         }
     }
 
-    std::cerr << "[gcnsim_hip] hipModuleGetFunction: kernel " << name << " not found in module (searched " << g_loaded_modules.size() << " modules)" << std::endl;
+    std::cerr << "[gcnsim_hip] hipModuleGetFunction: kernel " << name << " not found in module (searched " << mod_count << " modules)" << std::endl;
     return gcnsim::hipErrorNotFound;
 }
 
@@ -1519,9 +1633,12 @@ gcnsim::hipError_t hipModuleUnload(gcnsim::hipModule_t module) {
     }
     if (module) {
         auto* heap_mod = reinterpret_cast<gcnsim::HsacoModule*>(module);
-        g_loaded_modules.erase(
-            std::remove(g_loaded_modules.begin(), g_loaded_modules.end(), heap_mod),
-            g_loaded_modules.end());
+        {
+            std::lock_guard<std::mutex> lock(g_loaded_modules_mutex);
+            g_loaded_modules.erase(
+                std::remove(g_loaded_modules.begin(), g_loaded_modules.end(), heap_mod),
+                g_loaded_modules.end());
+        }
         delete heap_mod;
     }
     return gcnsim::hipSuccess;
@@ -1541,7 +1658,10 @@ uint16_t __gnu_f2h_ieee(float f) {
         mant = (mant + round_bit) >> t;
         return static_cast<uint16_t>(sign | mant);
     } else if (exp >= 31) {
-        return static_cast<uint16_t>(sign | 0x7c00 | (mant ? 0x200 : 0));
+        if (exp == 143 && mant != 0) {
+            return static_cast<uint16_t>(sign | 0x7e00); // NaN
+        }
+        return static_cast<uint16_t>(sign | 0x7c00); // Inf (overflow or inf)
     }
     uint32_t round_bit = 0x00001000;
     mant = (mant + round_bit - 1 + ((mant >> 13) & 1)) >> 13;

@@ -31,6 +31,8 @@ static uint32_t read_src_scalar(const WavefrontState& w, const Operand& op) {
         case Operand::Kind::EXEC:
         case Operand::Kind::EXEC_LO:   return (uint32_t)(w.exec & 0xFFFFFFFFULL);
         case Operand::Kind::EXEC_HI:   return (uint32_t)(w.exec >> 32);
+        case Operand::Kind::VCCZ:      return (w.vcc == 0) ? 1u : 0u;
+        case Operand::Kind::EXECZ:     return (w.exec == 0) ? 1u : 0u;
         case Operand::Kind::SCC:       return w.scc;
         case Operand::Kind::M0:        return w.m0;
         case Operand::Kind::SRC_PRIVATE_BASE:  return (uint32_t)(PRIVATE_APERTURE_BASE & 0xFFFFFFFF);
@@ -45,7 +47,9 @@ static uint32_t read_src_scalar(const WavefrontState& w, const Operand& op) {
 
 static uint64_t read_src_scalar64(const WavefrontState& w, const Operand& op) {
     if (op.kind == Operand::Kind::SGPR) {
-        return ((uint64_t)w.sgpr[op.index + 1] << 32) | w.sgpr[op.index];
+        uint64_t lo = (op.index < NUM_SGPR) ? w.sgpr[op.index] : 0;
+        uint64_t hi = (op.index + 1 < NUM_SGPR) ? w.sgpr[op.index + 1] : 0;
+        return (hi << 32) | lo;
     }
     if (op.kind == Operand::Kind::VCC || op.kind == Operand::Kind::VCC_LO) {
         return w.vcc;
@@ -74,10 +78,20 @@ static uint32_t read_vsrc(const WavefrontState& w, const Operand& op, int lane) 
             return w.sgpr[op.index];
         case Operand::Kind::VCC:
         case Operand::Kind::VCC_LO:
-            return ((w.vcc >> lane) & 1) ? 1 : 0;
+            return (uint32_t)(w.vcc & 0xFFFFFFFFULL);
+        case Operand::Kind::VCC_HI:
+            return (uint32_t)(w.vcc >> 32);
         case Operand::Kind::EXEC:
         case Operand::Kind::EXEC_LO:
-            return ((w.exec >> lane) & 1) ? 1 : 0;
+            return (uint32_t)(w.exec & 0xFFFFFFFFULL);
+        case Operand::Kind::EXEC_HI:
+            return (uint32_t)(w.exec >> 32);
+        case Operand::Kind::VCCZ:
+            return (w.vcc == 0) ? 1u : 0u;
+        case Operand::Kind::EXECZ:
+            return (w.exec == 0) ? 1u : 0u;
+        case Operand::Kind::SCC:
+            return w.scc;
         case Operand::Kind::M0:
             return w.m0;
         case Operand::Kind::SRC_PRIVATE_BASE:  return (uint32_t)(PRIVATE_APERTURE_BASE & 0xFFFFFFFF);
@@ -155,8 +169,8 @@ static void write_sdst(WavefrontState& w, const Operand& op, uint32_t val) {
 
 static void write_sdst64(WavefrontState& w, const Operand& op, uint64_t val) {
     if (op.kind == Operand::Kind::SGPR) {
-        w.sgpr[op.index]     = (uint32_t)(val & 0xFFFFFFFF);
-        w.sgpr[op.index + 1] = (uint32_t)(val >> 32);
+        if (op.index < NUM_SGPR)     w.sgpr[op.index]     = (uint32_t)(val & 0xFFFFFFFF);
+        if (op.index + 1 < NUM_SGPR) w.sgpr[op.index + 1] = (uint32_t)(val >> 32);
     } else if (op.kind == Operand::Kind::VCC || op.kind == Operand::Kind::VCC_LO) {
         w.vcc = val;
     } else if (op.kind == Operand::Kind::EXEC || op.kind == Operand::Kind::EXEC_LO) {
@@ -671,7 +685,9 @@ static uint64_t ds_issue_cycles(const WavefrontState& wave, const Instruction& i
         uint8_t bank_count[32] = {};
         for (uint32_t lane = lane_start; lane < lane_end; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t addr = wave.vgpr[inst.src[0].index][lane] + inst.ds_offset0;
+            uint32_t base_v = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index < NUM_VGPR)
+                              ? wave.vgpr[inst.src[0].index][lane] : 0;
+            uint32_t addr = base_v + inst.ds_offset0;
             bank_count[(addr / 4) % 32]++;
         }
         uint8_t k = 1;
@@ -1050,9 +1066,9 @@ static inline bool addr_is_valid(uint64_t addr) {
 
 static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst, int lane) {
     uint32_t srd_idx = inst.src[1].index;
-    uint32_t srd_w0 = wave.sgpr[srd_idx];
-    uint32_t srd_w1 = wave.sgpr[srd_idx + 1];
-    uint32_t srd_w2 = wave.sgpr[srd_idx + 2];
+    uint32_t srd_w0 = (srd_idx < NUM_SGPR) ? wave.sgpr[srd_idx] : 0;
+    uint32_t srd_w1 = (srd_idx + 1 < NUM_SGPR) ? wave.sgpr[srd_idx + 1] : 0;
+    uint32_t srd_w2 = (srd_idx + 2 < NUM_SGPR) ? wave.sgpr[srd_idx + 2] : 0;
     uint32_t srd_w3 = (srd_idx + 3 < NUM_SGPR) ? wave.sgpr[srd_idx + 3] : 0;
 
     uint64_t base = (uint64_t)srd_w0 | ((uint64_t)(srd_w1 & 0xFFFF) << 32);
@@ -1079,7 +1095,7 @@ static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst,
     if (stride == 0) {
         effective_offset = (uint64_t)voffset + (uint64_t)soff + (uint64_t)inst.mubuf_offset;
         // In AMD GPU, offsets with bit 31 set (>= 0x80000000) or >= num_records when SRD is valid are OOB.
-        bool check_num_records = wave.is_gfx1201 ? (srd_w3 != 0 || num_records > 0) : (num_records >= 0x80000000u);
+        bool check_num_records = (num_records > 0);
         if (voffset >= 0x80000000u || (check_num_records && effective_offset >= num_records)) {
             oob = true;
         }
@@ -2116,31 +2132,71 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // -----------------------------------------------------------------------
     case Opcode::S_LOAD_DWORD: {
         uint64_t addr = smem_addr(wave, inst);
-        wave.sgpr[inst.dst.index] = mem_load_u32(addr);
+        write_sdst(wave, inst.dst, mem_load_u32(addr));
         break;
     }
     case Opcode::S_LOAD_DWORDX2: {
         uint64_t addr = smem_addr(wave, inst);
-        wave.sgpr[inst.dst.index]     = mem_load_u32(addr);
-        wave.sgpr[inst.dst.index + 1] = mem_load_u32(addr + 4);
+        if (inst.dst.kind == Operand::Kind::SGPR) {
+            for (int i = 0; i < 2; i++)
+                if (inst.dst.index + i < NUM_SGPR) wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        } else {
+            uint64_t v = ((uint64_t)mem_load_u32(addr + 4) << 32) | mem_load_u32(addr);
+            write_sdst64(wave, inst.dst, v);
+        }
         break;
     }
     case Opcode::S_LOAD_DWORDX4: {
         uint64_t addr = smem_addr(wave, inst);
-        for (int i = 0; i < 4; i++)
-            wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        if (inst.dst.kind == Operand::Kind::SGPR) {
+            for (int i = 0; i < 4; i++)
+                if (inst.dst.index + i < NUM_SGPR) wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        }
         break;
     }
     case Opcode::S_LOAD_DWORDX8: {
         uint64_t addr = smem_addr(wave, inst);
-        for (int i = 0; i < 8; i++)
-            wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        if (inst.dst.kind == Operand::Kind::SGPR) {
+            for (int i = 0; i < 8; i++)
+                if (inst.dst.index + i < NUM_SGPR) wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        }
         break;
     }
     case Opcode::S_LOAD_DWORDX16: {
         uint64_t addr = smem_addr(wave, inst);
-        for (int i = 0; i < 16; i++)
-            wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        if (inst.dst.kind == Operand::Kind::SGPR) {
+            for (int i = 0; i < 16; i++)
+                if (inst.dst.index + i < NUM_SGPR) wave.sgpr[inst.dst.index + i] = mem_load_u32(addr + i * 4);
+        }
+        break;
+    }
+    case Opcode::S_MUL_F32: {
+        uint32_t a_b = read_src_scalar(wave, inst.src[0]);
+        uint32_t b_b = read_src_scalar(wave, inst.src[1]);
+        float a, b; memcpy(&a, &a_b, 4); memcpy(&b, &b_b, 4);
+        float r = a * b;
+        uint32_t rb; memcpy(&rb, &r, 4);
+        write_sdst(wave, inst.dst, rb);
+        break;
+    }
+    case Opcode::S_FMAMK_F32: {
+        uint32_t a_b = read_src_scalar(wave, inst.src[0]);
+        uint32_t b_b = read_src_scalar(wave, inst.src[1]);
+        uint32_t k_b = read_src_scalar(wave, inst.src[2]);
+        float a, b, k; memcpy(&a, &a_b, 4); memcpy(&b, &b_b, 4); memcpy(&k, &k_b, 4);
+        float r = fmaf(a, k, b);
+        uint32_t rb; memcpy(&rb, &r, 4);
+        write_sdst(wave, inst.dst, rb);
+        break;
+    }
+    case Opcode::S_FMAAK_F32: {
+        uint32_t a_b = read_src_scalar(wave, inst.src[0]);
+        uint32_t b_b = read_src_scalar(wave, inst.src[1]);
+        uint32_t k_b = read_src_scalar(wave, inst.src[2]);
+        float a, b, k; memcpy(&a, &a_b, 4); memcpy(&b, &b_b, 4); memcpy(&k, &k_b, 4);
+        float r = fmaf(a, b, k);
+        uint32_t rb; memcpy(&rb, &r, 4);
+        write_sdst(wave, inst.dst, rb);
         break;
     }
 
@@ -3160,7 +3216,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
-    case Opcode::V_MAC_F32: {
+    case Opcode::V_MAC_F32:
+    case Opcode::V_FMAC_F32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
             float a = read_vsrc_f32_mod(wave, inst, 0, lane);
@@ -3268,19 +3325,26 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         else write_lane_mask(wave, inst.dst, mask);
         break;
     }
-    case Opcode::V_CMP_NLT_F32:
+    case Opcode::V_CMP_NLT_F32: {
+        uint64_t mask = 0;
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            float a = read_vsrc_f32_mod(wave, inst, 0, lane);
+            float b = read_vsrc_f32_mod(wave, inst, 1, lane);
+            if (!(a < b)) mask |= (1ULL << lane);
+        }
+        write_lane_mask(wave, inst.dst, mask);
+        break;
+    }
     case Opcode::V_CMP_NGE_F32: {
         uint64_t mask = 0;
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a_b = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b_b = read_vsrc(wave, inst.src[1], lane);
-            float a, b; memcpy(&a, &a_b, 4); memcpy(&b, &b_b, 4);
+            float a = read_vsrc_f32_mod(wave, inst, 0, lane);
+            float b = read_vsrc_f32_mod(wave, inst, 1, lane);
             if (!(a >= b)) mask |= (1ULL << lane);
         }
-        if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            write_lane_mask(wave, inst.dst, mask);
-        else write_lane_mask(wave, inst.dst, mask);
+        write_lane_mask(wave, inst.dst, mask);
         break;
     }
     // -----------------------------------------------------------------------
@@ -8227,6 +8291,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
+    case Opcode::V_DOT2C_F32_F16:
     case Opcode::V_DOT2ACC_F32_F16: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
@@ -8287,6 +8352,28 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint16_t hr = f32_to_f16(r);
             if (inst.op_sel & 8) {
                 wave.vgpr[inst.dst.index][lane] = (wave.vgpr[inst.dst.index][lane] & 0x0000FFFFu) | ((uint32_t)hr << 16);
+            } else {
+                wave.vgpr[inst.dst.index][lane] = hr;
+            }
+        }
+        break;
+    }
+    case Opcode::V_FMAC_F16: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t raw0 = read_vsrc_ex(wave, inst, 0, lane);
+            uint32_t raw1 = read_vsrc_ex(wave, inst, 1, lane);
+            uint32_t raw2 = wave.vgpr[inst.dst.index][lane];
+            uint16_t h0 = (inst.op_sel & 1) ? (uint16_t)(raw0 >> 16) : (uint16_t)(raw0 & 0xFFFF);
+            uint16_t h1 = (inst.op_sel & 2) ? (uint16_t)(raw1 >> 16) : (uint16_t)(raw1 & 0xFFFF);
+            uint16_t h2 = (inst.op_sel & 8) ? (uint16_t)(raw2 >> 16) : (uint16_t)(raw2 & 0xFFFF);
+            float a = apply_src_mod_f32(f16_to_f32(h0), (inst.neg & 1) != 0, (inst.abs_ & 1) != 0);
+            float b = apply_src_mod_f32(f16_to_f32(h1), (inst.neg & 2) != 0, (inst.abs_ & 2) != 0);
+            float c = f16_to_f32(h2);
+            float r = apply_dst_mod_f32(fmaf(a, b, c), inst.clamp != 0, inst.omod);
+            uint16_t hr = f32_to_f16(r);
+            if (inst.op_sel & 8) {
+                wave.vgpr[inst.dst.index][lane] = (raw2 & 0x0000FFFFu) | ((uint32_t)hr << 16);
             } else {
                 wave.vgpr[inst.dst.index][lane] = hr;
             }
@@ -8425,13 +8512,44 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     // V_CMPX_* (write comparison mask directly to EXEC, and to dst if SGPR)
+    case Opcode::V_CMPX_LT_F16:
+    case Opcode::V_CMPX_EQ_F16:
+    case Opcode::V_CMPX_LE_F16:
+    case Opcode::V_CMPX_GT_F16:
+    case Opcode::V_CMPX_LG_F16:
+    case Opcode::V_CMPX_GE_F16:
     case Opcode::V_CMPX_LT_F32:
     case Opcode::V_CMPX_EQ_F32:
     case Opcode::V_CMPX_LE_F32:
     case Opcode::V_CMPX_GT_F32:
     case Opcode::V_CMPX_LG_F32:
     case Opcode::V_CMPX_GE_F32:
+    case Opcode::V_CMPX_O_F32:
+    case Opcode::V_CMPX_U_F32:
+    case Opcode::V_CMPX_NGE_F32:
+    case Opcode::V_CMPX_NLG_F32:
+    case Opcode::V_CMPX_NGT_F32:
+    case Opcode::V_CMPX_NLE_F32:
     case Opcode::V_CMPX_NEQ_F32:
+    case Opcode::V_CMPX_NLT_F32:
+    case Opcode::V_CMPX_LT_F64:
+    case Opcode::V_CMPX_EQ_F64:
+    case Opcode::V_CMPX_LE_F64:
+    case Opcode::V_CMPX_GT_F64:
+    case Opcode::V_CMPX_LG_F64:
+    case Opcode::V_CMPX_GE_F64:
+    case Opcode::V_CMPX_LT_I16:
+    case Opcode::V_CMPX_EQ_I16:
+    case Opcode::V_CMPX_LE_I16:
+    case Opcode::V_CMPX_GT_I16:
+    case Opcode::V_CMPX_NE_I16:
+    case Opcode::V_CMPX_GE_I16:
+    case Opcode::V_CMPX_LT_U16:
+    case Opcode::V_CMPX_EQ_U16:
+    case Opcode::V_CMPX_LE_U16:
+    case Opcode::V_CMPX_GT_U16:
+    case Opcode::V_CMPX_NE_U16:
+    case Opcode::V_CMPX_GE_U16:
     case Opcode::V_CMPX_LT_I32:
     case Opcode::V_CMPX_EQ_I32:
     case Opcode::V_CMPX_LE_I32:
@@ -8443,7 +8561,19 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::V_CMPX_LE_U32:
     case Opcode::V_CMPX_GT_U32:
     case Opcode::V_CMPX_NE_U32:
-    case Opcode::V_CMPX_GE_U32: {
+    case Opcode::V_CMPX_GE_U32:
+    case Opcode::V_CMPX_LT_I64:
+    case Opcode::V_CMPX_EQ_I64:
+    case Opcode::V_CMPX_LE_I64:
+    case Opcode::V_CMPX_GT_I64:
+    case Opcode::V_CMPX_NE_I64:
+    case Opcode::V_CMPX_GE_I64:
+    case Opcode::V_CMPX_LT_U64:
+    case Opcode::V_CMPX_EQ_U64:
+    case Opcode::V_CMPX_LE_U64:
+    case Opcode::V_CMPX_GT_U64:
+    case Opcode::V_CMPX_NE_U64:
+    case Opcode::V_CMPX_GE_U64: {
         uint64_t mask = 0;
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
@@ -8451,15 +8581,53 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             uint32_t u1 = read_vsrc(wave, inst.src[1], lane);
             float f0 = read_vsrc_f32_mod(wave, inst, 0, lane);
             float f1 = read_vsrc_f32_mod(wave, inst, 1, lane);
+            float h0 = apply_src_mod_f32(f16_to_f32((uint16_t)(u0 & 0xFFFF)), (inst.neg & 1) != 0, (inst.abs_ & 1) != 0);
+            float h1 = apply_src_mod_f32(f16_to_f32((uint16_t)(u1 & 0xFFFF)), (inst.neg & 2) != 0, (inst.abs_ & 2) != 0);
+            int16_t i16_0 = (int16_t)(u0 & 0xFFFF), i16_1 = (int16_t)(u1 & 0xFFFF);
+            uint16_t u16_0 = (uint16_t)(u0 & 0xFFFF), u16_1 = (uint16_t)(u1 & 0xFFFF);
+            uint64_t u64_0 = read_vsrc64(wave, inst.src[0], lane);
+            uint64_t u64_1 = read_vsrc64(wave, inst.src[1], lane);
+            double d0, d1; memcpy(&d0, &u64_0, 8); memcpy(&d1, &u64_1, 8);
             bool cond = false;
             switch (inst.opcode) {
+                case Opcode::V_CMPX_LT_F16:  cond = (h0 < h1); break;
+                case Opcode::V_CMPX_EQ_F16:  cond = (h0 == h1); break;
+                case Opcode::V_CMPX_LE_F16:  cond = (h0 <= h1); break;
+                case Opcode::V_CMPX_GT_F16:  cond = (h0 > h1); break;
+                case Opcode::V_CMPX_LG_F16:  cond = (h0 < h1 || h0 > h1); break;
+                case Opcode::V_CMPX_GE_F16:  cond = (h0 >= h1); break;
                 case Opcode::V_CMPX_LT_F32:  cond = (f0 < f1); break;
                 case Opcode::V_CMPX_EQ_F32:  cond = (f0 == f1); break;
                 case Opcode::V_CMPX_LE_F32:  cond = (f0 <= f1); break;
                 case Opcode::V_CMPX_GT_F32:  cond = (f0 > f1); break;
                 case Opcode::V_CMPX_LG_F32:  cond = (f0 < f1 || f0 > f1); break;
                 case Opcode::V_CMPX_GE_F32:  cond = (f0 >= f1); break;
+                case Opcode::V_CMPX_O_F32:   cond = (!std::isnan(f0) && !std::isnan(f1)); break;
+                case Opcode::V_CMPX_U_F32:   cond = (std::isnan(f0) || std::isnan(f1)); break;
+                case Opcode::V_CMPX_NGE_F32: cond = !(f0 >= f1); break;
+                case Opcode::V_CMPX_NLG_F32: cond = !(f0 < f1 || f0 > f1); break;
+                case Opcode::V_CMPX_NGT_F32: cond = !(f0 > f1); break;
+                case Opcode::V_CMPX_NLE_F32: cond = !(f0 <= f1); break;
                 case Opcode::V_CMPX_NEQ_F32: cond = !(f0 == f1); break;
+                case Opcode::V_CMPX_NLT_F32: cond = !(f0 < f1); break;
+                case Opcode::V_CMPX_LT_F64:  cond = (d0 < d1); break;
+                case Opcode::V_CMPX_EQ_F64:  cond = (d0 == d1); break;
+                case Opcode::V_CMPX_LE_F64:  cond = (d0 <= d1); break;
+                case Opcode::V_CMPX_GT_F64:  cond = (d0 > d1); break;
+                case Opcode::V_CMPX_LG_F64:  cond = (d0 < d1 || d0 > d1); break;
+                case Opcode::V_CMPX_GE_F64:  cond = (d0 >= d1); break;
+                case Opcode::V_CMPX_LT_I16:  cond = (i16_0 < i16_1); break;
+                case Opcode::V_CMPX_EQ_I16:  cond = (i16_0 == i16_1); break;
+                case Opcode::V_CMPX_LE_I16:  cond = (i16_0 <= i16_1); break;
+                case Opcode::V_CMPX_GT_I16:  cond = (i16_0 > i16_1); break;
+                case Opcode::V_CMPX_NE_I16:  cond = (i16_0 != i16_1); break;
+                case Opcode::V_CMPX_GE_I16:  cond = (i16_0 >= i16_1); break;
+                case Opcode::V_CMPX_LT_U16:  cond = (u16_0 < u16_1); break;
+                case Opcode::V_CMPX_EQ_U16:  cond = (u16_0 == u16_1); break;
+                case Opcode::V_CMPX_LE_U16:  cond = (u16_0 <= u16_1); break;
+                case Opcode::V_CMPX_GT_U16:  cond = (u16_0 > u16_1); break;
+                case Opcode::V_CMPX_NE_U16:  cond = (u16_0 != u16_1); break;
+                case Opcode::V_CMPX_GE_U16:  cond = (u16_0 >= u16_1); break;
                 case Opcode::V_CMPX_LT_I32:  cond = ((int32_t)u0 < (int32_t)u1); break;
                 case Opcode::V_CMPX_EQ_I32:  cond = ((int32_t)u0 == (int32_t)u1); break;
                 case Opcode::V_CMPX_LE_I32:  cond = ((int32_t)u0 <= (int32_t)u1); break;
@@ -8472,6 +8640,18 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                 case Opcode::V_CMPX_GT_U32:  cond = (u0 > u1); break;
                 case Opcode::V_CMPX_NE_U32:  cond = (u0 != u1); break;
                 case Opcode::V_CMPX_GE_U32:  cond = (u0 >= u1); break;
+                case Opcode::V_CMPX_LT_I64:  cond = ((int64_t)u64_0 < (int64_t)u64_1); break;
+                case Opcode::V_CMPX_EQ_I64:  cond = ((int64_t)u64_0 == (int64_t)u64_1); break;
+                case Opcode::V_CMPX_LE_I64:  cond = ((int64_t)u64_0 <= (int64_t)u64_1); break;
+                case Opcode::V_CMPX_GT_I64:  cond = ((int64_t)u64_0 > (int64_t)u64_1); break;
+                case Opcode::V_CMPX_NE_I64:  cond = ((int64_t)u64_0 != (int64_t)u64_1); break;
+                case Opcode::V_CMPX_GE_I64:  cond = ((int64_t)u64_0 >= (int64_t)u64_1); break;
+                case Opcode::V_CMPX_LT_U64:  cond = (u64_0 < u64_1); break;
+                case Opcode::V_CMPX_EQ_U64:  cond = (u64_0 == u64_1); break;
+                case Opcode::V_CMPX_LE_U64:  cond = (u64_0 <= u64_1); break;
+                case Opcode::V_CMPX_GT_U64:  cond = (u64_0 > u64_1); break;
+                case Opcode::V_CMPX_NE_U64:  cond = (u64_0 != u64_1); break;
+                case Opcode::V_CMPX_GE_U64:  cond = (u64_0 >= u64_1); break;
                 default: break;
             }
             if (cond) mask |= (1ULL << lane);
@@ -8697,9 +8877,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                 uint16_t raw = half ? (uint16_t)(dw >> 16) : (uint16_t)(dw & 0xFFFF);
                 float val = is_bf16 ? bf16_to_f32(raw) : f16_to_f32(raw);
                 if (half == 0 && (inst.neg & 1)) val = -val;
-                if (half == 1 && (inst.op_sel_hi & 1) == 0 && (inst.neg & 1)) {
-                    // VOP3P neg_lo[0] applies to low half; neg_hi[0] is not separately stored unless needed
-                }
+                if (half == 1 && (inst.neg_hi & 1)) val = -val;
                 A[m][k] = val;
             }
         }
@@ -8712,6 +8890,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                 uint16_t raw = half ? (uint16_t)(dw >> 16) : (uint16_t)(dw & 0xFFFF);
                 float val = is_bf16 ? bf16_to_f32(raw) : f16_to_f32(raw);
                 if (half == 0 && (inst.neg & 2)) val = -val;
+                if (half == 1 && (inst.neg_hi & 2)) val = -val;
                 B[k][n] = val;
             }
         }
@@ -8767,9 +8946,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::V_WMMA_I32_16X16X16_IU8: {
         // Src0/Src1: 2 VGPRs per lane (8 int8/uint8 values per lane across 2 half-waves of 16 lanes)
         // In VOP3P IU8, neg_lo[0] indicates signed A, neg_lo[1] indicates signed B.
-        // Default to signed if inst.neg == 0 for convenience in synthetic tests.
-        const bool a_signed = (inst.neg == 0) || ((inst.neg & 1) != 0);
-        const bool b_signed = (inst.neg == 0) || ((inst.neg & 2) != 0);
+        const bool a_signed = (inst.neg & 1) != 0;
+        const bool b_signed = (inst.neg & 2) != 0;
         int32_t A[16][16], B[16][16];
         for (int m = 0; m < 16; m++) {
             for (int k = 0; k < 16; k++) {
@@ -8814,8 +8992,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         break;
     }
     case Opcode::V_WMMA_I32_16X16X16_IU4: {
-        const bool a_signed = (inst.neg == 0) || ((inst.neg & 1) != 0);
-        const bool b_signed = (inst.neg == 0) || ((inst.neg & 2) != 0);
+        const bool a_signed = (inst.neg & 1) != 0;
+        const bool b_signed = (inst.neg & 2) != 0;
         int32_t A[16][16], B[16][16];
         for (int m = 0; m < 16; m++) {
             for (int k = 0; k < 16; k++) {

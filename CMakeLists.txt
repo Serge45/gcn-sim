@@ -25,7 +25,7 @@ target_include_directories(gcnsim
     PUBLIC  include)
 
 target_link_libraries(gcnsim PRIVATE yaml-cpp)
-target_compile_options(gcnsim PRIVATE -Wall -Wextra)
+target_compile_options(gcnsim PRIVATE -Wall -Wextra -Werror=invalid-offsetof -Werror=return-type)
 
 add_library(gcnsim_hip SHARED
     src/hijack/hip_hijack.cpp)

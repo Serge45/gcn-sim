@@ -27,7 +27,7 @@ using namespace gcnsim;
 static std::unique_ptr<WavefrontState> make_wave() {
     auto ws = std::make_unique<WavefrontState>();
     // Zero POD fields only; std::vector members are default-constructed by make_unique
-    memset((void*)ws.get(), 0, offsetof(WavefrontState, lgkm_pending));
+    ws->reset_zero();
     ws->exec = ~0ULL;  // all 64 lanes active
     return ws;
 }

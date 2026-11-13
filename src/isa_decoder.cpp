@@ -83,9 +83,9 @@ static Operand decode_src(uint32_t enc, const uint8_t* pc_next4, bool is_gfx1201
         op.kind = Operand::Kind::INLINE_CONST;
         op.imm = 0xC0800000;
     } else if (enc == 251) {
-        op.kind = Operand::Kind::SCC; // vccz
+        op.kind = Operand::Kind::VCCZ;
     } else if (enc == 252) {
-        op.kind = Operand::Kind::SCC; // execz
+        op.kind = Operand::Kind::EXECZ;
     } else if (enc == 253) {
         op.kind = Operand::Kind::SCC;
     } else if (enc == 255) {
@@ -1744,10 +1744,8 @@ static Instruction decode_gfx12(const uint8_t* pc) {
         uint32_t sbase = (w0 & 0x3F) << 1;
         uint32_t sdst  = (w0 >> 6) & 0x7F;
         uint32_t op    = (w0 >> 13) & 0xFF;
-        inst.dst.kind  = Operand::Kind::SGPR;
-        inst.dst.index = sdst;
-        inst.src[0].kind  = Operand::Kind::SGPR;
-        inst.src[0].index = sbase;
+        inst.dst       = decode_sdst(sdst, true);
+        inst.src[0]    = decode_sdst(sbase, true);
         // Sign-extend 24-bit immediate offset in w1[23:0]
         int32_t ioff = (int32_t)(w1 & 0xFFFFFF);
         if (ioff & 0x800000) ioff |= ~0xFFFFFF;
@@ -1797,8 +1795,9 @@ static Instruction decode_gfx12(const uint8_t* pc) {
         int32_t  ioff  = (int32_t)w2 >> 8; // 24-bit signed offset in w2[31:8]
         inst.flat_offset = ioff;
 
-        bool is_global = (top8 == 0xEE) || (top8 == 0xED);
-        bool is_store  = false;
+        bool is_scratch = (top8 == 0xED);
+        bool is_global  = (top8 == 0xEE);
+        bool is_store   = false;
         switch (op) {
             case 0x10: inst.opcode = is_global ? Opcode::GLOBAL_LOAD_UBYTE : Opcode::FLAT_LOAD_UBYTE; break;
             case 0x11: inst.opcode = is_global ? Opcode::GLOBAL_LOAD_SBYTE : Opcode::FLAT_LOAD_SBYTE; break;
@@ -1814,9 +1813,9 @@ static Instruction decode_gfx12(const uint8_t* pc) {
             case 0x1B: inst.opcode = is_global ? Opcode::GLOBAL_STORE_DWORDX2 : Opcode::FLAT_STORE_DWORDX2; is_store = true; break;
             case 0x1C: inst.opcode = is_global ? Opcode::GLOBAL_STORE_DWORDX3 : Opcode::FLAT_STORE_DWORDX3; is_store = true; break;
             case 0x1D: inst.opcode = is_global ? Opcode::GLOBAL_STORE_DWORDX4 : Opcode::FLAT_STORE_DWORDX4; is_store = true; break;
-            case 0x20: inst.opcode = Opcode::GLOBAL_LOAD_SHORT_D16; break;
-            case 0x23: inst.opcode = Opcode::GLOBAL_LOAD_SHORT_D16_HI; break;
-            case 0x25: inst.opcode = Opcode::GLOBAL_STORE_SHORT_D16_HI; is_store = true; break;
+            case 0x20: inst.opcode = is_scratch ? Opcode::SCRATCH_LOAD_SHORT_D16 : Opcode::GLOBAL_LOAD_SHORT_D16; break;
+            case 0x23: inst.opcode = is_scratch ? Opcode::SCRATCH_LOAD_SHORT_D16_HI : Opcode::GLOBAL_LOAD_SHORT_D16_HI; break;
+            case 0x25: inst.opcode = is_scratch ? Opcode::SCRATCH_STORE_SHORT_D16_HI : Opcode::GLOBAL_STORE_SHORT_D16_HI; is_store = true; break;
             case 0x2B: inst.opcode = Opcode::GLOBAL_INV; return inst;
             default:   inst.opcode = Opcode::UNKNOWN; break;
         }

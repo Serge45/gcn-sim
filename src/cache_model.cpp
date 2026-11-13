@@ -31,6 +31,11 @@ void CacheSet::promote(uint32_t way) {
 // --- CacheLevel ---
 
 CacheLevel::CacheLevel(uint32_t size_bytes, uint32_t ways, uint32_t line_bytes) {
+    if (ways == 0 || line_bytes == 0 || size_bytes == 0) {
+        num_sets_ = 0;
+        line_shift_ = 0;
+        return;
+    }
     // Compute log2(line_bytes) for shift
     line_shift_ = 0;
     uint32_t v = line_bytes;
@@ -61,6 +66,7 @@ CacheModel::CacheModel(const CacheConfig& cfg, uint32_t num_cus)
 {}
 
 CacheHitLevel CacheModel::access(uint64_t addr, uint32_t cu_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!l1_per_cu_.empty()) {
         auto& l1 = l1_per_cu_[cu_id % l1_per_cu_.size()];
         if (l1.access(addr)) return CacheHitLevel::L1;
@@ -71,12 +77,14 @@ CacheHitLevel CacheModel::access(uint64_t addr, uint32_t cu_id) {
 }
 
 uint64_t CacheModel::l1_hits() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     uint64_t total = 0;
     for (const auto& l1 : l1_per_cu_) total += l1.hits();
     return total;
 }
 
 uint64_t CacheModel::l1_misses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     uint64_t total = 0;
     for (const auto& l1 : l1_per_cu_) total += l1.misses();
     return total;
