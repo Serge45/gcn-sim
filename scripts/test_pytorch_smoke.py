@@ -4,6 +4,8 @@ Phase 10 PyTorch (ROCm) end-to-end anti-regression smoke test suite for gcn-sim.
 Run with:
   LD_PRELOAD=build/libamdhip64.so .venv-rocm/bin/python scripts/test_pytorch_smoke.py
 """
+import copy
+import math
 import sys
 import torch
 import torch.nn as nn
@@ -77,6 +79,70 @@ def main():
         ref_mod = F.softmax(model(x_mod), dim=-1)
         gpu_mod = F.softmax(model.cuda()(x_mod.cuda()), dim=-1)
     check_close("stage4_mini_model", gpu_mod, ref_mod, 1e-4)
+
+    # Stage 4B: 2-layer MiniGPT (Decoder-only Transformer)
+    class CausalSelfAttention(nn.Module):
+        def __init__(self, d_model, n_heads):
+            super().__init__()
+            self.n_heads = n_heads
+            self.d_head = d_model // n_heads
+            self.qkv = nn.Linear(d_model, 3 * d_model)
+            self.proj = nn.Linear(d_model, d_model)
+
+        def forward(self, x):
+            B, T, C = x.shape
+            qkv = self.qkv(x).view(B, T, 3, self.n_heads, self.d_head).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.d_head))
+            mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, T, T)
+            att = att.masked_fill(mask == 0, float("-inf"))
+            att = F.softmax(att, dim=-1)
+            y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+            return self.proj(y)
+
+    class Block(nn.Module):
+        def __init__(self, d_model, n_heads):
+            super().__init__()
+            self.ln1 = nn.LayerNorm(d_model)
+            self.attn = CausalSelfAttention(d_model, n_heads)
+            self.ln2 = nn.LayerNorm(d_model)
+            self.mlp = nn.Sequential(
+                nn.Linear(d_model, 4 * d_model),
+                nn.GELU(),
+                nn.Linear(4 * d_model, d_model),
+            )
+
+        def forward(self, x):
+            x = x + self.attn(self.ln1(x))
+            x = x + self.mlp(self.ln2(x))
+            return x
+
+    class MiniGPT(nn.Module):
+        def __init__(self, vocab_size=64, block_size=16, d_model=64, n_heads=4, n_layers=2):
+            super().__init__()
+            self.tok_emb = nn.Embedding(vocab_size, d_model)
+            self.pos_emb = nn.Embedding(block_size, d_model)
+            self.blocks = nn.ModuleList([Block(d_model, n_heads) for _ in range(n_layers)])
+            self.ln_f = nn.LayerNorm(d_model)
+            self.head = nn.Linear(d_model, vocab_size, bias=False)
+
+        def forward(self, idx):
+            B, T = idx.shape
+            pos = torch.arange(0, T, device=idx.device)
+            x = self.tok_emb(idx) + self.pos_emb(pos)
+            for blk in self.blocks:
+                x = blk(x)
+            return self.head(self.ln_f(x))
+
+    torch.manual_seed(1234)
+    gpt_cpu = MiniGPT().eval()
+    idx_cpu = torch.randint(0, 64, (2, 16))
+    with torch.no_grad():
+        logits_cpu = gpt_cpu(idx_cpu)
+        logits_gpu = copy.deepcopy(gpt_cpu).cuda().eval()(idx_cpu.cuda()).cpu()
+    check_close("stage4_minigpt_logits", logits_gpu, logits_cpu, 1e-4)
+    assert torch.equal(logits_gpu[:, -1, :].argmax(dim=-1), logits_cpu[:, -1, :].argmax(dim=-1)), \
+        "MiniGPT next-token mismatch"
 
     print("[PyTorch Smoke] ALL PYTORCH SMOKE CHECKS PASSED!")
     return 0

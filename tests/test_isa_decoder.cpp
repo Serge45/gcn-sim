@@ -593,9 +593,9 @@ TEST(ISADecoder, VOP2_SDWA) {
     // VOP2 with src0=0xF9 triggers SDWA
     // w0: [31]=0, [30:25]=op=1(V_ADD_F32), [24:17]=vdst=0, [16:9]=vsrc1=2, [8:0]=0xF9
     uint32_t w0 = (1u << 25) | (0u << 17) | (2u << 9) | 0xF9u;
-    // SDWA w1: [7:0]=real_src0=1(v1), [10:8]=src0_sel=0(BYTE_0), [18:16]=src1_sel=5(WORD_1),
-    //          [26:24]=dst_sel=4(WORD_0), [28:27]=dst_unused=0(PAD)
-    uint32_t w1 = 1u | (0u << 8) | (5u << 16) | (4u << 24);
+    // GFX9 VOP_SDWA w1: [7:0]=real_src0=1(v1), [10:8]=dst_sel=4(WORD_0),
+    //               [18:16]=src0_sel=0(BYTE_0), [26:24]=src1_sel=5(WORD_1)
+    uint32_t w1 = 1u | (4u << 8) | (0u << 16) | (5u << 24);
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
     EXPECT_EQ(inst.format, InstFormat::VOP2);
@@ -638,8 +638,8 @@ TEST(ISADecoder, VOP1_SDWA) {
     // VOP1 with src0=0xF9
     // VOP1: [31:25]=0x3F, [24:17]=vdst=0, [16:9]=op=1(v_mov_b32), [8:0]=0xF9
     uint32_t w0 = (0x3Fu << 25) | (0u << 17) | (1u << 9) | 0xF9u;
-    // SDWA w1: [7:0]=real_src0=5(v5), [10:8]=src0_sel=2(BYTE_2), [26:24]=dst_sel=6(DWORD)
-    uint32_t w1 = 5u | (2u << 8) | (6u << 24);
+    // GFX9 VOP_SDWA w1: [7:0]=real_src0=5(v5), [10:8]=dst_sel=6(DWORD), [18:16]=src0_sel=2(BYTE_2)
+    uint32_t w1 = 5u | (6u << 8) | (2u << 16);
     auto b = enc2(w0, w1);
     Instruction inst = decode(b.data());
     EXPECT_EQ(inst.format, InstFormat::VOP1);

@@ -87,6 +87,7 @@ struct WavefrontState {
     bool     is_gfx1201 = false;            // true if target is RDNA4 / gfx1201
     uint32_t mfma_scale_a[WAVE_SIZE] = {0}; // CDNA4: scale A factors from v_mfma_ld_scale_b32
     uint32_t mfma_scale_b[WAVE_SIZE] = {0}; // CDNA4: scale B factors from v_mfma_ld_scale_b32
+    uint8_t  dispatch_packet[64] = {0};     // Synthetic HSA AQL dispatch packet for DISPATCH_PTR
     // In-flight memory op queues (completion timestamps, drained by s_waitcnt / s_wait_*)
     std::vector<uint64_t> lgkm_pending;   // DS reads/writes and SMEM loads (GFX9)
     std::vector<uint64_t> vm_pending;     // MUBUF/MTBUF/FLAT/GLOBAL loads/stores (GFX9) & loadcnt (GFX12)
@@ -118,6 +119,7 @@ struct WavefrontState {
         is_gfx908 = false; is_gfx942 = false; is_gfx950 = false; is_gfx1201 = false;
         std::memset(mfma_scale_a, 0, sizeof(mfma_scale_a));
         std::memset(mfma_scale_b, 0, sizeof(mfma_scale_b));
+        std::memset(dispatch_packet, 0, sizeof(dispatch_packet));
         lgkm_pending.clear();
         vm_pending.clear();
         store_pending.clear();

@@ -2470,54 +2470,81 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     case Opcode::V_AND_B32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b = read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = a & b;
+            uint32_t a = read_vsrc_ex(wave, inst, 0, lane);
+            uint32_t b = read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, a & b);
         }
         break;
     }
     case Opcode::V_OR_B32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b = read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = a | b;
+            uint32_t a = read_vsrc_ex(wave, inst, 0, lane);
+            uint32_t b = read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, a | b);
         }
         break;
     }
     case Opcode::V_XOR_B32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t a = read_vsrc(wave, inst.src[0], lane);
-            uint32_t b = read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = a ^ b;
+            uint32_t a = read_vsrc_ex(wave, inst, 0, lane);
+            uint32_t b = read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, a ^ b);
         }
         break;
     }
     case Opcode::V_LSHLREV_B32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 31;
-            uint32_t val   = read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = val << shift;
+            uint32_t shift = read_vsrc_ex(wave, inst, 0, lane) & 31;
+            uint32_t val   = read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, val << shift);
         }
         break;
     }
     case Opcode::V_LSHRREV_B32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 31;
-            uint32_t val   = read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = val >> shift;
+            uint32_t shift = read_vsrc_ex(wave, inst, 0, lane) & 31;
+            uint32_t val   = read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, val >> shift);
         }
         break;
     }
     case Opcode::V_ASHRREV_I32: {
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 31;
-            int32_t  val   = (int32_t)read_vsrc(wave, inst.src[1], lane);
-            wave.vgpr[inst.dst.index][lane] = (uint32_t)(val >> shift);
+            uint32_t shift = read_vsrc_ex(wave, inst, 0, lane) & 31;
+            int32_t  val   = (int32_t)read_vsrc_ex(wave, inst, 1, lane);
+            write_vdst_sdwa(wave, inst, lane, (uint32_t)(val >> shift));
+        }
+        break;
+    }
+    case Opcode::V_LSHLREV_B16: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 15;
+            uint32_t val   = read_vsrc(wave, inst.src[1], lane) & 0xFFFFu;
+            wave.vgpr[inst.dst.index][lane] = (val << shift) & 0xFFFFu;
+        }
+        break;
+    }
+    case Opcode::V_LSHRREV_B16: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 15;
+            uint32_t val   = read_vsrc(wave, inst.src[1], lane) & 0xFFFFu;
+            wave.vgpr[inst.dst.index][lane] = (val >> shift) & 0xFFFFu;
+        }
+        break;
+    }
+    case Opcode::V_ASHRREV_I16: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t shift = read_vsrc(wave, inst.src[0], lane) & 15;
+            int16_t  val   = static_cast<int16_t>(read_vsrc(wave, inst.src[1], lane) & 0xFFFFu);
+            wave.vgpr[inst.dst.index][lane] = static_cast<uint16_t>(val >> shift);
         }
         break;
     }
@@ -3359,92 +3386,42 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
     // -----------------------------------------------------------------------
     // Vector compare — i64/u64
     // -----------------------------------------------------------------------
-    case Opcode::V_CMP_LT_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            int64_t a = (int64_t)(((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) |
-                                   wave.vgpr[inst.src[0].index][lane]);
-            int64_t b = (int64_t)(((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) |
-                                   wave.vgpr[inst.src[1].index][lane]);
-            if (a < b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_EQ_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a == b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_GE_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            int64_t a = (int64_t)(((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane]);
-            int64_t b = (int64_t)(((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane]);
-            if (a >= b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_NE_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a != b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_LT_U64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a < b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_EQ_U64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a == b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_GE_U64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a >= b) mask |= (1ULL << lane);
-        }
-        write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
+    case Opcode::V_CMP_LT_I64:
+    case Opcode::V_CMP_EQ_I64:
+    case Opcode::V_CMP_LE_I64:
+    case Opcode::V_CMP_GT_I64:
+    case Opcode::V_CMP_GE_I64:
+    case Opcode::V_CMP_NE_I64:
+    case Opcode::V_CMP_LT_U64:
+    case Opcode::V_CMP_EQ_U64:
+    case Opcode::V_CMP_LE_U64:
+    case Opcode::V_CMP_GT_U64:
+    case Opcode::V_CMP_GE_U64:
     case Opcode::V_CMP_NE_U64: {
         uint64_t mask = 0;
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a != b) mask |= (1ULL << lane);
+            uint64_t ua = read_vsrc64(wave, inst.src[0], lane);
+            uint64_t ub = read_vsrc64(wave, inst.src[1], lane);
+            int64_t sa = static_cast<int64_t>(ua);
+            int64_t sb = static_cast<int64_t>(ub);
+            bool cond = false;
+            switch (inst.opcode) {
+                case Opcode::V_CMP_LT_I64: cond = (sa <  sb); break;
+                case Opcode::V_CMP_EQ_I64: cond = (sa == sb); break;
+                case Opcode::V_CMP_LE_I64: cond = (sa <= sb); break;
+                case Opcode::V_CMP_GT_I64: cond = (sa >  sb); break;
+                case Opcode::V_CMP_GE_I64: cond = (sa >= sb); break;
+                case Opcode::V_CMP_NE_I64: cond = (sa != sb); break;
+                case Opcode::V_CMP_LT_U64: cond = (ua <  ub); break;
+                case Opcode::V_CMP_EQ_U64: cond = (ua == ub); break;
+                case Opcode::V_CMP_LE_U64: cond = (ua <= ub); break;
+                case Opcode::V_CMP_GT_U64: cond = (ua >  ub); break;
+                case Opcode::V_CMP_GE_U64: cond = (ua >= ub); break;
+                case Opcode::V_CMP_NE_U64: cond = (ua != ub); break;
+                default: break;
+            }
+            if (cond) mask |= (1ULL << lane);
         }
         write_lane_mask(wave, inst.dst, mask);
         break;
@@ -7927,64 +7904,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         else write_lane_mask(wave, inst.dst, mask);
         break;
     }
-    // -----------------------------------------------------------------------
-    // VOPC — i64 comparisons (LE, GT missing)
-    // -----------------------------------------------------------------------
-    case Opcode::V_CMP_LE_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            int64_t a = (int64_t)(((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane]);
-            int64_t b = (int64_t)(((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane]);
-            if (a <= b) mask |= (1ULL << lane);
-        }
-        if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            write_lane_mask(wave, inst.dst, mask);
-        else write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_GT_I64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            int64_t a = (int64_t)(((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane]);
-            int64_t b = (int64_t)(((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane]);
-            if (a > b) mask |= (1ULL << lane);
-        }
-        if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            write_lane_mask(wave, inst.dst, mask);
-        else write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    // -----------------------------------------------------------------------
-    // VOPC — u64 comparisons (LE, GT missing)
-    // -----------------------------------------------------------------------
-    case Opcode::V_CMP_LE_U64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a <= b) mask |= (1ULL << lane);
-        }
-        if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            write_lane_mask(wave, inst.dst, mask);
-        else write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
-    case Opcode::V_CMP_GT_U64: {
-        uint64_t mask = 0;
-        for (int lane = 0; lane < WAVE_SIZE; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint64_t a = ((uint64_t)wave.vgpr[inst.src[0].index + 1][lane] << 32) | wave.vgpr[inst.src[0].index][lane];
-            uint64_t b = ((uint64_t)wave.vgpr[inst.src[1].index + 1][lane] << 32) | wave.vgpr[inst.src[1].index][lane];
-            if (a > b) mask |= (1ULL << lane);
-        }
-        if (inst.dst.kind == Operand::Kind::VCC || inst.dst.kind == Operand::Kind::NONE)
-            write_lane_mask(wave, inst.dst, mask);
-        else write_lane_mask(wave, inst.dst, mask);
-        break;
-    }
+    // (V_CMP_LE_I64, V_CMP_GT_I64, V_CMP_LE_U64, V_CMP_GT_U64 unified above)
     // -----------------------------------------------------------------------
     // VOP3A — additional f64 ops
     // -----------------------------------------------------------------------

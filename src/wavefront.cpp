@@ -115,7 +115,16 @@ void init_wavefront(WavefrontState& wave,
         sgpr_idx += 4;
     }
     if (kcp & KCP_ENABLE_SGPR_DISPATCH_PTR) {
-        // 2 SGPRs for AQL dispatch packet pointer — set to 0
+        // Populate synthetic 64B HSA AQL kernel dispatch packet (workgroup_size_x/y/z at +4/+6/+8)
+        uint16_t bx = static_cast<uint16_t>(block_x);
+        uint16_t by = static_cast<uint16_t>(block_y);
+        uint16_t bz = static_cast<uint16_t>(block_z);
+        std::memcpy(wave.dispatch_packet + 4, &bx, 2);
+        std::memcpy(wave.dispatch_packet + 6, &by, 2);
+        std::memcpy(wave.dispatch_packet + 8, &bz, 2);
+        uint64_t dp = reinterpret_cast<uint64_t>(wave.dispatch_packet);
+        wave.sgpr[sgpr_idx]     = static_cast<uint32_t>(dp & 0xFFFFFFFFu);
+        wave.sgpr[sgpr_idx + 1] = static_cast<uint32_t>(dp >> 32);
         sgpr_idx += 2;
     }
     if (kcp & KCP_ENABLE_SGPR_QUEUE_PTR) {

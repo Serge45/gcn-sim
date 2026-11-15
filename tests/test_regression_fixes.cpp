@@ -601,3 +601,84 @@ TEST(RegressionFixesTest, WavefrontV0MbcntDivAndBf16_1k) {
     std::memcpy(&mfma_out, &ws64->vgpr[24][0], 4);
     EXPECT_FLOAT_EQ(mfma_out, 16.0f);
 }
+
+// 10. MiniGPT fixes: V_LSHLREV_B16/V_LSHRREV_B16/V_ASHRREV_I16, V_CMP_GT_I64 SGPR src0,
+//     KCP_ENABLE_SGPR_DISPATCH_PTR, and GFX9 VOP2 SDWA (S1 SGPR + SRC0_SEL + DST_SEL).
+TEST(RegressionFixesTest, MiniGptInstructionAndSdwaFixes) {
+    // (a) GFX9 VOP2 16-bit shifts: v_lshlrev_b16_e32 v1, 8, v3 -> 0x54020688
+    uint32_t lshl16_w = 0x54020688u;
+    Instruction lshl16 = decode(reinterpret_cast<const uint8_t*>(&lshl16_w), false, false, false);
+    EXPECT_EQ(lshl16.opcode, Opcode::V_LSHLREV_B16);
+    auto ws = make_wave(false);
+    ws->vgpr[3][0] = 0x123400ABu;
+    execute_instruction(*ws, lshl16);
+    EXPECT_EQ(ws->vgpr[1][0], 0xAB00u);
+
+    Instruction lshr16{};
+    lshr16.opcode = Opcode::V_LSHRREV_B16;
+    lshr16.dst = {Operand::Kind::VGPR, 2};
+    lshr16.src[0] = {Operand::Kind::INLINE_CONST, 0, 4};
+    lshr16.src[1] = {Operand::Kind::VGPR, 3};
+    ws->vgpr[3][0] = 0xFFFF00F0u;
+    execute_instruction(*ws, lshr16);
+    EXPECT_EQ(ws->vgpr[2][0], 0x000Fu);
+
+    Instruction ashr16{};
+    ashr16.opcode = Opcode::V_ASHRREV_I16;
+    ashr16.dst = {Operand::Kind::VGPR, 2};
+    ashr16.src[0] = {Operand::Kind::INLINE_CONST, 0, 4};
+    ashr16.src[1] = {Operand::Kind::VGPR, 3};
+    ws->vgpr[3][0] = 0x0000FF80u; // -128 in int16
+    execute_instruction(*ws, ashr16);
+    EXPECT_EQ(ws->vgpr[2][0], 0xFFF8u); // -8 in uint16
+
+    // (b) V_CMP_GT_I64 with SGPR src0 (s[10:11] > v[0:1])
+    ws->sgpr[10] = 16u;
+    ws->sgpr[11] = 0u;
+    ws->vgpr[0][0] = 5u;
+    ws->vgpr[1][0] = 0u;
+    ws->vgpr[0][1] = 20u;
+    ws->vgpr[1][1] = 0u;
+    ws->exec = 0x3ULL;
+    Instruction cmp64{};
+    cmp64.opcode = Opcode::V_CMP_GT_I64;
+    cmp64.dst = {Operand::Kind::VCC, 0};
+    cmp64.src[0] = {Operand::Kind::SGPR, 10};
+    cmp64.src[1] = {Operand::Kind::VGPR, 0};
+    execute_instruction(*ws, cmp64);
+    EXPECT_EQ(ws->vcc & 0x3ULL, 0x1ULL);
+
+    // (c) KCP_ENABLE_SGPR_DISPATCH_PTR populates synthetic AQL dispatch packet
+    KernelDescriptor kd{};
+    kd.kernel_code_properties = KCP_ENABLE_SGPR_DISPATCH_PTR;
+    init_wavefront(*ws, kd, nullptr, nullptr, 0, 0, 0, 0, 0, 1, 256, 2, 3);
+    uint64_t dp = static_cast<uint64_t>(ws->sgpr[0]) |
+                  (static_cast<uint64_t>(ws->sgpr[1]) << 32);
+    ASSERT_NE(dp, 0ULL);
+    uint16_t bx = 0, by = 0, bz = 0;
+    std::memcpy(&bx, reinterpret_cast<const void*>(dp + 4), 2);
+    std::memcpy(&by, reinterpret_cast<const void*>(dp + 6), 2);
+    std::memcpy(&bz, reinterpret_cast<const void*>(dp + 8), 2);
+    EXPECT_EQ(bx, 256u);
+    EXPECT_EQ(by, 2u);
+    EXPECT_EQ(bz, 3u);
+
+    // (d) GFX9 VOP2 SDWA: v_and_b32_sdwa v3, v1, s2 dst_sel:DWORD src0_sel:WORD_1 src1_sel:DWORD
+    //     0x260604F9 0x86050601 (S1=1 -> src1=s2, dst_sel=DWORD(6), src0_sel=WORD_1(5), src1_sel=DWORD(6))
+    uint32_t sdwa_words[2] = {0x260604F9u, 0x86050601u};
+    Instruction sdwa = decode(reinterpret_cast<const uint8_t*>(sdwa_words), false, false, false);
+    EXPECT_TRUE(sdwa.is_sdwa);
+    EXPECT_EQ(sdwa.src[0].kind, Operand::Kind::VGPR);
+    EXPECT_EQ(sdwa.src[0].index, 1u);
+    EXPECT_EQ(sdwa.src[1].kind, Operand::Kind::SGPR);
+    EXPECT_EQ(sdwa.src[1].index, 2u);
+    EXPECT_EQ(sdwa.sdwa_dst_sel, 6u);
+    EXPECT_EQ(sdwa.sdwa_src0_sel, 5u);
+    EXPECT_EQ(sdwa.sdwa_src1_sel, 6u);
+
+    ws->exec = 1ULL;
+    ws->vgpr[1][0] = 0x00AB1234u;
+    ws->sgpr[2]    = 0x000000FFu;
+    execute_instruction(*ws, sdwa);
+    EXPECT_EQ(ws->vgpr[3][0], 0x000000ABu);
+}
