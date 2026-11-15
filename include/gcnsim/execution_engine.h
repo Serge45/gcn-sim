@@ -9,6 +9,7 @@ namespace gcnsim {
 struct LaunchConfig {
     uint32_t grid_x, grid_y, grid_z;    // total threads in each dim
     uint32_t block_x, block_y, block_z; // workgroup size
+    uint32_t shared_mem_bytes = 0;      // dynamic shared memory (LDS) bytes
     const void* kernarg;                 // pointer to kernarg buffer
     size_t      kernarg_size;
     bool enable_cycle_counting = false;  // if true, wavefronts accumulate cycle_count

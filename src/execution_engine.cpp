@@ -27,6 +27,22 @@ void init_wavefront(WavefrontState& wave,
                     uint32_t wave_in_wg, uint32_t waves_per_wg,
                     uint32_t block_x, uint32_t block_y, uint32_t block_z);
 
+static void set_dispatch_ptr(WavefrontState& wave, const KernelDescriptor& kd, const uint8_t* dispatch_pkt) {
+    if ((kd.kernel_code_properties & KCP_ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER) && wave.scratch_ptr != nullptr) {
+        // Scratch SRD using 48-bit sentinel base 0x0000F00200000000ULL (stride=0, non-canonical gap)
+        // so mubuf_addr resolves per-lane private memory cleanly even if s[0:3] is copied.
+        wave.sgpr[0] = 0x00000000u;
+        wave.sgpr[1] = 0x0000F002u;
+        wave.sgpr[2] = wave.scratch_per_lane;
+        wave.sgpr[3] = 0x00020000u;
+    }
+    if (!(kd.kernel_code_properties & KCP_ENABLE_SGPR_DISPATCH_PTR)) return;
+    int sgpr_idx = (kd.kernel_code_properties & KCP_ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER) ? 4 : 0;
+    uint64_t addr = reinterpret_cast<uint64_t>(dispatch_pkt);
+    wave.sgpr[sgpr_idx]     = static_cast<uint32_t>(addr & 0xFFFFFFFFULL);
+    wave.sgpr[sgpr_idx + 1] = static_cast<uint32_t>(addr >> 32);
+}
+
 WaveStatus run_wavefront(WavefrontState& wave, uint64_t max_insns = 10000ULL);
 WaveStatus step_wavefront(WavefrontState& wave);
 
@@ -131,6 +147,31 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
     } mem_guard;
     mem_guard.add(kernarg, kernarg_size, "kernarg");
 
+    // Build HSA AQL kernel dispatch packet for kernels with KCP_ENABLE_SGPR_DISPATCH_PTR
+    uint8_t dispatch_pkt[64] = {};
+    {
+        uint16_t header = 0x0102;
+        uint16_t setup = 3;
+        uint16_t wg_x = static_cast<uint16_t>(block_x);
+        uint16_t wg_y = static_cast<uint16_t>(block_y);
+        uint16_t wg_z = static_cast<uint16_t>(block_z);
+        uint32_t priv_sz = kernel.descriptor->private_segment_fixed_size;
+        uint32_t grp_sz = kernel.descriptor->group_segment_fixed_size;
+        uint64_t ka_addr = reinterpret_cast<uint64_t>(kernarg);
+        std::memcpy(dispatch_pkt + 0x00, &header, 2);
+        std::memcpy(dispatch_pkt + 0x02, &setup, 2);
+        std::memcpy(dispatch_pkt + 0x04, &wg_x, 2);
+        std::memcpy(dispatch_pkt + 0x06, &wg_y, 2);
+        std::memcpy(dispatch_pkt + 0x08, &wg_z, 2);
+        std::memcpy(dispatch_pkt + 0x0C, &grid_x, 4);
+        std::memcpy(dispatch_pkt + 0x10, &grid_y, 4);
+        std::memcpy(dispatch_pkt + 0x14, &grid_z, 4);
+        std::memcpy(dispatch_pkt + 0x18, &priv_sz, 4);
+        std::memcpy(dispatch_pkt + 0x1C, &grp_sz, 4);
+        std::memcpy(dispatch_pkt + 0x28, &ka_addr, 8);
+    }
+    mem_guard.add(dispatch_pkt, sizeof(dispatch_pkt), "dispatch_pkt");
+
     uint32_t num_cus = cfg.num_cus;
     if (num_cus == 0) {
         if (kernel.is_gfx950) num_cus = 256;
@@ -164,8 +205,8 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         global_cache = std::make_unique<CacheModel>(ccfg, num_cus);
     }
 
-    // Determine LDS size from kernel descriptor
-    uint32_t lds_bytes = kernel.descriptor->group_segment_fixed_size;
+    // Determine LDS size from kernel descriptor + dynamic shared memory
+    uint32_t lds_bytes = kernel.descriptor->group_segment_fixed_size + cfg.shared_mem_bytes;
 
     // Determine scratch (private) size per lane from kernel descriptor
     uint32_t scratch_per_lane = kernel.descriptor->private_segment_fixed_size;
@@ -244,6 +285,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                                    awg.wg_x, awg.wg_y, awg.wg_z,
                                    w, waves_per_wg,
                                    block_x, block_y, block_z);
+                    set_dispatch_ptr(*awg.waves[w], *kernel.descriptor, dispatch_pkt);
                     awg.waves[w]->lds_ptr  = lds_ptr;
                     awg.waves[w]->lds_size = lds_bytes;
                     awg.waves[w]->is_gfx908 = kernel.is_gfx908;
@@ -257,6 +299,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                     awg.waves[w]->scratch_ptr      = scratch_per_wave > 0 ? awg.scratch_bufs[w].data() : nullptr;
                     awg.waves[w]->scratch_size     = scratch_per_wave;
                     awg.waves[w]->scratch_per_lane = scratch_per_lane;
+                    set_dispatch_ptr(*awg.waves[w], *kernel.descriptor, dispatch_pkt);
 
                     awg.waves[w]->count_cycles = cfg.enable_cycle_counting;
                     awg.waves[w]->global_mem_latency = cfg.global_mem_latency;
@@ -384,6 +427,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
                            wg_x, wg_y, wg_z,
                            w, waves_per_wg,
                            block_x, block_y, block_z);
+            set_dispatch_ptr(*waves[w], *kernel.descriptor, dispatch_pkt);
             waves[w]->lds_ptr  = lds_ptr;
             waves[w]->lds_size = lds_bytes;
             waves[w]->is_gfx908 = kernel.is_gfx908;
@@ -397,6 +441,7 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             waves[w]->scratch_ptr      = scratch_per_wave > 0 ? scratch_bufs[w].data() : nullptr;
             waves[w]->scratch_size     = scratch_per_wave;
             waves[w]->scratch_per_lane = scratch_per_lane;
+            set_dispatch_ptr(*waves[w], *kernel.descriptor, dispatch_pkt);
 
             waves[w]->count_cycles = cfg.enable_cycle_counting;
             waves[w]->global_mem_latency = cfg.global_mem_latency;

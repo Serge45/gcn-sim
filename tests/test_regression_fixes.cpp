@@ -15,6 +15,14 @@
 
 namespace gcnsim {
 void execute_instruction(WavefrontState& wave, const Instruction& inst);
+void init_wavefront(WavefrontState& wave,
+                    const KernelDescriptor& kd,
+                    const uint8_t* kernarg_ptr,
+                    const uint8_t* code_ptr,
+                    size_t code_size,
+                    uint32_t wg_id_x, uint32_t wg_id_y, uint32_t wg_id_z,
+                    uint32_t wave_in_wg, uint32_t waves_per_wg,
+                    uint32_t block_x, uint32_t block_y, uint32_t block_z);
 } // namespace gcnsim
 
 using namespace gcnsim;
@@ -413,4 +421,183 @@ TEST(RegressionFixesTest, HijackAndElfSafety) {
     uint8_t tiny_elf[8] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
     std::string err;
     EXPECT_FALSE(load_hsaco_from_memory(tiny_elf, sizeof(tiny_elf), err).has_value());
+}
+
+// 7. Phase 10: S_ANDN2_SAVEEXEC / S_ORN2_SAVEEXEC (B64 & B32) semantics
+TEST(RegressionFixesTest, SaveExecAndn2Orn2Semantics) {
+    // GFX9 B64: exec = src & ~old_exec, dst = old_exec
+    {
+        auto ws = make_wave(false);
+        ws->exec = 0x00FF00FF00FF00FFULL;
+        ws->sgpr[2] = 0xFFFFFFFFu;
+        ws->sgpr[3] = 0x0F0F0F0Fu;
+
+        Instruction inst{};
+        inst.opcode = Opcode::S_ANDN2_SAVEEXEC_B64;
+        inst.dst.kind = Operand::Kind::SGPR;
+        inst.dst.index = 0;
+        inst.src[0].kind = Operand::Kind::SGPR;
+        inst.src[0].index = 2;
+        execute_instruction(*ws, inst);
+
+        EXPECT_EQ(ws->sgpr[0], 0x00FF00FFu);
+        EXPECT_EQ(ws->sgpr[1], 0x00FF00FFu);
+        uint64_t src = 0x0F0F0F0FFFFFFFFFULL;
+        uint64_t expected = src & ~0x00FF00FF00FF00FFULL;
+        EXPECT_EQ(ws->exec, expected);
+    }
+    // GFX9 B64: S_ORN2_SAVEEXEC_B64: exec = src | ~old_exec
+    {
+        auto ws = make_wave(false);
+        ws->exec = 0x00FF00FF00FF00FFULL;
+        ws->sgpr[2] = 0x00000001u;
+        ws->sgpr[3] = 0x00000000u;
+
+        Instruction inst{};
+        inst.opcode = Opcode::S_ORN2_SAVEEXEC_B64;
+        inst.dst.kind = Operand::Kind::SGPR;
+        inst.dst.index = 0;
+        inst.src[0].kind = Operand::Kind::SGPR;
+        inst.src[0].index = 2;
+        execute_instruction(*ws, inst);
+
+        EXPECT_EQ(ws->exec, 0x0000000000000001ULL | ~0x00FF00FF00FF00FFULL);
+    }
+    // RDNA4 B32: S_ANDN2_SAVEEXEC_B32 / S_ORN2_SAVEEXEC_B32
+    {
+        auto ws = make_wave(true);
+        ws->exec = 0x0000FFFFULL;
+        ws->sgpr[2] = 0x00FF00FFu;
+
+        Instruction inst{};
+        inst.opcode = Opcode::S_ANDN2_SAVEEXEC_B32;
+        inst.dst.kind = Operand::Kind::SGPR;
+        inst.dst.index = 0;
+        inst.src[0].kind = Operand::Kind::SGPR;
+        inst.src[0].index = 2;
+        execute_instruction(*ws, inst);
+
+        EXPECT_EQ(ws->sgpr[0], 0x0000FFFFu);
+        EXPECT_EQ(ws->exec, (0x00FF00FFULL & ~0x0000FFFFULL) & 0xFFFFFFFFULL);
+
+        ws->exec = 0x0000FFFFULL;
+        inst.opcode = Opcode::S_ORN2_SAVEEXEC_B32;
+        execute_instruction(*ws, inst);
+        EXPECT_EQ(ws->exec, (0x00FF00FFULL | ~0x0000FFFFULL) & 0xFFFFFFFFULL);
+    }
+}
+
+// 8. Phase 10: GFX9 SMEM 21-bit negative offset + GLOBAL 13-bit negative offset + VOPC SDWAB
+TEST(RegressionFixesTest, Gfx9NegativeOffsetsAndSdwaVopc) {
+    // SMEM s_load_dwordx4 s[16:19], s[4:5], -8 -> w0=0xC00A0402, w1=0x001FFFF8 (-8 in 21-bit)
+    uint32_t smem_words[2] = {0xC00A0402u, 0x001FFFF8u};
+    Instruction smem = decode(reinterpret_cast<const uint8_t*>(smem_words), false, false, false);
+    EXPECT_EQ(smem.smem_offset, -8);
+
+    // GLOBAL global_load_dwordx4 v[12:15], v[2:3], off offset:-8 -> 0xDC5C9FF8 0x0C7F0002
+    uint32_t glob_words[2] = {0xDC5C9FF8u, 0x0C7F0002u};
+    Instruction glob = decode(reinterpret_cast<const uint8_t*>(glob_words), false, false, false);
+    EXPECT_EQ(glob.opcode, Opcode::GLOBAL_LOAD_DWORDX4);
+    EXPECT_EQ(glob.flat_offset, -8);
+
+    // VOPC SDWAB: v_cmp_gt_f32 sdwa sdst=s4, sd=1
+    // w0 = (0x3E << 25) | (0x04 << 17) | (1 << 9) | 0xF9 (SDWA)
+    // w1 = (1 << 15) | (4 << 8) | (6 << 16) | (6 << 24)
+    uint32_t vopc_sdwa[2] = {
+        (0x3Eu << 25) | (0x04u << 17) | (1u << 9) | 0xF9u,
+        (1u << 15) | (4u << 8) | (6u << 16) | (6u << 24)
+    };
+    Instruction vsdwa = decode(reinterpret_cast<const uint8_t*>(vopc_sdwa), false, false, false);
+    EXPECT_TRUE(vsdwa.is_sdwa);
+    EXPECT_EQ(vsdwa.dst.kind, Operand::Kind::SGPR);
+    EXPECT_EQ(vsdwa.dst.index, 4u);
+}
+
+// 9. Phase 10: GFX9 unpacked v0, V_MBCNT_LO/HI, V_DIV_SCALE/FIXUP_F32, and BF16_1K MFMA
+TEST(RegressionFixesTest, WavefrontV0MbcntDivAndBf16_1k) {
+    // GFX9 Wave64 keeps v0 = tid_x unpacked when tid_y > 0
+    auto ws64 = make_wave(false);
+    KernelDescriptor kd{};
+    kd.kernel_code_properties = 0; // Wave64
+    kd.compute_pgm_rsrc2 = (1u << 11); // enable_vgpr_workitem_id = 1 (tid_x, tid_y)
+    // wave_in_wg=1 with block_x=64, block_y=4 -> tid_y=1, tid_x=0..63
+    init_wavefront(*ws64, kd, nullptr, nullptr, 0, 0, 0, 0, 1, 4, 64, 4, 1);
+    EXPECT_EQ(ws64->vgpr[0][5], 5u);
+    EXPECT_EQ(ws64->vgpr[1][5], 1u);
+
+    // RDNA4 Wave32 packs v0 = tid_x | (tid_y << 10)
+    auto ws32 = make_wave(true);
+    kd.kernel_code_properties = KCP_ENABLE_WAVEFRONT_SIZE32;
+    init_wavefront(*ws32, kd, nullptr, nullptr, 0, 0, 0, 0, 1, 4, 32, 4, 1);
+    EXPECT_EQ(ws32->vgpr[0][5], 5u | (1u << 10));
+
+    // V_MBCNT_LO_U32_B32 + V_MBCNT_HI_U32_B32 gives lane index 0..63 under full exec
+    ws64->exec = ~0ULL;
+    Instruction lo{};
+    lo.opcode = Opcode::V_MBCNT_LO_U32_B32;
+    lo.dst = {Operand::Kind::VGPR, 2};
+    lo.src[0] = {Operand::Kind::INLINE_CONST, 0, static_cast<uint64_t>(-1)};
+    lo.src[1] = {Operand::Kind::INLINE_CONST, 0, 0};
+    execute_instruction(*ws64, lo);
+
+    Instruction hi{};
+    hi.opcode = Opcode::V_MBCNT_HI_U32_B32;
+    hi.dst = {Operand::Kind::VGPR, 2};
+    hi.src[0] = {Operand::Kind::INLINE_CONST, 0, static_cast<uint64_t>(-1)};
+    hi.src[1] = {Operand::Kind::VGPR, 2};
+    execute_instruction(*ws64, hi);
+    for (int lane = 0; lane < 64; lane++) {
+        EXPECT_EQ(ws64->vgpr[2][lane], static_cast<uint32_t>(lane));
+    }
+
+    // V_DIV_SCALE_F32 & V_DIV_FIXUP_F32 finite quotient pass-through
+    float q = 0.25f, d = 4.0f, n = 1.0f;
+    uint32_t qb, db, nb;
+    std::memcpy(&qb, &q, 4);
+    std::memcpy(&db, &d, 4);
+    std::memcpy(&nb, &n, 4);
+    ws64->vgpr[10][0] = qb;
+    ws64->vgpr[11][0] = db;
+    ws64->vgpr[12][0] = nb;
+
+    Instruction dscale{};
+    dscale.opcode = Opcode::V_DIV_SCALE_F32;
+    dscale.dst = {Operand::Kind::VGPR, 13};
+    dscale.dst2 = {Operand::Kind::VCC, 0};
+    dscale.src[0] = {Operand::Kind::VGPR, 11};
+    dscale.src[1] = {Operand::Kind::VGPR, 11};
+    dscale.src[2] = {Operand::Kind::VGPR, 12};
+    execute_instruction(*ws64, dscale);
+    EXPECT_EQ(ws64->vgpr[13][0], db);
+
+    Instruction dfix{};
+    dfix.opcode = Opcode::V_DIV_FIXUP_F32;
+    dfix.dst = {Operand::Kind::VGPR, 14};
+    dfix.src[0] = {Operand::Kind::VGPR, 10};
+    dfix.src[1] = {Operand::Kind::VGPR, 11};
+    dfix.src[2] = {Operand::Kind::VGPR, 12};
+    execute_instruction(*ws64, dfix);
+    float res;
+    std::memcpy(&res, &ws64->vgpr[14][0], 4);
+    EXPECT_FLOAT_EQ(res, 0.25f);
+
+    // V_MFMA_F32_16X16X16BF16_1K: 1.0 * 1.0 summed across K=16 => 16.0
+    uint32_t bf16_one_pair = 0x3F803F80u; // two BF16 1.0 values
+    for (int lane = 0; lane < 64; lane++) {
+        ws64->vgpr[20][lane] = bf16_one_pair;
+        ws64->vgpr[21][lane] = bf16_one_pair;
+        ws64->vgpr[22][lane] = bf16_one_pair;
+        ws64->vgpr[23][lane] = bf16_one_pair;
+        for (int r = 24; r < 28; r++) ws64->vgpr[r][lane] = 0;
+    }
+    Instruction mfma{};
+    mfma.opcode = Opcode::V_MFMA_F32_16X16X16BF16_1K;
+    mfma.dst = {Operand::Kind::VGPR, 24};
+    mfma.src[0] = {Operand::Kind::VGPR, 20};
+    mfma.src[1] = {Operand::Kind::VGPR, 22};
+    mfma.src[2] = {Operand::Kind::VGPR, 24};
+    execute_instruction(*ws64, mfma);
+    float mfma_out;
+    std::memcpy(&mfma_out, &ws64->vgpr[24][0], 4);
+    EXPECT_FLOAT_EQ(mfma_out, 16.0f);
 }

@@ -155,15 +155,14 @@ TEST(Wavefront, VGPR1IsWorkitemIdY) {
     for (int lane = 0; lane < 64; lane++) {
         uint32_t expected_x = lane % 8;
         uint32_t expected_y = lane / 8;
-        // GFX90a packs workitem IDs into vgpr[0]
-        EXPECT_EQ(ws.vgpr[0][lane] & 0x3FF, expected_x) << "vgpr[0].x at lane " << lane;
-        EXPECT_EQ((ws.vgpr[0][lane] >> 10) & 0x3FF, expected_y) << "vgpr[0].y at lane " << lane;
+        // GFX9/CDNA Wave64 uses unpacked vgpr[0]=tid_x, vgpr[1]=tid_y
+        EXPECT_EQ(ws.vgpr[0][lane], expected_x) << "vgpr[0] = workitem_id.x at lane " << lane;
         EXPECT_EQ(ws.vgpr[1][lane], expected_y) << "vgpr[1] = workitem_id.y at lane " << lane;
     }
 }
 
 TEST(Wavefront, VGPR2IsWorkitemIdZ) {
-    // enable_vgpr_workitem_id = 2: VGPR0=packed(X,Y,Z), VGPR1=Y, VGPR2=Z
+    // enable_vgpr_workitem_id = 2: VGPR0=X, VGPR1=Y, VGPR2=Z (GFX9/CDNA unpacked)
     uint32_t rsrc2 = (2u << 11); // enable_vgpr_workitem_id = 2
     KernelDescriptor kd = make_kd(0, rsrc2);
     uint8_t dummy_kernarg[32] = {};
@@ -180,10 +179,8 @@ TEST(Wavefront, VGPR2IsWorkitemIdZ) {
         uint32_t expected_x = lane % 4;
         uint32_t expected_y = (lane / 4) % 4;
         uint32_t expected_z = lane / 16;
-        // GFX90a packs workitem IDs into vgpr[0]
-        EXPECT_EQ(ws.vgpr[0][lane] & 0x3FF, expected_x) << "vgpr[0].x at lane " << lane;
-        EXPECT_EQ((ws.vgpr[0][lane] >> 10) & 0x3FF, expected_y) << "vgpr[0].y at lane " << lane;
-        EXPECT_EQ((ws.vgpr[0][lane] >> 20) & 0x3FF, expected_z) << "vgpr[0].z at lane " << lane;
+        // GFX9/CDNA Wave64 uses unpacked vgpr[0]=X, vgpr[1]=Y, vgpr[2]=Z
+        EXPECT_EQ(ws.vgpr[0][lane], expected_x) << "vgpr[0] = workitem_id.x at lane " << lane;
         EXPECT_EQ(ws.vgpr[1][lane], expected_y) << "vgpr[1] = workitem_id.y at lane " << lane;
         EXPECT_EQ(ws.vgpr[2][lane], expected_z) << "vgpr[2] = workitem_id.z at lane " << lane;
     }

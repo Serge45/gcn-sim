@@ -1107,6 +1107,15 @@ static MubufAddr mubuf_addr(const WavefrontState& wave, const Instruction& inst,
     }
 
     uint64_t addr = base + effective_offset;
+    if (!oob && (base >> 32) == 0xF002ULL && wave.scratch_ptr != nullptr) {
+        if (effective_offset >= wave.scratch_per_lane) {
+            oob = true;
+        } else {
+            addr = reinterpret_cast<uint64_t>(wave.scratch_ptr) +
+                   static_cast<uint64_t>(lane) * wave.scratch_per_lane +
+                   effective_offset;
+        }
+    }
     if (!addr_is_valid(addr)) {
         oob = true;
     }
@@ -1764,7 +1773,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         uint64_t old_exec = wave.exec;
         uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec & ~src;
+        wave.exec = src & ~old_exec;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -1772,7 +1781,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         uint64_t old_exec = wave.exec;
         uint64_t src = read_src_scalar64(wave, inst.src[0]);
         write_sdst64(wave, inst.dst, old_exec);
-        wave.exec = old_exec | ~src;
+        wave.exec = src | ~old_exec;
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -6556,9 +6565,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
-    case Opcode::V_MFMA_F32_16X16X8BF16:
-    case Opcode::V_MFMA_F32_16X16X16BF16_1K: {
-        // 16x16 BF16 with K=8 or K=16: 4 K-groups of 16 lanes, 4 output GPRs
+    case Opcode::V_MFMA_F32_16X16X8BF16: {
+        // 16x16 BF16 with K=8 (CDNA1): 4 K-groups of 16 lanes, 2 BF16/lane, 4 output GPRs
         const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR) || wave.is_gfx908;
         float a_bf[WAVE_SIZE][2], b_bf[WAVE_SIZE][2];
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
@@ -6574,8 +6582,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int col = lane % 16;
             for (int gpr = 0; gpr < 4; gpr++) {
                 int row = kg_out * 4 + gpr;
-                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
-                                       : wave.vgpr[inst.dst.index + gpr][lane];
+                uint32_t cb = read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
                 float acc; memcpy(&acc, &cb, 4);
                 for (int kg = 0; kg < 4; kg++) {
                     int a_lane = kg * 16 + row;
@@ -6585,8 +6592,47 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                     }
                 }
                 uint32_t rb; memcpy(&rb, &acc, 4);
-                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
-                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, rb);
+            }
+        }
+        break;
+    }
+    case Opcode::V_MFMA_F32_16X16X16BF16_1K: {
+        // 16x16 BF16 with K=16 (CDNA2): 4 K-groups of 16 lanes, 4 BF16/lane (2 VGPRs), 4 output GPRs
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR) || wave.is_gfx908;
+        float a_bf[WAVE_SIZE][4], b_bf[WAVE_SIZE][4];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            uint32_t a0 = read_vsrc(wave, inst.src[0], lane);
+            uint32_t a1 = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index + 1 < NUM_VGPR)
+                          ? wave.vgpr[inst.src[0].index + 1][lane] : 0;
+            uint32_t b0 = read_vsrc(wave, inst.src[1], lane);
+            uint32_t b1 = (inst.src[1].kind == Operand::Kind::VGPR && inst.src[1].index + 1 < NUM_VGPR)
+                          ? wave.vgpr[inst.src[1].index + 1][lane] : 0;
+            a_bf[lane][0] = bf16_to_f32(a0 & 0xFFFF);
+            a_bf[lane][1] = bf16_to_f32(a0 >> 16);
+            a_bf[lane][2] = bf16_to_f32(a1 & 0xFFFF);
+            a_bf[lane][3] = bf16_to_f32(a1 >> 16);
+            b_bf[lane][0] = bf16_to_f32(b0 & 0xFFFF);
+            b_bf[lane][1] = bf16_to_f32(b0 >> 16);
+            b_bf[lane][2] = bf16_to_f32(b1 & 0xFFFF);
+            b_bf[lane][3] = bf16_to_f32(b1 >> 16);
+        }
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int kg_out = lane / 16;
+            int col = lane % 16;
+            for (int gpr = 0; gpr < 4; gpr++) {
+                int row = kg_out * 4 + gpr;
+                uint32_t cb = read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
+                float acc; memcpy(&acc, &cb, 4);
+                for (int kg = 0; kg < 4; kg++) {
+                    int a_lane = kg * 16 + row;
+                    int b_lane = kg * 16 + col;
+                    for (int k_sub = 0; k_sub < 4; k_sub++) {
+                        acc = fmaf(a_bf[a_lane][k_sub], b_bf[b_lane][k_sub], acc);
+                    }
+                }
+                uint32_t rb; memcpy(&rb, &acc, 4);
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, rb);
             }
         }
         break;
@@ -6622,9 +6668,8 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
-    case Opcode::V_MFMA_F32_32X32X4BF16:
-    case Opcode::V_MFMA_F32_32X32X8BF16_1K: {
-        // 32x32 BF16 with K=4 or K=8: 2 K-groups of 32, 16 output GPRs
+    case Opcode::V_MFMA_F32_32X32X4BF16: {
+        // 32x32 BF16 with K=4 (CDNA1): 2 K-groups of 32, 2 BF16/lane, 16 output GPRs
         const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR) || wave.is_gfx908;
         float a_bf[WAVE_SIZE][2], b_bf[WAVE_SIZE][2];
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
@@ -6640,8 +6685,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
             int col = lane % 32;
             int row_base = kg_out * 16;
             for (int gpr = 0; gpr < 16; gpr++) {
-                uint32_t cb = use_agpr ? wave.agpr[inst.dst.index + gpr][lane]
-                                       : wave.vgpr[inst.dst.index + gpr][lane];
+                uint32_t cb = read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
                 float acc; memcpy(&acc, &cb, 4);
                 for (int kg = 0; kg < 2; kg++) {
                     int a_lane = kg * 32 + row_base + gpr;
@@ -6651,8 +6695,47 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                     }
                 }
                 uint32_t rb; memcpy(&rb, &acc, 4);
-                if (use_agpr) wave.agpr[inst.dst.index + gpr][lane] = rb;
-                else          wave.vgpr[inst.dst.index + gpr][lane] = rb;
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, rb);
+            }
+        }
+        break;
+    }
+    case Opcode::V_MFMA_F32_32X32X8BF16_1K: {
+        // 32x32 BF16 with K=8 (CDNA2): 2 K-groups of 32, 4 BF16/lane (2 VGPRs), 16 output GPRs
+        const bool use_agpr = (inst.dst.kind == Operand::Kind::AGPR) || wave.is_gfx908;
+        float a_bf[WAVE_SIZE][4], b_bf[WAVE_SIZE][4];
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            uint32_t a0 = read_vsrc(wave, inst.src[0], lane);
+            uint32_t a1 = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index + 1 < NUM_VGPR)
+                          ? wave.vgpr[inst.src[0].index + 1][lane] : 0;
+            uint32_t b0 = read_vsrc(wave, inst.src[1], lane);
+            uint32_t b1 = (inst.src[1].kind == Operand::Kind::VGPR && inst.src[1].index + 1 < NUM_VGPR)
+                          ? wave.vgpr[inst.src[1].index + 1][lane] : 0;
+            a_bf[lane][0] = bf16_to_f32(a0 & 0xFFFF);
+            a_bf[lane][1] = bf16_to_f32(a0 >> 16);
+            a_bf[lane][2] = bf16_to_f32(a1 & 0xFFFF);
+            a_bf[lane][3] = bf16_to_f32(a1 >> 16);
+            b_bf[lane][0] = bf16_to_f32(b0 & 0xFFFF);
+            b_bf[lane][1] = bf16_to_f32(b0 >> 16);
+            b_bf[lane][2] = bf16_to_f32(b1 & 0xFFFF);
+            b_bf[lane][3] = bf16_to_f32(b1 >> 16);
+        }
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            int kg_out = lane / 32;
+            int col = lane % 32;
+            int row_base = kg_out * 16;
+            for (int gpr = 0; gpr < 16; gpr++) {
+                uint32_t cb = read_acc(wave, use_agpr, inst.dst.index + gpr, lane);
+                float acc; memcpy(&acc, &cb, 4);
+                for (int kg = 0; kg < 2; kg++) {
+                    int a_lane = kg * 32 + row_base + gpr;
+                    int b_lane = kg * 32 + col;
+                    for (int k_sub = 0; k_sub < 4; k_sub++) {
+                        acc = fmaf(a_bf[a_lane][k_sub], b_bf[b_lane][k_sub], acc);
+                    }
+                }
+                uint32_t rb; memcpy(&rb, &acc, 4);
+                write_acc(wave, use_agpr, inst.dst.index + gpr, lane, rb);
             }
         }
         break;
@@ -7915,6 +7998,35 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
+    case Opcode::V_LDEXP_F32: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            float a = read_vsrc_f32_mod(wave, inst, 0, lane);
+            int32_t exp = (int32_t)read_vsrc(wave, inst.src[1], lane);
+            write_vdst_f32_mod(wave, inst, lane, std::ldexp(a, exp));
+        }
+        break;
+    }
+    case Opcode::V_MBCNT_LO_U32_B32: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t mask_lo = read_vsrc(wave, inst.src[0], lane);
+            uint32_t acc     = read_vsrc(wave, inst.src[1], lane);
+            uint32_t lane_mask = (lane < 32) ? ((1U << lane) - 1U) : 0xFFFFFFFFU;
+            wave.vgpr[inst.dst.index][lane] = (uint32_t)__builtin_popcount(mask_lo & lane_mask) + acc;
+        }
+        break;
+    }
+    case Opcode::V_MBCNT_HI_U32_B32: {
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t mask_hi = read_vsrc(wave, inst.src[0], lane);
+            uint32_t acc     = read_vsrc(wave, inst.src[1], lane);
+            uint32_t lane_mask = (lane < 32) ? 0U : ((1U << (lane - 32)) - 1U);
+            wave.vgpr[inst.dst.index][lane] = (uint32_t)__builtin_popcount(mask_hi & lane_mask) + acc;
+        }
+        break;
+    }
     case Opcode::V_LDEXP_F64: {
         // dst = src0 * 2^src1 (src1 is int32)
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
@@ -7985,11 +8097,34 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         }
         break;
     }
-    case Opcode::V_DIV_FIXUP_F32: {
-        // Simplified: pass through src2
+    case Opcode::V_DIV_SCALE_F32: {
+        uint64_t scale_mask = 0;
         for (int lane = 0; lane < WAVE_SIZE; lane++) {
             if (!((wave.exec >> lane) & 1)) continue;
-            wave.vgpr[inst.dst.index][lane] = read_vsrc(wave, inst.src[2], lane);
+            uint32_t ab = read_vsrc(wave, inst.src[0], lane);
+            float a; memcpy(&a, &ab, 4);
+            // Normal finite range needs no 2^32 rescaling; pass src0 through
+            wave.vgpr[inst.dst.index][lane] = ab;
+            (void)a;
+        }
+        write_lane_mask(wave, inst.dst2, scale_mask);
+        break;
+    }
+    case Opcode::V_DIV_FIXUP_F32: {
+        // dst = fixup(quotient=src0, denom=src1, numer=src2)
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t qb = read_vsrc(wave, inst.src[0], lane);
+            uint32_t db = read_vsrc(wave, inst.src[1], lane);
+            uint32_t nb = read_vsrc(wave, inst.src[2], lane);
+            float q, d, n;
+            memcpy(&q, &qb, 4); memcpy(&d, &db, 4); memcpy(&n, &nb, 4);
+            float res = (d == 0.0f || std::isnan(n) || std::isnan(d) ||
+                         std::isinf(n) || std::isinf(d) || !std::isfinite(q))
+                            ? (n / d)
+                            : q;
+            uint32_t rb; memcpy(&rb, &res, 4);
+            wave.vgpr[inst.dst.index][lane] = rb;
         }
         break;
     }
@@ -8056,7 +8191,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         uint32_t old_exec = (uint32_t)(wave.exec & 0xFFFFFFFFULL);
         uint32_t src = read_src_scalar(wave, inst.src[0]);
         write_sdst(wave, inst.dst, old_exec);
-        wave.exec = (uint64_t)(old_exec & ~src);
+        wave.exec = (uint64_t)(src & ~old_exec);
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -8065,7 +8200,7 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
         uint32_t old_exec = (uint32_t)(wave.exec & 0xFFFFFFFFULL);
         uint32_t src = read_src_scalar(wave, inst.src[0]);
         write_sdst(wave, inst.dst, old_exec);
-        wave.exec = (uint64_t)(old_exec | ~src);
+        wave.exec = (uint64_t)(src | ~old_exec);
         wave.scc = (wave.exec != 0) ? 1 : 0;
         break;
     }
@@ -8438,6 +8573,48 @@ void execute_instruction(WavefrontState& wave, const Instruction& inst) {
                 case Opcode::V_CMP_LG_F16:  cond = (a < b || a > b); break;
                 case Opcode::V_CMP_GE_F16:  cond = (a >= b); break;
                 case Opcode::V_CMP_NEQ_F16: cond = !(a == b); break;
+                default: break;
+            }
+            if (cond) mask |= (1ULL << lane);
+        }
+        write_lane_mask(wave, inst.dst, mask);
+        break;
+    }
+    case Opcode::V_CMP_LT_I16:
+    case Opcode::V_CMP_EQ_I16:
+    case Opcode::V_CMP_LE_I16:
+    case Opcode::V_CMP_GT_I16:
+    case Opcode::V_CMP_NE_I16:
+    case Opcode::V_CMP_GE_I16:
+    case Opcode::V_CMP_LT_U16:
+    case Opcode::V_CMP_EQ_U16:
+    case Opcode::V_CMP_LE_U16:
+    case Opcode::V_CMP_GT_U16:
+    case Opcode::V_CMP_NE_U16:
+    case Opcode::V_CMP_GE_U16: {
+        uint64_t mask = 0;
+        for (int lane = 0; lane < WAVE_SIZE; lane++) {
+            if (!((wave.exec >> lane) & 1)) continue;
+            uint32_t raw0 = read_vsrc(wave, inst.src[0], lane);
+            uint32_t raw1 = read_vsrc(wave, inst.src[1], lane);
+            uint16_t u0 = (inst.op_sel & 1) ? (uint16_t)(raw0 >> 16) : (uint16_t)(raw0 & 0xFFFF);
+            uint16_t u1 = (inst.op_sel & 2) ? (uint16_t)(raw1 >> 16) : (uint16_t)(raw1 & 0xFFFF);
+            int16_t i0 = (int16_t)u0;
+            int16_t i1 = (int16_t)u1;
+            bool cond = false;
+            switch (inst.opcode) {
+                case Opcode::V_CMP_LT_I16: cond = (i0 < i1); break;
+                case Opcode::V_CMP_EQ_I16: cond = (i0 == i1); break;
+                case Opcode::V_CMP_LE_I16: cond = (i0 <= i1); break;
+                case Opcode::V_CMP_GT_I16: cond = (i0 > i1); break;
+                case Opcode::V_CMP_NE_I16: cond = (i0 != i1); break;
+                case Opcode::V_CMP_GE_I16: cond = (i0 >= i1); break;
+                case Opcode::V_CMP_LT_U16: cond = (u0 < u1); break;
+                case Opcode::V_CMP_EQ_U16: cond = (u0 == u1); break;
+                case Opcode::V_CMP_LE_U16: cond = (u0 <= u1); break;
+                case Opcode::V_CMP_GT_U16: cond = (u0 > u1); break;
+                case Opcode::V_CMP_NE_U16: cond = (u0 != u1); break;
+                case Opcode::V_CMP_GE_U16: cond = (u0 >= u1); break;
                 default: break;
             }
             if (cond) mask |= (1ULL << lane);

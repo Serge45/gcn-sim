@@ -1158,6 +1158,15 @@ gcnsim::hipError_t hipLaunchKernel(
     if (gcnsim::is_hijack_verbose()) {
         std::cout << "[gcnsim_hip] ResolveKernelInfo succeeded for kernel: " << k_name << "!" << std::endl;
     }
+    if (const char* dump_path = std::getenv("GCNSIM_DUMP_HSACO")) {
+        if (reg->hsaco_data && reg->hsaco_size > 0) {
+            std::FILE* f = std::fopen(dump_path, "wb");
+            if (f) {
+                std::fwrite(reg->hsaco_data, 1, reg->hsaco_size, f);
+                std::fclose(f);
+            }
+        }
+    }
 
     // Pack arguments using metadata offsets and sizes
     uint32_t kernarg_size = ki->descriptor ? ki->descriptor->kernarg_size : 0;
@@ -1204,6 +1213,15 @@ gcnsim::hipError_t hipLaunchKernel(
         param_idx++;
     }
 
+    if (gcnsim::is_hijack_verbose()) {
+        std::cout << "[gcnsim_hip] kernarg_size=" << kernarg_buffer.size() << " grid=(" << numBlocks.x << "," << numBlocks.y << "," << numBlocks.z << ") block=(" << dimBlocks.x << "," << dimBlocks.y << "," << dimBlocks.z << ") bytes=";
+        for (size_t i = 0; i < std::min<size_t>(kernarg_buffer.size(), 48); ++i) {
+            std::printf("%02x", kernarg_buffer[i]);
+            if ((i & 7) == 7) std::printf(" ");
+        }
+        std::cout << std::endl;
+    }
+
     // Build gcnsim launch configuration (threads count = blocks * threads_per_block)
     gcnsim::LaunchConfig cfg;
     cfg.grid_x = numBlocks.x * dimBlocks.x;
@@ -1212,6 +1230,7 @@ gcnsim::hipError_t hipLaunchKernel(
     cfg.block_x = dimBlocks.x;
     cfg.block_y = dimBlocks.y;
     cfg.block_z = dimBlocks.z;
+    cfg.shared_mem_bytes = static_cast<uint32_t>(sharedMemBytes);
     cfg.kernarg = kernarg_buffer.data();
     cfg.kernarg_size = kernarg_buffer.size();
     {
@@ -1295,6 +1314,7 @@ gcnsim::hipError_t hipExtModuleLaunchKernel(
     gcnsim::LaunchConfig cfg;
     cfg.grid_x  = globalWorkSizeX;
     cfg.grid_y  = globalWorkSizeY;
+    cfg.shared_mem_bytes = sharedMemBytes;
     cfg.grid_z  = globalWorkSizeZ;
     cfg.block_x = localWorkSizeX;
     cfg.block_y = localWorkSizeY;
@@ -1697,6 +1717,269 @@ float __gnu_h2f_ieee(uint16_t h) {
     float f;
     std::memcpy(&f, &val, 4);
     return f;
+}
+
+// PyTorch / ROCm Runtime Support APIs
+gcnsim::hipError_t hipInit(unsigned int flags) {
+    (void)flags;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(unsigned int)>("hipInit");
+        if (real_func) return real_func(flags);
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDriverGetVersion(int* driverVersion) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*)>("hipDriverGetVersion");
+        if (real_func) return real_func(driverVersion);
+    }
+    if (!driverVersion) return gcnsim::hipErrorInvalidValue;
+    *driverVersion = 60200000;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipRuntimeGetVersion(int* runtimeVersion) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(int*)>("hipRuntimeGetVersion");
+        if (real_func) return real_func(runtimeVersion);
+    }
+    if (!runtimeVersion) return gcnsim::hipErrorInvalidValue;
+    *runtimeVersion = 60200000;
+    return gcnsim::hipSuccess;
+}
+
+const char* hipGetErrorName(gcnsim::hipError_t hip_error) {
+    switch (hip_error) {
+        case gcnsim::hipSuccess: return "hipSuccess";
+        case gcnsim::hipErrorInvalidValue: return "hipErrorInvalidValue";
+        case gcnsim::hipErrorOutOfMemory: return "hipErrorOutOfMemory";
+        case gcnsim::hipErrorInvalidDeviceFunction: return "hipErrorInvalidDeviceFunction";
+        case gcnsim::hipErrorInvalidSymbol: return "hipErrorInvalidSymbol";
+        case gcnsim::hipErrorInvalidImage: return "hipErrorInvalidImage";
+        case gcnsim::hipErrorNotFound: return "hipErrorNotFound";
+        case gcnsim::hipErrorNotSupported: return "hipErrorNotSupported";
+        case gcnsim::hipErrorLaunchFailure: return "hipErrorLaunchFailure";
+        default: return "hipErrorUnknown";
+    }
+}
+
+gcnsim::hipError_t hipPeekAtLastError(void) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void)>("hipPeekAtLastError");
+        if (real_func) return real_func();
+    }
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipMemGetInfo(size_t* free, size_t* total) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(size_t*, size_t*)>("hipMemGetInfo");
+        if (real_func) return real_func(free, total);
+    }
+    const size_t total_mem = 16ULL * 1024 * 1024 * 1024;
+    if (free) *free = total_mem;
+    if (total) *total = total_mem;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipHostMalloc(void** ptr, size_t size, unsigned int flags) {
+    return hipHostAlloc(ptr, size, flags);
+}
+
+gcnsim::hipError_t hipHostRegister(void* hostPtr, size_t sizeBytes, unsigned int flags) {
+    (void)flags;
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*, size_t, unsigned int)>("hipHostRegister");
+        if (real_func) return real_func(hostPtr, sizeBytes, flags);
+    }
+    if (!hostPtr || sizeBytes == 0) return gcnsim::hipErrorInvalidValue;
+    gcnsim::MemoryManager::Get().RegisterRegion(reinterpret_cast<uint64_t>(hostPtr), sizeBytes, "hipHostRegister");
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipHostUnregister(void* hostPtr) {
+    if (!gcnsim::HijackManager::Get().IsGlobalEnabled()) {
+        static auto real_func = get_real_symbol<gcnsim::hipError_t(*)(void*)>("hipHostUnregister");
+        if (real_func) return real_func(hostPtr);
+    }
+    (void)hostPtr;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipFuncGetAttributes(gcnsim::hipFuncAttributes* attr, const void* func) {
+    (void)func;
+    if (!attr) return gcnsim::hipErrorInvalidValue;
+    std::memset(attr, 0, sizeof(*attr));
+    attr->binaryVersion = 90;
+    attr->maxThreadsPerBlock = 1024;
+    attr->numRegs = 32;
+    attr->maxDynamicSharedSizeBytes = 65536;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks, const void* func, int blockSize, size_t dynamicSMemSize) {
+    (void)func; (void)dynamicSMemSize;
+    if (!numBlocks || blockSize <= 0) return gcnsim::hipErrorInvalidValue;
+    *numBlocks = std::max(1, 1024 / blockSize);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipOccupancyMaxPotentialBlockSize(int* gridSize, int* blockSize, const void* func, size_t dynamicSMemSize, int blockSizeLimit) {
+    (void)func; (void)dynamicSMemSize;
+    if (!gridSize || !blockSize) return gcnsim::hipErrorInvalidValue;
+    *blockSize = (blockSizeLimit > 0 && blockSizeLimit < 256) ? blockSizeLimit : 256;
+    *gridSize = 64;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipStreamCreateWithPriority(gcnsim::hipStream_t* stream, unsigned int flags, int priority) {
+    (void)priority;
+    return hipStreamCreateWithFlags(stream, flags);
+}
+
+gcnsim::hipError_t hipDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) {
+    if (leastPriority) *leastPriority = 0;
+    if (greatestPriority) *greatestPriority = -1;
+    return gcnsim::hipSuccess;
+}
+
+int hipGetStreamDeviceId(gcnsim::hipStream_t stream) {
+    (void)stream;
+    return g_current_device;
+}
+
+gcnsim::hipError_t hipMemcpyWithStream(void* dst, const void* src, size_t sizeBytes, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream) {
+    return hipMemcpyAsync(dst, src, sizeBytes, kind, stream);
+}
+
+gcnsim::hipError_t hipIpcGetMemHandle(void* handle, void* devPtr) {
+    (void)handle; (void)devPtr;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipIpcOpenMemHandle(void** devPtr, void* handle, unsigned int flags) {
+    (void)devPtr; (void)handle; (void)flags;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipIpcCloseMemHandle(void* devPtr) {
+    (void)devPtr;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipStreamBeginCapture(gcnsim::hipStream_t stream, int mode) {
+    (void)stream; (void)mode;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipStreamEndCapture(gcnsim::hipStream_t stream, void** graph) {
+    (void)stream;
+    if (graph) *graph = nullptr;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipStreamIsCapturing(gcnsim::hipStream_t stream, int* pCaptureStatus) {
+    (void)stream;
+    if (!pCaptureStatus) return gcnsim::hipErrorInvalidValue;
+    *pCaptureStatus = 0; // hipStreamCaptureStatusNone
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipStreamGetCaptureInfo(gcnsim::hipStream_t stream, int* pCaptureStatus, unsigned long long* pId) {
+    (void)stream;
+    if (pCaptureStatus) *pCaptureStatus = 0;
+    if (pId) *pId = 0;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipThreadExchangeStreamCaptureMode(int* mode) {
+    if (!mode) return gcnsim::hipErrorInvalidValue;
+    *mode = 0;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGraphInstantiate(void** graphExec, void* graph, void* errorNode, char* logBuffer, size_t bufferSize) {
+    (void)graph; (void)errorNode; (void)logBuffer; (void)bufferSize;
+    if (graphExec) *graphExec = nullptr;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipGraphLaunch(void* graphExec, gcnsim::hipStream_t stream) {
+    (void)graphExec; (void)stream;
+    return gcnsim::hipErrorNotSupported;
+}
+
+gcnsim::hipError_t hipGraphDestroy(void* graph) {
+    (void)graph;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGraphExecDestroy(void* graphExec) {
+    (void)graphExec;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGraphGetNodes(void* graph, void** nodes, size_t* numNodes) {
+    (void)graph; (void)nodes;
+    if (numNodes) *numNodes = 0;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipGraphDebugDotPrint(void* graph, const char* path, unsigned int flags) {
+    (void)graph; (void)path; (void)flags;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDevicePrimaryCtxGetState(int dev, unsigned int* flags, int* active) {
+    (void)dev;
+    if (flags) *flags = 0;
+    if (active) *active = 1;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDevicePrimaryCtxRetain(void** pctx, int dev) {
+    if (!pctx) return gcnsim::hipErrorInvalidValue;
+    *pctx = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1000 + dev));
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDevicePrimaryCtxRelease(int dev) {
+    (void)dev;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceGet(int* device, int ordinal) {
+    if (!device || ordinal < 0) return gcnsim::hipErrorInvalidValue;
+    *device = ordinal;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceGetName(char* name, int len, int device) {
+    if (!name || len <= 0) return gcnsim::hipErrorInvalidValue;
+    gcnsim::hipDeviceProp_t prop{};
+    auto err = hipGetDeviceProperties(&prop, device);
+    if (err != gcnsim::hipSuccess) return err;
+    std::snprintf(name, static_cast<size_t>(len), "%s", prop.name);
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipDeviceTotalMem(size_t* bytes, int device) {
+    (void)device;
+    if (!bytes) return gcnsim::hipErrorInvalidValue;
+    *bytes = 16ULL * 1024 * 1024 * 1024;
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipCtxGetCurrent(void** ctx) {
+    if (!ctx) return gcnsim::hipErrorInvalidValue;
+    *ctx = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1000 + g_current_device));
+    return gcnsim::hipSuccess;
+}
+
+gcnsim::hipError_t hipCtxSetCurrent(void* ctx) {
+    (void)ctx;
+    return gcnsim::hipSuccess;
 }
 
 } // extern "C"

@@ -28,4 +28,12 @@ else
   echo "=== [4/4] Skipping hipblaslt_gemm_bench (not built) ==="
 fi
 
+if [[ -x .venv-rocm/bin/python && -f build/libamdhip64.so ]]; then
+  echo "=== [5/5] PyTorch ROCm End-to-End Smoke Suite ==="
+  LD_PRELOAD="$ROOT_DIR/build/libamdhip64.so" \
+    "$ROOT_DIR/.venv-rocm/bin/python" "$ROOT_DIR/scripts/test_pytorch_smoke.py"
+else
+  echo "=== [5/5] Skipping PyTorch ROCm Smoke Suite (.venv-rocm not found) ==="
+fi
+
 echo "=== ALL ANTI-REGRESSION CHECKS PASSED ==="

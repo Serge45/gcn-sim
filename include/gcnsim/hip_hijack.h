@@ -56,6 +56,20 @@ enum hipError_t {
     hipErrorLaunchFailure = 901,
     hipErrorNotFound = 300,
     hipErrorInvalidImage = 200,
+    hipErrorNotSupported = 801,
+};
+
+struct hipFuncAttributes {
+    int binaryVersion;
+    int cacheModeCA;
+    size_t constSizeBytes;
+    size_t localSizeBytes;
+    int maxDynamicSharedSizeBytes;
+    int maxThreadsPerBlock;
+    int numRegs;
+    int preferredShmemCarveout;
+    int ptxVersion;
+    size_t sharedSizeBytes;
 };
 
 struct dim3 {
@@ -290,10 +304,20 @@ struct FatBinaryHeader {
 
 // --- Hijack Manager ---
 
+struct FatBinaryEntry {
+    const void* raw_binary = nullptr;
+    size_t raw_size = 0;
+    bool is_hipf = false;
+    mutable bool parsed = false;
+    mutable const void* hsaco_data = nullptr;
+    mutable size_t hsaco_size = 0;
+};
+
 struct RegisteredKernel {
     std::string name;
-    const void* hsaco_data;
-    size_t hsaco_size;
+    mutable const void* hsaco_data;
+    mutable size_t hsaco_size;
+    void** fatbin_handle = nullptr;
     
     // Cached parsed kernel information
     mutable std::optional<HsacoModule> loaded_module;
@@ -330,7 +354,7 @@ public:
         return false;
     }
 
-    bool parse_clang_offload_bundle(const void* bundle_data, const void*& co_data, size_t& co_size, size_t bundle_size = 0) {
+    bool parse_clang_offload_bundle(const void* bundle_data, const void*& co_data, size_t& co_size, size_t bundle_size = 0) const {
         if (!bundle_data) return false;
         const char* base = reinterpret_cast<const char*>(bundle_data);
         const char* ptr = base;
@@ -427,28 +451,19 @@ public:
                       << ", size=" << header->size << ", ptr=" << header->binary << std::endl;
         }
 
-        const void* hsaco_data = header->binary;
-        size_t hsaco_size = header->size;
+        FatBinaryEntry entry;
+        entry.raw_binary = header->binary;
+        entry.raw_size = header->size;
+        entry.is_hipf = (header->magic == 0x48495046);
+        // Defer CCOB/Clang Offload Bundle parsing until first kernel launch from this bundle.
+        entry.parsed = !entry.is_hipf;
+        entry.hsaco_data = header->binary;
+        entry.hsaco_size = header->size;
 
-        if (header->magic == 0x48495046) { // "HIPF"
-            const void* extracted_data = nullptr;
-            size_t extracted_size = 0;
-            if (parse_clang_offload_bundle(header->binary, extracted_data, extracted_size, header->size)) {
-                if (is_hijack_verbose()) {
-                    std::cout << "[gcnsim_hip] Successfully parsed Clang Offload Bundle! Found target: "
-                              << "offset=" << (reinterpret_cast<const char*>(extracted_data) - reinterpret_cast<const char*>(header->binary))
-                              << ", size=" << extracted_size << std::endl;
-                }
-                hsaco_data = extracted_data;
-                hsaco_size = extracted_size;
-            } else if (is_hijack_verbose()) {
-                std::cout << "[gcnsim_hip] Warning: magic is HIPF but could not parse Clang Offload Bundle. Using raw pointer." << std::endl;
-            }
-        }
-
-        last_fatbin_data_ = hsaco_data;
-        last_fatbin_size_ = hsaco_size;
-        fatbin_handles_[handle] = {hsaco_data, hsaco_size};
+        last_fatbin_handle_ = handle;
+        last_fatbin_data_ = entry.hsaco_data;
+        last_fatbin_size_ = entry.hsaco_size;
+        fatbin_handles_[handle] = entry;
     }
 
     void RegisterFunction(
@@ -459,12 +474,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         const void* binary = nullptr;
         size_t size = 0;
+        void** resolved_handle = fatBinHandle;
         
         auto it = fatbin_handles_.find(fatBinHandle);
         if (it != fatbin_handles_.end()) {
-            binary = it->second.first;
-            size = it->second.second;
+            binary = it->second.hsaco_data;
+            size = it->second.hsaco_size;
         } else {
+            resolved_handle = last_fatbin_handle_;
             binary = last_fatbin_data_;
             size = last_fatbin_size_;
         }
@@ -473,6 +490,7 @@ public:
             .name = deviceName ? deviceName : "",
             .hsaco_data = binary,
             .hsaco_size = size,
+            .fatbin_handle = resolved_handle,
             .loaded_module = std::nullopt,
             .cached_kernel_info = nullptr
         };
@@ -546,6 +564,23 @@ public:
         if (reg.cached_kernel_info) {
             return reg.cached_kernel_info;
         }
+        if (reg.fatbin_handle) {
+            auto fb_it = fatbin_handles_.find(reg.fatbin_handle);
+            if (fb_it != fatbin_handles_.end()) {
+                const auto& entry = fb_it->second;
+                if (!entry.parsed && entry.is_hipf && entry.raw_binary) {
+                    const void* extracted_data = nullptr;
+                    size_t extracted_size = 0;
+                    if (parse_clang_offload_bundle(entry.raw_binary, extracted_data, extracted_size, entry.raw_size)) {
+                        entry.hsaco_data = extracted_data;
+                        entry.hsaco_size = extracted_size;
+                    }
+                    entry.parsed = true;
+                }
+                reg.hsaco_data = entry.hsaco_data;
+                reg.hsaco_size = entry.hsaco_size;
+            }
+        }
         if (!reg.loaded_module.has_value()) {
             std::string err;
             auto mod = load_hsaco_from_memory(
@@ -598,10 +633,11 @@ private:
     std::vector<std::string> filter_list_;
     
     // Tracks handles to raw data
+    void** last_fatbin_handle_ = nullptr;
     const void* last_fatbin_data_ = nullptr;
     size_t last_fatbin_size_ = 0;
     std::vector<std::unique_ptr<void*>> owned_fatbin_handles_;
-    std::unordered_map<void**, std::pair<const void*, size_t>> fatbin_handles_;
+    std::unordered_map<void**, FatBinaryEntry> fatbin_handles_;
     
     // Mapping of host stub pointers to kernels
     std::unordered_map<const void*, RegisteredKernel> registered_kernels_;
@@ -728,4 +764,44 @@ gcnsim::hipError_t hipMemcpyToSymbol(const void* symbol, const void* src, size_t
 gcnsim::hipError_t hipMemcpyToSymbolAsync(const void* symbol, const void* src, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
 gcnsim::hipError_t hipMemcpyFromSymbol(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind);
 gcnsim::hipError_t hipMemcpyFromSymbolAsync(void* dst, const void* symbol, size_t count, size_t offset, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+
+// PyTorch / ROCm Runtime Support APIs
+gcnsim::hipError_t hipInit(unsigned int flags);
+gcnsim::hipError_t hipDriverGetVersion(int* driverVersion);
+gcnsim::hipError_t hipRuntimeGetVersion(int* runtimeVersion);
+const char* hipGetErrorName(gcnsim::hipError_t hip_error);
+gcnsim::hipError_t hipPeekAtLastError(void);
+gcnsim::hipError_t hipMemGetInfo(size_t* free, size_t* total);
+gcnsim::hipError_t hipHostMalloc(void** ptr, size_t size, unsigned int flags);
+gcnsim::hipError_t hipHostRegister(void* hostPtr, size_t sizeBytes, unsigned int flags);
+gcnsim::hipError_t hipHostUnregister(void* hostPtr);
+gcnsim::hipError_t hipFuncGetAttributes(gcnsim::hipFuncAttributes* attr, const void* func);
+gcnsim::hipError_t hipOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks, const void* func, int blockSize, size_t dynamicSMemSize);
+gcnsim::hipError_t hipOccupancyMaxPotentialBlockSize(int* gridSize, int* blockSize, const void* func, size_t dynamicSMemSize, int blockSizeLimit);
+gcnsim::hipError_t hipStreamCreateWithPriority(gcnsim::hipStream_t* stream, unsigned int flags, int priority);
+gcnsim::hipError_t hipDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority);
+int hipGetStreamDeviceId(gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipMemcpyWithStream(void* dst, const void* src, size_t sizeBytes, gcnsim::hipMemcpyKind kind, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipIpcGetMemHandle(void* handle, void* devPtr);
+gcnsim::hipError_t hipIpcOpenMemHandle(void** devPtr, void* handle, unsigned int flags);
+gcnsim::hipError_t hipIpcCloseMemHandle(void* devPtr);
+gcnsim::hipError_t hipStreamBeginCapture(gcnsim::hipStream_t stream, int mode);
+gcnsim::hipError_t hipStreamEndCapture(gcnsim::hipStream_t stream, void** graph);
+gcnsim::hipError_t hipStreamIsCapturing(gcnsim::hipStream_t stream, int* pCaptureStatus);
+gcnsim::hipError_t hipStreamGetCaptureInfo(gcnsim::hipStream_t stream, int* pCaptureStatus, unsigned long long* pId);
+gcnsim::hipError_t hipThreadExchangeStreamCaptureMode(int* mode);
+gcnsim::hipError_t hipGraphInstantiate(void** graphExec, void* graph, void* errorNode, char* logBuffer, size_t bufferSize);
+gcnsim::hipError_t hipGraphLaunch(void* graphExec, gcnsim::hipStream_t stream);
+gcnsim::hipError_t hipGraphDestroy(void* graph);
+gcnsim::hipError_t hipGraphExecDestroy(void* graphExec);
+gcnsim::hipError_t hipGraphGetNodes(void* graph, void** nodes, size_t* numNodes);
+gcnsim::hipError_t hipGraphDebugDotPrint(void* graph, const char* path, unsigned int flags);
+gcnsim::hipError_t hipDevicePrimaryCtxGetState(int dev, unsigned int* flags, int* active);
+gcnsim::hipError_t hipDevicePrimaryCtxRetain(void** pctx, int dev);
+gcnsim::hipError_t hipDevicePrimaryCtxRelease(int dev);
+gcnsim::hipError_t hipDeviceGet(int* device, int ordinal);
+gcnsim::hipError_t hipDeviceGetName(char* name, int len, int device);
+gcnsim::hipError_t hipDeviceTotalMem(size_t* bytes, int device);
+gcnsim::hipError_t hipCtxGetCurrent(void** ctx);
+gcnsim::hipError_t hipCtxSetCurrent(void* ctx);
 }

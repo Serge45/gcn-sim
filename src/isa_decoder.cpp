@@ -408,6 +408,7 @@ static Opcode vop2_opcode(uint32_t op) {
         case 52: return Opcode::V_ADD_U32;
         case 53: return Opcode::V_SUB_U32;
         case 54: return Opcode::V_SUBREV_U32;
+        case 59: return Opcode::V_FMAC_F32;
         default: return Opcode::UNKNOWN;
     }
 }
@@ -548,6 +549,20 @@ static Opcode vop3_vopc_opcode(uint32_t op) {
         }
     }
     switch (op) {
+        // i16
+        case 0xA1: return Opcode::V_CMP_LT_I16;
+        case 0xA2: return Opcode::V_CMP_EQ_I16;
+        case 0xA3: return Opcode::V_CMP_LE_I16;
+        case 0xA4: return Opcode::V_CMP_GT_I16;
+        case 0xA5: return Opcode::V_CMP_NE_I16;
+        case 0xA6: return Opcode::V_CMP_GE_I16;
+        // u16
+        case 0xA9: return Opcode::V_CMP_LT_U16;
+        case 0xAA: return Opcode::V_CMP_EQ_U16;
+        case 0xAB: return Opcode::V_CMP_LE_U16;
+        case 0xAC: return Opcode::V_CMP_GT_U16;
+        case 0xAD: return Opcode::V_CMP_NE_U16;
+        case 0xAE: return Opcode::V_CMP_GE_U16;
         // i32
         case 0xC1: return Opcode::V_CMP_LT_I32;
         case 0xC2: return Opcode::V_CMP_EQ_I32;
@@ -597,6 +612,12 @@ static Opcode vopc_opcode(uint32_t op) {
 static Opcode vop3_opcode(uint32_t op) {
     switch (op) {
         // True VOP3A/B ops
+        case 0x1DE: return Opcode::V_DIV_FIXUP_F32;
+        case 0x1DF: return Opcode::V_DIV_FIXUP_F64;
+        case 0x1E0: return Opcode::V_DIV_SCALE_F32;
+        case 0x1E1: return Opcode::V_DIV_SCALE_F64;
+        case 0x1E2: return Opcode::V_DIV_FMAS_F32;
+        case 0x1E3: return Opcode::V_DIV_FMAS_F64;
         case 0x1E5: return Opcode::V_MUL_LO_U32;
         case 0x285: return Opcode::V_MUL_LO_U32;
         case 0x286: return Opcode::V_MUL_HI_U32;
@@ -610,6 +631,9 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x282: return Opcode::V_MIN_F64;
         case 0x283: return Opcode::V_MAX_F64;
         case 0x284: return Opcode::V_LDEXP_F64;
+        case 0x288: return Opcode::V_LDEXP_F32;
+        case 0x28C: return Opcode::V_MBCNT_LO_U32_B32;
+        case 0x28D: return Opcode::V_MBCNT_HI_U32_B32;
         case 0x1FE: return Opcode::V_ADD_LSHL_U32;
         case 0x1FF: return Opcode::V_ADD3_U32;       // gfx90a encoding (was 0x275 on Vega)
         case 0x200: return Opcode::V_LSHL_OR_B32;   // gfx90a encoding (was 0x276 on Vega)
@@ -620,6 +644,8 @@ static Opcode vop3_opcode(uint32_t op) {
         case 0x250: return Opcode::V_CVT_SCALEF32_PK_F16_FP4;
         case 0x3AA: return Opcode::V_DOT8_I32_I4;
         case 0x204: return Opcode::UNKNOWN;         // v_cubeid_f32 (graphics)
+        case 0x1C2: return Opcode::V_MAD_I32_I24;   // gfx90a encoding
+        case 0x1C3: return Opcode::V_MAD_U32_U24;   // gfx90a encoding
         case 0x1C8: return Opcode::V_BFE_U32;       // gfx90a encoding
         case 0x1C9: return Opcode::V_BFE_I32;       // gfx90a encoding
         case 0x1CA: return Opcode::V_BFI_B32;       // gfx90a encoding
@@ -2371,7 +2397,9 @@ Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908, bool is_gf
         inst.src[0].index = sbase * 2;
 
         if (imm_flag) {
-            inst.smem_offset = (int32_t)w1;
+            int32_t ioff = (int32_t)(w1 & 0x1FFFFF);
+            if (ioff & 0x100000) ioff |= ~0x1FFFFF;
+            inst.smem_offset = ioff;
         } else {
             inst.smem_offset = 0;
             inst.src[1].kind = Operand::Kind::SGPR;
@@ -2546,7 +2574,13 @@ Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908, bool is_gf
             inst.src[2].index = vdata;
         }
 
-        inst.flat_offset = (int16_t)(w0 & 0x1FFF);
+        if (is_global || is_scratch) {
+            int32_t ioff = (int32_t)(w0 & 0x1FFF);
+            if (ioff & 0x1000) ioff |= ~0x1FFF;
+            inst.flat_offset = (int16_t)ioff;
+        } else {
+            inst.flat_offset = (int16_t)(w0 & 0x0FFF);
+        }
         return inst;
     }
 
@@ -2743,6 +2777,8 @@ Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908, bool is_gf
                          inst.opcode == Opcode::V_SUBREV_CO_U32 ||
                          inst.opcode == Opcode::V_MAD_U64_U32 ||
                          inst.opcode == Opcode::V_MAD_I64_I32 ||
+                         inst.opcode == Opcode::V_DIV_SCALE_F32 ||
+                         inst.opcode == Opcode::V_DIV_SCALE_F64 ||
                          inst.opcode == Opcode::V_DIV_FMAS_F32 ||
                          inst.opcode == Opcode::V_DIV_FMAS_F64);
 
@@ -2887,19 +2923,32 @@ Instruction decode(const uint8_t* pc, bool is_gfx950, bool is_gfx908, bool is_gf
             inst.size_bytes = 8;
             inst.is_sdwa = true;
             uint32_t real_src0 = w1 & 0xFF;
-            // SDWA src0 field is always a VGPR index (0-255)
-            inst.src[0].kind  = Operand::Kind::VGPR;
-            inst.src[0].index = real_src0;
-            inst.src[1].kind  = Operand::Kind::VGPR;
-            inst.src[1].index = vsrc1;
-            inst.sdwa_src0_sel  = (w1 >> 8) & 0x7;
-            inst.sdwa_src0_sext = (w1 >> 11) & 1;
-            inst.sdwa_src0_neg  = (w1 >> 12) & 1;
-            inst.sdwa_src0_abs  = (w1 >> 13) & 1;
-            inst.sdwa_src1_sel  = (w1 >> 16) & 0x7;
-            inst.sdwa_src1_sext = (w1 >> 19) & 1;
-            inst.sdwa_src1_neg  = (w1 >> 20) & 1;
-            inst.sdwa_src1_abs  = (w1 >> 21) & 1;
+            bool s0 = (w1 >> 23) & 1;
+            bool s1 = (w1 >> 31) & 1;
+            bool sd = (w1 >> 15) & 1;
+            if (!is_vopc_cmpx(op) && sd) {
+                inst.dst = decode_sdst((w1 >> 8) & 0x7F);
+            }
+            if (s0) {
+                inst.src[0] = decode_src(real_src0, nullptr);
+            } else {
+                inst.src[0].kind  = Operand::Kind::VGPR;
+                inst.src[0].index = real_src0;
+            }
+            if (s1) {
+                inst.src[1] = decode_src(vsrc1, nullptr);
+            } else {
+                inst.src[1].kind  = Operand::Kind::VGPR;
+                inst.src[1].index = vsrc1;
+            }
+            inst.sdwa_src0_sel  = (w1 >> 16) & 0x7;
+            inst.sdwa_src0_sext = (w1 >> 19) & 1;
+            inst.sdwa_src0_neg  = (w1 >> 20) & 1;
+            inst.sdwa_src0_abs  = (w1 >> 21) & 1;
+            inst.sdwa_src1_sel  = (w1 >> 24) & 0x7;
+            inst.sdwa_src1_sext = (w1 >> 27) & 1;
+            inst.sdwa_src1_neg  = (w1 >> 28) & 1;
+            inst.sdwa_src1_abs  = (w1 >> 29) & 1;
         } else if ((src0 & 0xFF) == 0xFA) {
             uint32_t w1 = read_u32_le(pc + 4);
             inst.encoding[1] = w1;

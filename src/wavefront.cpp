@@ -66,9 +66,13 @@ void init_wavefront(WavefrontState& wave,
     uint32_t enable_vgpr_workitem_id = (kd.compute_pgm_rsrc2 >> 11) & 0x3;
     for (uint32_t lane = 0; lane < wsize; lane++) {
         uint32_t tid_x = wave.workitem_id[lane][0] & 0x3ff;
-        uint32_t tid_y = (enable_vgpr_workitem_id >= 1 || wsize == 32) ? (wave.workitem_id[lane][1] & 0x3ff) : 0;
-        uint32_t tid_z = (enable_vgpr_workitem_id >= 2 || wsize == 32) ? (wave.workitem_id[lane][2] & 0x3ff) : 0;
-        wave.vgpr[0][lane] = tid_x | (tid_y << 10) | (tid_z << 20);
+        if (wsize == 32) {
+            uint32_t tid_y = wave.workitem_id[lane][1] & 0x3ff;
+            uint32_t tid_z = wave.workitem_id[lane][2] & 0x3ff;
+            wave.vgpr[0][lane] = tid_x | (tid_y << 10) | (tid_z << 20);
+        } else {
+            wave.vgpr[0][lane] = tid_x;
+        }
     }
 
     // VGPR1 = workitem_id.y, VGPR2 = workitem_id.z (for unpacked ABI compatibility)
