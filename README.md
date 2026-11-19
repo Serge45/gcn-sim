@@ -4,7 +4,7 @@
 
 # gcn-sim: AMD Instinct MI-100, MI-200, MI-300, MI-350 & Radeon RDNA4 Architectural GPU Simulator
 
-[![C++ Standard](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
+[![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![Target Arch](https://img.shields.io/badge/Arch-CDNA1%20%7C%20CDNA2%20%7C%20CDNA3%20%7C%20CDNA4%20%7C%20RDNA4-red.svg)](https://www.amd.com/en/products/accelerators/instinct.html)
 [![ROCm Compatibility](https://img.shields.io/badge/ROCm-6.x%20%2F%207.x%20ABI-green.svg)](https://rocm.docs.amd.com/)
 [![Tests](https://img.shields.io/badge/Tests-100%25%20Passing-brightgreen.svg)]()
@@ -20,8 +20,11 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 ## Highlights & Flagship Features
 
 - 🚀 **Zero-Recompile Drop-in Replacement (`libamdhip64.so.6`)**:
-  - Run production HIP programs (PyTorch kernels, Tensile GEMMs, official ROCm Cookbook samples) simply by setting `LD_LIBRARY_PATH=./build`.
+  - Run production HIP programs (PyTorch kernels, Tensile GEMMs, official ROCm Cookbook samples) simply by setting `LD_LIBRARY_PATH=./build` or `LD_PRELOAD=./build/libamdhip64.so`.
   - Supports Clang Offload Bundles (`__CLANG_OFFLOAD_BUNDLE__`), Fat Binaries, Dynamic Code Objects (COV3–COV6), and ROCm 6.x Symbol Versioning (`hipGetDevicePropertiesR0600@@hip_6.0`).
+- 🔥 **End-to-End PyTorch (ROCm) & MiniGPT Transformer Execution**:
+  - Executes unmodified PyTorch (`torch==2.5.1+rocm6.2`) GPU kernels directly on CPU via `LD_PRELOAD=./build/libamdhip64.so` (`device='cuda'`).
+  - Verified against PyTorch CPU across elementwise ops (`add`, `mul`, `relu`, `exp`, `tanh`, `gelu`), `torch.matmul` (FP32/FP16/BF16) & `nn.Linear`, reductions (`sum`, `max`), `F.softmax`, `F.layer_norm`, and a complete 2-layer **MiniGPT** Decoder-only Transformer (`max_diff = 6.56e-07`, exact next-token match).
 - ⚡ **Authentic CDNA & RDNA4 Matrix Core (MFMA / WMMA) Engine**:
   - Full hardware outer-product math emulation for FP32, FP16, BF16, and INT8 with 64-register ACCVGPR matrix accumulation.
   - **RDNA4 (`gfx1201`) Wave32 & WMMA v2 Engine**: Native support for Radeon RX 9070 XT Navi 48 (32 WGPs / 64 CUs, Boost Clock 2.97 GHz), Wave32 execution (`warpSize = 32`), GFX12 instruction set, 96-bit VBUFFER/VGLOBAL/VOP3, VOPD (`v_dual_*`) dual-issue execution, and full hardware WMMA v2 emulation (`v_wmma_f32_16x16x16_f16`, `bf16`, `f16`, `iu8`, `iu4`, `fp8_fp8`, `fp8_bf8`, `bf8_fp8`, `bf8_bf8`). Runs official `/opt/rocm/lib/hipblaslt/library/*gfx1201*` GEMM kernels seamlessly.
@@ -50,23 +53,25 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 - [Directory Structure](#directory-structure)
 - [Building & Testing](#building)
 - [Usage & Seamless Drop-in Integration](#seamless-integration-no-recompilation)
+- [PyTorch (ROCm) End-to-End Support](#pytorch-rocm-end-to-end-support)
 - [Microarchitecture Profiling & Performance Analysis](#microarchitecture-profiling--performance-analysis)
+- [Environment Variables](#environment-variables)
 - [Debugging with gcndb](#debugging-with-gcndb)
 - [Supported Instructions](#supported-instructions)
 - [Completed Architectural Milestones](#completed-architectural-milestones)
-- [Future Work & Roadmap](#future-work--roadmap)
+- [Future Work & Roadmap](#future-work--architectural-roadmap)
 
 ---
 
 ## Overview
 
-`gcn-sim` provides complete full-stack simulation for the AMD gfx90a (CDNA2 / MI-200) architecture:
+`gcn-sim` provides full-stack simulation across AMD CDNA1–CDNA4 (`gfx908`, `gfx90a`, `gfx942`, `gfx950`) and RDNA4 (`gfx1201`/`gfx1200`) GPU architectures:
 
-1. **Host Interception Layer (`libamdhip64.so.6`)**: Intercepts HIP runtime APIs (`hipMalloc`, `hipMemcpy`, `hipLaunchKernel`, `hipModuleLaunchKernel`) and registers Fat Binaries.
-2. **Binary Code Object Loader**: Extracts compiled GFX90a HSACO binaries from Clang offload bundles and parses MsgPack `.note` metadata.
-3. **Execution Engine & Scheduler**: Decomposes grids into workgroups and dispatches 64-lane Wavefronts across a 4-SIMD Compute Unit topology.
-4. **Instruction-Level ISA Emulator**: Decodes and executes 32-bit and 64-bit GCN machine code against a 64-lane SIMT state vector.
-5. **Memory Hierarchy**: Routes accesses through LDS, Private Scratch rings, Flat address apertures, and set-associative L1/L2 caches into host memory.
+1. **Host Interception Layer (`libamdhip64.so.6`)**: Intercepts HIP runtime/driver APIs (`hipMalloc`, `hipMemcpy`, `hipLaunchKernel`, `hipModuleLaunchKernel`) and registers Fat Binaries.
+2. **Binary Code Object Loader**: Extracts compiled GFX9/GFX12 HSACO binaries from Clang offload bundles and parses MsgPack `.note` metadata (COV2–COV6).
+3. **Execution Engine & Scheduler**: Decomposes grids into workgroups and dispatches Wave64 (CDNA) or Wave32 (RDNA4) Wavefronts across multi-SIMD Compute Unit topologies.
+4. **Instruction-Level ISA Emulator**: Decodes and executes 32-bit, 64-bit, and 96-bit AMDGCN machine code against per-lane SIMT state vectors.
+5. **Memory Hierarchy**: Routes accesses through LDS (including dynamic shared memory), Private Scratch rings, Flat/Global apertures, and set-associative L1/L2/L3 caches into host memory.
 
 ---
 
@@ -74,8 +79,8 @@ Execute authentic, unmodified ROCm/HIP binaries on standard x86-64 Linux with **
 
 ```mermaid
 flowchart TD
-    subgraph HostApp["Host Application (HIP / ROCm)"]
-        App["Unmodified HIP Application\n(PyTorch / Tensile / Cookbook)"]
+    subgraph HostApp["Host Application (HIP / ROCm / PyTorch)"]
+        App["Unmodified HIP / PyTorch Application\n(MiniGPT / hipBLASLt / Tensile / Cookbook)"]
     end
 
     subgraph Hijack["Drop-in Runtime Interface"]
@@ -84,15 +89,15 @@ flowchart TD
     end
 
     subgraph SimEngine["gcn-sim Core Simulator"]
-        ELFLoader["ELF / HSACO Loader\n(COV3, COV4, COV5, COV6)"]
+        ELFLoader["ELF / HSACO Loader\n(COV2–COV6)"]
         Meta["MsgPack Metadata Parser\n(Kernarg & Hidden offsets)"]
-        Sched["Workgroup Scheduler\n(Dual-GCD / 110 CUs / 4 SIMDs per CU)"]
+        Sched["Workgroup Scheduler\n(Multi-CU / Dual-GCD / 8-XCD / WGP)"]
         
         subgraph Exec["Execution & Microarchitecture"]
-            Wave["64-Lane SIMT Wavefront\n(VGPR, SGPR, ACCVGPR, EXEC)"]
-            Decoder["GFX90a ISA Decoder\n(VOP, SOP, SMEM, DS, FLAT, MFMA)"]
+            Wave["Wave64 / Wave32 SIMT Wavefront\n(VGPR, SGPR, AGPR, EXEC)"]
+            Decoder["GFX9 / GFX12 ISA Decoder\n(VOP, VOPD, SOP, SMEM, DS, FLAT, MFMA/WMMA)"]
             CycleModel["Cycle Model\n(MFMA Shadow, Bank Conflicts, waitcnt)"]
-            CacheModel["Cache Model\n(16KB L1, 8MB L2, LRU, Coalescing)"]
+            CacheModel["Cache Model\n(16/32KB L1, 8/32MB L2, 256MB L3, LRU)"]
         end
     end
 
@@ -101,7 +106,7 @@ flowchart TD
         Debugger["gcndb\n(GDB/MI2 Protocol for CGDB/VS Code)"]
     end
 
-    App -->|Dynamic Link| SO
+    App -->|Dynamic Link / LD_PRELOAD| SO
     SO --> Bundle
     Bundle --> ELFLoader
     ELFLoader --> Meta
@@ -120,49 +125,83 @@ flowchart TD
 
 ```
 gcn-sim/
-├── CMakeLists.txt                   # Root build file
-├── PLAN.md                          # Original implementation plan
-├── README.md                        # This file
+├── CMakeLists.txt                       # Root build file (C++20)
+├── CLAUDE.md                            # Agent & contributor technical guide
+├── README.md                            # This file
 │
 ├── include/gcnsim/
-│   ├── gcnsim.h                     # Public C++ API
-│   ├── elf_loader.h                 # HSACO ELF parser types
-│   ├── kernel_descriptor.h          # 64-byte Code Object V3/V4 descriptor
-│   ├── isa_decoder.h                # Instruction/Opcode/Operand types + decode()
-│   ├── wavefront.h                  # WavefrontState struct + constants
-│   ├── execution_engine.h           # LaunchConfig + internal launch_kernel()
-│   ├── memory_model.h               # Inline host-memory load/store helpers
-│   └── hip_hijack.h                 # Interceptor API/Manager declarations
+│   ├── cache_model.h                    # L1/L2/L3 associative cache model
+│   ├── debugger_core.h                  # Breakpoint/stepping debugger core
+│   ├── dwarf_parser.h                   # DWARF line-table parser
+│   ├── elf_loader.h                     # HSACO ELF parser types
+│   ├── execution_engine.h               # LaunchConfig + internal launch_kernel()
+│   ├── gcnsim.h                         # Public C++ API
+│   ├── gdb_mi_parser.h                  # GDB/MI2 command parser
+│   ├── hip_hijack.h                     # Interceptor API/Manager declarations
+│   ├── isa_decoder.h                    # Instruction/Opcode/Operand types + decode()
+│   ├── kernel_descriptor.h              # 64-byte Code Object descriptor
+│   ├── memory_model.h                   # Inline host-memory load/store helpers
+│   └── wavefront.h                      # WavefrontState struct + constants
 │
 ├── src/
-│   ├── elf_loader.cpp               # HSACO ELF parsing (~280 lines)
-│   ├── metadata_parser.cpp          # MsgPack .note section parser (~315 lines)
-│   ├── isa_decoder.cpp              # Instruction decoder
-│   ├── isa_executor.cpp             # Per-instruction handlers
-│   ├── wavefront.cpp                # Wavefront init + run_wavefront()
-│   ├── execution_engine.cpp         # Grid dispatch, LDS/scratch alloc, barrier sync
-│   ├── gcnsim_api.cpp               # Public API wrappers (~95 lines)
+│   ├── cache_model.cpp                  # L1/L2/L3 LRU cache simulation
+│   ├── debugger_core.cpp                # Debugger execution & state inspection
+│   ├── dwarf_parser.cpp                 # DWARF PC-to-source line resolution
+│   ├── elf_loader.cpp                   # HSACO ELF parsing
+│   ├── execution_engine.cpp             # Grid dispatch, LDS/scratch alloc, barrier sync
+│   ├── gcnsim_api.cpp                   # Public API wrappers
+│   ├── gdb_mi_parser.cpp                # GDB/MI2 parser implementation
+│   ├── isa_decoder.cpp                  # GFX9 & GFX12 instruction decoder
+│   ├── isa_executor.cpp                 # Per-instruction handlers + cycle model
+│   ├── metadata_parser.cpp              # MsgPack .note section parser
+│   ├── wavefront.cpp                    # Wavefront init + run_wavefront()
 │   └── hijack/
-│       └── hip_hijack.cpp           # HIP interceptor implementation
+│       ├── hip_hijack.cpp               # HIP interceptor implementation
+│       └── hip.map                      # ROCm 4.2–6.0 symbol version script
+│
+├── scripts/
+│   ├── run_regression_suite.sh          # 5-stage CI/anti-regression gate
+│   ├── test_pytorch_smoke.py            # PyTorch ROCm + MiniGPT end-to-end suite (19 checks)
+│   ├── test_compiler_targets.sh         # Multi-arch compiler target checks
+│   └── upgrade_rocm_7.0.sh              # ROCm 7.0 toolchain helper
+│
+├── docs/                                # Architecture, MFMA, profiling & gcndb guides
 │
 ├── tests/
 │   ├── CMakeLists.txt
-│   ├── test_hijack_vector_add.cpp   # Interception integration tests
-│   ├── test_elf_loader.cpp          # 6 tests: ELF validation, kernel discovery
-│   ├── test_isa_decoder.cpp         # 41 tests: instruction format decoding
-│   ├── test_isa_executor.cpp        # 16 tests: instruction execution
-│   ├── test_wavefront.cpp           # 9 tests: SGPR/VGPR/EXEC initialization
-│   ├── test_vector_add.cpp          # 2 tests: end-to-end vector-add
-│   ├── test_gemm_mfma.cpp           # 3 tests: MFMA 4x4x1 GEMM
-│   ├── test_mfma_kernels.cpp        # 4 tests: multi-shape MFMA
-│   ├── test_asm_gemm.cpp            # 2 tests: hand-written assembly GEMM
-│   └── test_tensile_gemm.cpp        # 3 tests: Tensile-style SGEMM
+│   ├── test_elf_loader.cpp              # 9 tests: ELF/COV validation, kernel discovery
+│   ├── test_isa_decoder.cpp             # 43 tests: GFX9/GFX12/SDWA/DPP/VOP3P decoding
+│   ├── test_isa_executor.cpp            # 34 tests: ALU, modifiers, scratch, FP8/FP4/XF32
+│   ├── test_wavefront.cpp               # 9 tests: SGPR/VGPR/EXEC initialization
+│   ├── test_vector_add.cpp              # 2 tests: end-to-end vector-add
+│   ├── test_gemm_mfma.cpp               # 3 tests: MFMA 4x4x1 GEMM
+│   ├── test_mfma_kernels.cpp            # 4 tests: multi-shape MFMA
+│   ├── test_asm_gemm.cpp                # 5 tests: assembly MFMA GEMM (GFX908/90A/950)
+│   ├── test_cycle_model.cpp             # 13 tests: MFMA shadow, bank conflicts, per-SIMD
+│   ├── test_cache_model.cpp             # 7 tests: L1/L2/L3 cache & thread safety
+│   ├── test_tensile_gemm.cpp            # 3 tests: Tensile-style SGEMM
+│   ├── test_hijack_vector_add.cpp       # 2 tests: runtime & driver vector-add interception
+│   ├── test_hijack_asm_gemm.cpp         # 1 test: driver API assembly GEMM interception
+│   ├── test_debugger.cpp                # 7 tests: GDB/MI parser, DWARF mapping
+│   ├── test_cov5.cpp                    # 3 tests: COV5 & memory fault handling
+│   ├── test_hip_runtime.cpp             # 12 tests: extended HIP runtime APIs & topologies
+│   ├── test_hip_symbols.cpp             # 2 tests: __hipRegisterVar & hipModuleLoadData
+│   ├── test_cdna4_gemm.cpp              # 2 tests: MI-350 / CDNA4 / GFX950 execution
+│   ├── test_rdna4_gfx1201.cpp           # 6 tests: RX 9070 XT Wave32, VOPD & WMMA v2
+│   ├── test_regression_fixes.cpp        # 10 tests: Phase 9 & Phase 10 anti-regression tests
+│   ├── test_mi_flow.py                  # End-to-end GDB/MI integration tests
+│   ├── hipblaslt_gemm_bench.cpp         # Official hipBLASLt GEMM benchmark harness
+│   ├── real_rocm_app.cpp                # Precompiled hipcc binary integration app
+│   └── tensile_gemm_client.cpp          # Tensile dynamic module driver client
 │
-├── tools/vector_add/                # Vector-add HIP kernel (.hsaco)
-├── tools/gemm_mfma/                 # MFMA GEMM HIP kernel (.hsaco)
-├── tools/mfma_kernels/              # Multi-shape MFMA kernels (.hsaco)
-├── tools/asm_gemm_mfma/             # Hand-written GFX90A assembly GEMM (.co)
-└── tools/tensile_style_gemm/        # Tensile-style SGEMM assembly kernel (.co)
+├── tools/vector_add/                    # Vector-add HIP kernel (.hsaco)
+├── tools/gemm_mfma/                     # MFMA GEMM HIP kernel (.hsaco)
+├── tools/mfma_kernels/                  # Multi-shape MFMA kernels (.hsaco)
+├── tools/asm_gemm_mfma/                 # Hand-written assembly GEMM (.co)
+├── tools/tensile_style_gemm/            # Tensile-style SGEMM assembly kernel (.co)
+├── tools/cov5_kernel/                   # COV5 & fault test kernel (.hsaco)
+├── tools/cdna4_gemm/                    # CDNA4 GFX950 assembly kernel (.co)
+└── tools/gcndb/                         # GDB/MI2-compatible interactive debugger
 ```
 
 ---
@@ -198,7 +237,7 @@ For gfx9 targets, `kernel_code_entry_byte_offset` is always 256 (64-byte KD + 19
 - `.offset` — byte offset within the kernarg buffer
 - `.value_kind` — `"global_buffer"`, `"by_value"`, or `"hidden_*"` for compiler-injected args
 
-**Test (`test_elf_loader.cpp`, 6 tests):** Loads the reference HSACO at `/opt/rocm/bin/gfx90a/vector_add_memory_fault_kernels.hsaco` and asserts that: the file opens, at least one kernel is found, the descriptor and code pointers are non-null, kernel names are non-empty, COV version is in range, and the code entry offset is positive.
+**Test (`test_elf_loader.cpp`, 9 tests):** Validates ELF headers, discovers kernel symbols and descriptors, extracts COV metadata across object versions, and handles malformed/truncated inputs safely.
 
 ---
 
@@ -246,7 +285,7 @@ The decoder takes a pointer to raw bytes at the current PC and returns a fully-d
 
 **`s_waitcnt`** — parses `vmcnt` and `lgkmcnt` fields from the 16-bit immediate but executes as a no-op (all simulation memory is synchronous).
 
-**Test (`test_isa_decoder.cpp`, 22 tests):** Encodes known instruction words in byte arrays and decodes them, asserting format, opcode, operand kinds, register indices, immediate values, and size. Covers SOPP, SOP1, SOP2, SMEM, VOP1, VOP2, VOPC, VOP3A, VOP3B, and FLAT_GLOBAL instructions.
+**Test (`test_isa_decoder.cpp`, 43 tests):** Encodes known instruction words in byte arrays and decodes them, asserting format, opcode, operand kinds, register indices, immediate values, modifiers, and size across SOP, SMEM, VOP1/2/3/3P/VOPC, SDWA/DPP, DS, MUBUF, FLAT/GLOBAL/SCRATCH, MFMA, CDNA3/4, and RDNA4 VOPD/WMMA formats.
 
 ---
 
@@ -254,15 +293,16 @@ The decoder takes a pointer to raw bytes at the current PC and returns a fully-d
 
 **Files:** `src/wavefront.cpp`, `src/isa_executor.cpp`, `include/gcnsim/wavefront.h`
 
-**Wavefront state** (`WavefrontState`, ~132 KB — heap-allocated):
-- `sgpr[108]` — scalar registers; VCC lives at `sgpr[106:107]`
-- `vgpr[256][64]` — vector registers indexed as `[reg][lane]`
-- `agpr[256][64]` — accumulator registers (MFMA destinations)
+**Wavefront state** (`WavefrontState`, ~200 KB — heap-allocated and initialized via `reset_zero()`):
+- `sgpr[124]` — scalar registers (`sgpr[0..105]`, VCC at `sgpr[106:107]`, `ttmp0..15` at `sgpr[108:123]`)
+- `vgpr[512][64]` — vector registers indexed as `[reg][lane]` (covers CDNA3/4 unified 512-VGPR addressing via `.amdhsa_accum_offset`)
+- `agpr[256][64]` — dedicated accumulator registers (CDNA MFMA destinations)
 - `exec` (64-bit) — active lane bitmask
 - `vcc`, `scc`, `m0` — condition and special registers
 - `pc` — byte offset into `kernel_code_ptr`
-- `lds_ptr` / `lds_size` — per-workgroup LDS buffer
+- `lds_ptr` / `lds_size` — per-workgroup LDS buffer (`group_segment_fixed_size + cfg.shared_mem_bytes`)
 - `scratch_ptr` / `scratch_size` / `scratch_per_lane` — per-wavefront scratch memory
+- `dispatch_packet[64]` — synthetic HSA AQL kernel dispatch packet (`workgroup_size_x/y/z` populated for `KCP_ENABLE_SGPR_DISPATCH_PTR`)
 
 **Wavefront initialization (`init_wavefront()`):**
 
@@ -283,7 +323,7 @@ SGPR slots are assigned left-to-right in order dictated by `kernel_code_properti
 
 EXEC mask for a partial final wavefront: `exec = (1ULL << active_lanes) - 1`.
 
-VGPR[0][lane] = work-item X ID within the wavefront (ABI requirement).
+VGPR[0][lane] carries `tid_x` unpacked for GFX9/CDNA Wave64 (`vgpr[1]=tid_y`, `vgpr[2]=tid_z`), and packs `tid_x | (tid_y << 10) | (tid_z << 20)` into `vgpr[0][lane]` for RDNA4 Wave32.
 
 **Execution loop (`run_wavefront()`):**
 ```
@@ -315,7 +355,7 @@ A safety limit of 1,000,000 instructions prevents infinite loops.
 
 - **Float ops** (`v_add_f32`, `v_mul_f32`, `v_mad_f32`) — bit-cast via `memcpy` to avoid strict aliasing UB.
 
-**Test (`test_wavefront.cpp`, 6 tests):** Verifies EXEC mask for full and partial waves, VGPR[0] lane initialization, kernarg pointer placement in SGPRs, work-group ID SGPR placement, and multi-dimensional work-item ID layout.
+**Test (`test_wavefront.cpp`, 9 tests):** Verifies EXEC mask for full and partial waves, VGPR0–2 lane initialization (including unpacked GFX9 Wave64 vs Wave32), kernarg pointer placement in SGPRs, work-group ID SGPR placement, and multi-dimensional work-item ID layout.
 
 ---
 
@@ -332,14 +372,14 @@ wg_count_z = ceil(grid_z / block_z)
 waves_per_wg = ceil(block_x * block_y * block_z / 64)
 
 for each (wg_z, wg_y, wg_x):
-  allocate LDS buffer (group_segment_fixed_size bytes)
+  allocate LDS buffer (group_segment_fixed_size + cfg.shared_mem_bytes)
   allocate scratch buffers (per wavefront)
   for wave in [0, waves_per_wg):
     init_wavefront(ws, ...)
   run wavefronts round-robin until all end (with barrier sync)
 ```
 
-`WavefrontState` is ~132 KB (with AGPRs) and always heap-allocated.
+`WavefrontState` is approximately 200 KB (512 VGPRs, 256 AGPRs, 124 SGPRs, and per-lane state) and always heap-allocated.
 
 Wavefronts within a workgroup share LDS and are synchronized at `s_barrier` instructions using round-robin scheduling: each wavefront runs until it hits a barrier or ends, and all wavefronts resume together when every active wave has reached the barrier.
 
@@ -434,7 +474,7 @@ Rather than guessing argument layout, the simulator reads the MsgPack-encoded ke
 The EXEC mask is a plain `uint64_t` where bit `n` represents lane `n`. All vector instructions iterate `lane` in `[0, 64)` and `continue` if the bit is clear. This is simple, correct, and easy to verify in a debugger.
 
 ### 6. Heap-allocated WavefrontState
-`sizeof(WavefrontState)` is approximately 132 KB (SGPRs + VGPRs + AGPRs). Allocating it on the stack for multi-wave kernels would overflow. The execution engine uses `std::make_unique` per wavefront.
+`sizeof(WavefrontState)` is approximately 200 KB (SGPRs + 512 VGPRs + 256 AGPRs + synthetic AQL packet). Allocating it on the stack for multi-wave kernels would overflow. The execution engine uses `std::make_unique` per wavefront and initializes via `WavefrontState::reset_zero()`.
 
 ---
 
@@ -467,7 +507,10 @@ The `vector_add.hsaco` kernel is built automatically as part of the `tools/vecto
 ## Running Tests
 
 ```bash
-# Run all tests with verbose output
+# Run the full 5-stage anti-regression gate (Release CTest + ASan/UBSan + hipBLASLt + PyTorch smoke)
+./scripts/run_regression_suite.sh
+
+# Run all 20 CTest suites with verbose output
 ctest --test-dir build -V
 
 # Or run individual test binaries
@@ -488,40 +531,45 @@ ctest --test-dir build -V
 ./build/tests/test_hip_symbols
 ./build/tests/test_cdna4_gemm --hsaco build/tools/cdna4_gemm/cdna4_gemm.co
 ./build/tests/test_rdna4_gfx1201
+./build/tests/test_regression_fixes
 
 # Run the real ROCm/hipcc compiled application through the hijack library
-GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
+GCNSIM_HIJACK=1 LD_PRELOAD=./build/libamdhip64.so ./build/tests/real_rocm_app
 
 # Run official hipBLASLt GEMM benchmark on RDNA4 (gfx1201) or CDNA (gfx90a/gfx942/gfx950)
-GCN_SIM_ARCH=gfx1201 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/hipblaslt_gemm_bench 128 128 128
+GCN_SIM_ARCH=gfx1201 GCNSIM_HIJACK=1 LD_PRELOAD=./build/libamdhip64.so ./build/tests/hipblaslt_gemm_bench 128 128 128
 
 # Run end-to-end GDB/MI integration tests
 python3 tests/test_mi_flow.py
+
+# Run PyTorch (ROCm) & MiniGPT smoke suite (requires .venv-rocm)
+LD_PRELOAD=./build/libamdhip64.so .venv-rocm/bin/python scripts/test_pytorch_smoke.py
 ```
 
-Expected output: **164 tests pass across 19 suites**.
+Expected output: **177 tests pass across 20 CTest suites** (plus `hipblaslt_gemm_bench`, `test_mi_flow.py`, and the 19-check PyTorch ROCm smoke suite).
 
 | Test suite | Count | What it covers |
 |---|---|---|
 | `test_elf_loader` | 9 | ELF validation, kernel discovery, descriptor parsing |
-| `test_isa_decoder` | 43 | All instruction formats, SDWA, DPP, VOP3 modifiers |
+| `test_isa_decoder` | 43 | All instruction formats, GFX9 SDWA, DPP, VOP3 modifiers, RDNA4 VOPD |
 | `test_isa_executor` | 34 | Instruction execution, modifiers, scratch memory, FP8/FP4/XF32 ops |
 | `test_wavefront` | 9 | SGPR/VGPR/EXEC init, workitem_id.x/y/z |
 | `test_vector_add` | 2 | End-to-end vector-add kernel |
 | `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
 | `test_mfma_kernels` | 4 | Multi-shape MFMA (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
 | `test_asm_gemm` | 5 | Hand-written assembly MFMA GEMM across GFX908, GFX90A, GFX950 |
-| `test_cycle_model` | 13 | MFMA shadow, s_waitcnt stalls, bank conflicts, utilization, per-SIMD interleaving |
-| `test_cache_model` | 6 | L1/L2/L3 cache hit/miss, eviction, stats |
+| `test_cycle_model` | 13 | MFMA shadow, `s_waitcnt` stalls, bank conflicts, utilization, per-SIMD interleaving |
+| `test_cache_model` | 7 | L1/L2/L3 cache hit/miss, eviction, zero-config guard, concurrent thread safety |
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
 | `test_hijack_vector_add` | 2 | Dynamic runtime & driver vector add interception and CPU routing |
 | `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
 | `test_debugger` | 7 | GDB/MI protocol parser, DWARF line-to-PC mapping, debugger expressions |
-| `test_cov5` | 2 | Code Object Version 5 and memory fault handling |
-| `test_hip_runtime` | 11 | Extended HIP runtime APIs (peer access, streams, device properties MI100/200/300/350/RDNA4) |
+| `test_cov5` | 3 | Code Object Version 5 and bounds-checked memory fault handling |
+| `test_hip_runtime` | 12 | Extended HIP runtime APIs (peer access, streams, graphs, topologies MI100/200/300/350/RDNA4) |
 | `test_hip_symbols` | 2 | `__hipRegisterVar`, symbols, and `hipModuleLoadData` in-memory loading |
 | `test_cdna4_gemm` | 2 | AMD Instinct MI-350 / CDNA4 / GFX950 hardware kernel loading and execution |
 | `test_rdna4_gfx1201` | 6 | AMD Radeon RX 9070 XT / RDNA4 Wave32 state, VOPD dual-issue, and WMMA v2 GEMM |
+| `test_regression_fixes` | 10 | Phase 9/10 anti-regression tests: barrier safety, `reset_zero()`, SDWA, 16-bit shifts, i64 cmp, dispatch packet, `BF16_1K` MFMA |
 
 ---
 
@@ -600,17 +648,46 @@ GCNSIM_HIJACK_FILTER=matrixTranspose LD_PRELOAD=./build/libamdhip64.so.6 ./your_
 
 ---
 
+## PyTorch (ROCm) End-to-End Support
+
+`gcn-sim` executes unmodified PyTorch ROCm (`torch==2.5.1+rocm6.2`, `AMD Instinct MI250X (GCD 0)` default target) GPU kernels directly on the host CPU by preloading `libamdhip64.so`.
+
+### Quick Start
+
+```bash
+# Run the full 19-check PyTorch ROCm + MiniGPT verification suite
+LD_PRELOAD=./build/libamdhip64.so .venv-rocm/bin/python scripts/test_pytorch_smoke.py
+```
+
+### Verified PyTorch Operators & Models
+
+All checks in `scripts/test_pytorch_smoke.py` compare `device='cuda'` simulation output directly against PyTorch CPU reference tensors:
+
+| Stage | Operations / Model Covered | Verified Max Diff vs CPU |
+|---|---|---|
+| **Stage 2: Runtime & Memory** | `torch.cuda.is_available()`, `get_device_name(0)`, H2D/D2H (`torch.ones`) | `0.000e+00` |
+| **Stage 3A: Elementwise** | `add`, `mul`, `relu`, `exp`, `tanh`, `F.gelu` | `0.000e+00` – `9.537e-07` |
+| **Stage 3B: GEMM & Linear** | `torch.matmul` (FP32 / FP16 / BF16), `nn.Linear` (FP32) | `3.815e-06` (FP32), `1.562e-02` (FP16), `0.000e+00` (BF16) |
+| **Stage 3C: Reductions & Norm** | `sum()` / `sum(dim=1)`, `max()` / `max(dim=1)`, `F.softmax`, `F.layer_norm` | `0.000e+00` – `1.907e-06` |
+| **Stage 4: Feed-Forward Model** | `nn.Sequential(Linear, LayerNorm, GELU, Linear)` + `F.softmax` | `2.235e-08` |
+| **Stage 4B: MiniGPT Transformer** | 2-layer Decoder-only Transformer (`nn.Embedding`, 4-head causal self-attention, `tril` + `masked_fill(-inf)`, `softmax`, `LayerNorm`, `GELU` MLP, LM head) | `6.557e-07` (exact next-token match `[11, 13]`) |
+
+> [!NOTE]
+> Current verified scope covers **forward inference** on standard PyTorch ROCm 6.2 kernels. Autograd backward passes are not yet part of the regression gate, and OpenAI Triton JIT compilation requires `setuptools` plus driver C-extension compilation in the Python environment.
+
+---
+
 ## Microarchitecture Profiling & Performance Analysis
 
 `gcn-sim` features a built-in cycle-approximate microarchitecture and cache simulator that captures pipeline stalls, matrix core utilization, and memory traffic.
 
 ### Enabling Profiling
 
-Simply export the environment variables when running your application:
+Cycle counting is enabled automatically in `libamdhip64.so`. To export a Chrome/Perfetto timeline trace JSON, set `GCNSIM_TRACE`:
 
 ```bash
-# Enable cycle profiling and export Perfetto/Chrome timeline trace JSON
-GCNSIM_PROFILE=1 GCNSIM_TRACE=profile_trace.json LD_LIBRARY_PATH=./build ./your_hip_app
+# Export Perfetto/Chrome timeline trace JSON
+GCNSIM_TRACE=profile_trace.json LD_LIBRARY_PATH=./build ./your_hip_app
 ```
 
 Then open [ui.perfetto.dev](https://ui.perfetto.dev) or `chrome://tracing` in Google Chrome and load `profile_trace.json` to inspect interactive, color-coded timelines for all 4 SIMD execution tracks and memory stall bars (`stall:mfma_busy`, `stall:waitcnt`).
@@ -631,7 +708,29 @@ Profiling the production-grade Tensile GFX90a assembly kernel (`tools/tensile_st
 | **4096** | **1,080,596 cycles** | **635.64 µs** | **65,536** | **40.2%** | **97.0%** | **0.42 TFLOPS** |
 
 > [!TIP]
-> For a deep dive into the cache hierarchy (16 KB vL1D, 8 MB L2), LDS bank conflict calculations, and MFMA shadow dual-issue models, see the [Microarchitecture Simulation & Profiling Guide](docs/profiling_and_microarchitecture.md) and the [MFMA Lane & Register Layout Guide](docs/mfma_lane_layout.md).
+> For a deep dive into the cache hierarchy (16 KB/32 KB vL1D, 8 MB/32 MB L2, 256 MB L3 Infinity Cache), LDS bank conflict calculations, and MFMA shadow dual-issue models, see the [Microarchitecture Simulation & Profiling Guide](docs/profiling_and_microarchitecture.md) and the [MFMA Lane & Register Layout Guide](docs/mfma_lane_layout.md).
+
+---
+
+## Environment Variables
+
+| Category | Variable | Values / Format | Purpose |
+|---|---|---|---|
+| **Architecture** | `GCN_SIM_ARCH` | `gfx908`, `gfx90a` (default), `gfx942`, `gfx950`, `gfx1201`/`gfx1200` | Selects emulated GPU topology, wave size (Wave64/Wave32), and target bundle extraction |
+| **Architecture** | `GCNSIM_DEVICE_COUNT` | integer ≥ 1 | Overrides reported HIP simulated GPU device count |
+| **Interception** | `GCNSIM_HIJACK` | `1` / `0` | Enables or bypasses simulator interception (delegates to real driver via `dlsym(RTLD_NEXT)` when `0`) |
+| **Interception** | `GCNSIM_HIJACK_FILTER` | substring / kernel name | Emulates only matching kernels on CPU; forwards remaining kernels to GPU |
+| **Clock & DVFS** | `GCN_SIM_CLOCK_MHZ` / `GCN_SIM_SCLK` | float MHz (e.g. `1700`) | Overrides simulated SCLK clock frequency in MHz |
+| **Clock & DVFS** | `GCN_SIM_CLOCK_KHZ` | integer kHz | Overrides simulated SCLK clock frequency in kHz |
+| **Clock & DVFS** | `GCN_SIM_CLOCK_FACTOR` / `GCN_SIM_CLOCK_SCALE` | float clamped to `[0.1, 2.0]` | Scales nominal boost clock by factor |
+| **Clock & DVFS** | `GCN_SIM_DVFS` / `GCN_SIM_POWER_MODEL` | `1`, `true`, `on` | Enables dynamic thermal/power throttling between boost and base clocks using per-kernel compute intensity |
+| **Tracing & Debug** | `GCNSIM_TRACE` | file path (`trace.json`) | Writes Perfetto / Chrome Trace Event timeline JSON |
+| **Tracing & Debug** | `GCNSIM_TRACE_INSN` | any non-empty value | Logs per-instruction trace events to `stderr` during execution |
+| **Tracing & Debug** | `GCNSIM_DUMP_HSACO` | file path (`/tmp/out.co`) | Dumps extracted kernel HSACO/code object binary at kernel load |
+| **Tracing & Debug** | `GCNSIM_VERBOSE` | `1` / non-empty | Prints detailed HIP hijack registration, offload parsing, and launch diagnostics |
+| **Tracing & Debug** | `GCNSIM_STRICT_MEM` | `1` / non-empty | Enables strict bounds-checked memory validation via `msync()` |
+| **Debugger** | `GCNSIM_DEBUG` | `1` / non-empty | Attaches interactive `gcndb` debugger on kernel launch |
+| **Debugger** | `GCNSIM_MI_MODE` | `1` / non-empty | Starts `gcndb` in GDB/MI2 machine-interface mode |
 
 ---
 
@@ -653,7 +752,7 @@ For detailed setup instructions, commands, and VS Code configuration examples, p
 
 ## Supported Instructions
 
-The simulator covers ~340 instruction opcodes across all major GFX9/GFX90a formats. Key categories:
+The simulator covers **930+ instruction opcodes** (`932` entries in `Opcode`) across CDNA1–CDNA4 (`GFX9`) and RDNA4 (`GFX12`) formats. Key categories:
 
 ### Scalar (SOPP / SOP1 / SOP2 / SOPK / SOPC)
 
@@ -670,12 +769,12 @@ The simulator covers ~340 instruction opcodes across all major GFX9/GFX90a forma
 ### Vector ALU (VOP1 / VOP2 / VOP3A / VOP3B / VOPC)
 
 - **VOP1**: `v_mov_b32`, `v_cvt_*` (f32↔i32, f32↔u32, f32↔f16, f32↔f64, f16↔u16), `v_rcp_f32/f64`, `v_rsq_f32/f64`, `v_sqrt_f32/f64`, `v_floor/ceil/trunc/fract/rndne_f32/f64`, `v_exp_f32`, `v_log_f32`, `v_not_b32`, `v_bfrev_b32`, `v_readfirstlane_b32`
-- **VOP2**: `v_cndmask_b32`, `v_add/sub/mul_f32`, `v_mac_f32`, `v_add/sub_u32`, `v_add_co_u32`, `v_addc_co_u32`, `v_lshlrev/lshrrev/ashrrev_b32`, `v_and/or/xor_b32`, `v_min/max_f32/i32/u32`, `v_madmk/madak_f32`, `v_mul_hi_u32`, `v_subrev_u32`
-- **VOP3A**: `v_mad/fma_f32/f64`, `v_mul_lo/hi_u32/i32`, `v_lshlrev_b64`, `v_ashrrev_i64`, `v_lshl_add_u32`, `v_add3_u32`, `v_lshl_or_b32`, `v_and_or_b32`, `v_or3_b32`, `v_med3_f32/i32/u32`, `v_bfe_u32/i32`, `v_bfi_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_mad_u64_u32`, `v_readlane_b32`, `v_writelane_b32`, `v_accvgpr_read/write_b32`
+- **VOP2**: `v_cndmask_b32`, `v_add/sub/mul_f32`, `v_mac_f32`, `v_add/sub_u32`, `v_add_co_u32`, `v_addc_co_u32`, `v_lshlrev/lshrrev/ashrrev_b32`, `v_lshlrev/lshrrev/ashrrev_b16/i16`, `v_and/or/xor_b32`, `v_min/max_f32/i32/u32`, `v_madmk/madak_f32`, `v_mul_hi_u32`, `v_subrev_u32`
+- **VOP3A**: `v_mad/fma_f32/f64`, `v_mul_lo/hi_u32/i32`, `v_lshlrev_b64`, `v_ashrrev_i64`, `v_lshl_add_u32`, `v_add_lshl_u32`, `v_add3_u32`, `v_lshl_or_b32`, `v_and_or_b32`, `v_or3_b32`, `v_med3_f32/i32/u32`, `v_bfe_u32/i32`, `v_bfi_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_mad_u64_u32`, `v_mbcnt_lo/hi_u32_b32`, `v_div_fmas/fixup_f32`, `v_readlane_b32`, `v_writelane_b32`, `v_accvgpr_read/write_b32`
 - **VOP3B**: `v_add_co_u32`, `v_addc_co_u32`, `v_sub_co_u32`, `v_subb_co_u32`, `v_div_scale_f32/f64`
-- **VOPC**: full `v_cmp_*` set for F32, F64, I32, U32, I64, U64 (all conditions)
+- **VOPC**: full `v_cmp_*` / `v_cmpx_*` set for F32, F64, F16, I16, U16, I32, U32, I64, U64 (all conditions)
 - **VOP3 modifiers**: NEG, ABS (source), CLAMP, OMOD (destination) — applied to all float instructions
-- **SDWA**: byte/word selection sub-encoding (src0 == 0xF9)
+- **SDWA (`VOP_SDWA` / `SDWAB`)**: GFX9 byte/word selection sub-encoding (`src0 == 0xF9`) with `S0`/`S1` scalar/VGPR disambiguation
 - **DPP**: cross-lane data movement sub-encoding (src0 == 0xFA)
 
 ### VOP3P (Packed Operations)
@@ -717,7 +816,7 @@ All CDNA2 (`gfx90a`), CDNA3 (`gfx942`), and CDNA4 (`gfx950`) MFMA shapes with co
 
 - `kernel_code_entry_byte_offset` is always **256** for gfx9 targets: 64-byte KD + 192 bytes of alignment padding before the first instruction.
 - `STT_AMDGPU_HSA_KERNEL = STT_LOOS + 0 = 10` — kernel symbols in the ELF symbol table.
-- VCC in 108-SGPR allocation: `sgpr[106]` (VCC_LO), `sgpr[107]` (VCC_HI).
+- VCC in 124-SGPR allocation (`sgpr[0..105]`, `ttmp0..15` at `sgpr[108..123]`): `sgpr[106]` (VCC_LO), `sgpr[107]` (VCC_HI).
 - SMEM SBASE encoding: the 7-bit field stores `actual_sgpr / 2` (always a SGPR pair).
 - VOP3B: bit `[7]` of word0 distinguishes VOP3B from VOP3A (DST2 = SGPR destination for carry-out).
 - Branch offsets in SOPP are in **DWORD units** (×4 bytes), relative to the instruction following the branch.
@@ -739,6 +838,8 @@ The following features were previously listed as future development targets and 
 - [x] **Bounds-Checked Memory Fault Engine**: Page-level allocated regions with explicit `MemoryFaultException` throwing on out-of-bounds or NULL-pointer dereferences instead of silent host segfaults.
 - [x] **Instruction Tracing & Perfetto Timeline Export**: `--trace` mode for per-instruction logging and Chrome Trace Event / Perfetto (`ui.perfetto.dev`) visual timeline export showing SIMD lane occupancy and stall bars.
 - [x] **Interactive GDB/MI Debugger (`gcndb`) & Disassembler**: Full GDB/MI2 protocol debugger compatible with CGDB and VS Code, alongside human-readable disassembler output.
+- [x] **Phase 9 Hardening & Anti-Regression Gate**: ASan+UBSan regression pipeline (`scripts/run_regression_suite.sh`), safe `WavefrontState::reset_zero()`, thread-safe `CacheModel` with zero-config guards, and bounds-checked ELF / Clang offload bundle parsing (`test_regression_fixes`).
+- [x] **Phase 10 PyTorch (ROCm) & MiniGPT End-to-End Support**: Executes unmodified `torch==2.5.1+rocm6.2` kernels on CPU via `LD_PRELOAD=./build/libamdhip64.so`, supporting dynamic shared memory (`LaunchConfig::shared_mem_bytes`), synthetic AQL `dispatch_packet`, GFX9 SDWA / 16-bit shift / i64 compare fixes, and full 2-layer MiniGPT Transformer inference (`max_diff = 6.56e-07`).
 
 ---
 
@@ -772,5 +873,5 @@ The following features were previously listed as future development targets and 
   Provide native Python bindings via `nanobind` or `pybind11` for standalone simulation, unit testing, and integration with PyTorch custom C++/CUDA/HIP extensions and OpenAI Triton.
 - **Downstream CMake / `pkg-config` Packaging**:
   Generate and install `gcnsim-config.cmake` and `gcnsim.pc` to allow downstream C++ compiler toolchains to link `libgcnsim` seamlessly.
-- **Consumer GPU ISA Support (RDNA3 `gfx1100` / RDNA4 `gfx1200`)**:
-  Add support for AMD Radeon consumer graphics architectures, featuring Wave32 mode, dual-issue VALU ALUs, and matrix WMMA (Wave Matrix Multiply-Accumulate) instructions.
+- **PyTorch Autograd / Triton JIT & RDNA3 (`gfx1100`) Support**:
+  Extend runtime/driver hooks for backward pass kernels and Triton JIT C-extension loading (`setuptools` + JIT driver helpers), and add AMD RDNA3 (`gfx1100`) ISA/WMMA v1 coverage.

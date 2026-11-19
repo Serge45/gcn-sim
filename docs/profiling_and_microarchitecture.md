@@ -1,6 +1,6 @@
 # Microarchitecture Simulation & Profiling Guide
 
-`gcn-sim` is not merely a functional instruction emulator; it includes a cycle-approximate microarchitecture and cache simulation engine that models the internal execution pipeline, memory latency hierarchy, and structural hazards of the **AMD Instinct MI250X (CDNA2 / GFX90a)** GPU.
+`gcn-sim` is not merely a functional instruction emulator; it includes a cycle-approximate microarchitecture and cache simulation engine modeling internal execution pipelines, multi-level cache hierarchies, structural hazards, and DVFS clock scaling across **AMD Instinct MI100 (`gfx908`), MI210/MI250X (`gfx90a`), MI300X (`gfx942`), MI350X (`gfx950`), and Radeon RX 9070 XT (`gfx1201`)**. The pipeline walkthrough below uses MI250X (`gfx90a`) as the baseline reference.
 
 ---
 
@@ -71,20 +71,39 @@ Memory instructions dynamically probe an associative cache hierarchy:
 * When lanes within a half-wave access different memory addresses residing in the same memory bank, access is serialized, incurring an additional latency penalty:
   $$\text{Latency} = 4 + 4 \times (\text{Bank Conflicts} - 1)$$
 
-### D. Scoreboard & Memory Stalls (`s_waitcnt`)
-* In-flight memory requests (Global memory in `vm_pending`, LDS/Constant memory in `lgkm_pending`) are tracked with exact completion timestamps.
-* `s_waitcnt vmcnt(N)` and `s_waitcnt lgkmcnt(N)` stall execution until the number of pending transactions drops to $N$, accurately capturing memory latency stalls.
+### D. Scoreboard & Memory Stalls (`s_waitcnt` / `s_wait_*`)
+* In-flight memory requests (Global memory in `vm_pending`, LDS/Constant memory in `lgkm_pending`, plus RDNA4 GFX12 split `store_pending`, `ds_pending`, `km_pending`) are tracked with exact completion timestamps.
+* `s_waitcnt vmcnt(N)` / `lgkmcnt(N)` (and GFX12 `s_wait_*`) stall execution until the number of pending transactions drops to $N$, accurately capturing memory latency stalls.
+
+### E. Multi-Architecture Cache & Compute Topology
+
+`src/execution_engine.cpp` and `src/hijack/hip_hijack.cpp` parameterize CU/WGP counts, cache sizes, LDS limits, and clock domains per target architecture (`GCN_SIM_ARCH`):
+
+| Target GPU (`GCN_SIM_ARCH`) | Engine CUs / WGPs | Wave Size | LDS / Block | vL1D Cache | Shared L2 Cache | L3 Infinity Cache | Boost / Base SCLK |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **MI100 (`gfx908`)** | 120 CUs | 64 | 64 KB | 16 KB (4-way) | 8 MB (16-way) | — | 1.502 / 1.087 GHz |
+| **MI250X / MI210 (`gfx90a`)** | 104 CUs (engine) | 64 | 64 KB | 16 KB (4-way) | 8 MB (16-way) | — | 1.70 / 1.30 GHz (MI210 Base 1.20) |
+| **MI300X (`gfx942`)** | 304 CUs (8 XCDs) | 64 | 64 KB | 32 KB (4-way) | 32 MB | 256 MB (180 cyc) | 2.10 / 1.70 GHz |
+| **MI350X (`gfx950`)** | 256 CUs (8 XCDs) | 64 | 160 KB | 32 KB (4-way) | 32 MB | 256 MB (180 cyc) | 2.10 / 1.65 GHz |
+| **RX 9070 XT (`gfx1201`)** | 32 WGPs (64 CUs) | 32 | 64 KB (128 KB/WGP) | 32 KB / WGP | 8 MB | 64 MB (160 cyc) | 2.97 / 2.40 GHz |
 
 ---
 
 ## 2. Profiling Real Applications
 
-Any standard HIP application running via our drop-in runtime library (`libamdhip64.so.6`) can be profiled without recompilation or source modification:
+Cycle counting is enabled automatically in `libamdhip64.so`. Any standard HIP or PyTorch application running via `libamdhip64.so` can export Perfetto/Chrome timeline traces without recompilation or source modification:
 
 ```bash
-# Run with profiling and Chrome/Perfetto trace output enabled
-GCNSIM_PROFILE=1 GCNSIM_TRACE=my_kernel_trace.json LD_LIBRARY_PATH=./build ./my_hip_app
+# Run with Chrome/Perfetto trace output enabled
+GCNSIM_TRACE=my_kernel_trace.json LD_LIBRARY_PATH=./build ./my_hip_app
 ```
+
+### Clock Scaling & Dynamic DVFS Modeling
+
+`src/hijack/hip_hijack.cpp` converts simulated CU cycles to kernel execution time (`hipEventElapsedTime`) using the selected architecture's clock model:
+- **Fixed Frequency Override**: `GCN_SIM_CLOCK_MHZ=<MHz>` (or `GCN_SIM_SCLK=<MHz>`) / `GCN_SIM_CLOCK_KHZ=<kHz>` pins the simulated clock.
+- **Scaling Factor**: `GCN_SIM_CLOCK_FACTOR=<f>` (or `GCN_SIM_CLOCK_SCALE=<f>`, clamped to `[0.1, 2.0]`) scales the target's boost clock.
+- **Dynamic DVFS Throttling**: Setting `GCN_SIM_DVFS=1` (or `GCN_SIM_POWER_MODEL=1`) interpolates each kernel's clock frequency between Boost and Base SCLK proportionally to its measured `compute_intensity` (MFMA + VALU utilization).
 
 ### Viewing Traces with Perfetto or Chrome Tracing
 1. Open [ui.perfetto.dev](https://ui.perfetto.dev) in Google Chrome or any modern browser.

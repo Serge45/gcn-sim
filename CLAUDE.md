@@ -44,12 +44,17 @@ ctest --test-dir build -V
 ./build/tests/test_hip_symbols
 ./build/tests/test_cdna4_gemm --hsaco build/tools/cdna4_gemm/cdna4_gemm.co
 ./build/tests/test_rdna4_gfx1201
-GCNSIM_HIJACK=1 LD_PRELOAD=./build/libgcnsim_hip.so ./build/tests/real_rocm_app
+./build/tests/test_regression_fixes
+GCNSIM_HIJACK=1 LD_PRELOAD=./build/libamdhip64.so ./build/tests/real_rocm_app
 python3 tests/test_mi_flow.py
+LD_PRELOAD=./build/libamdhip64.so .venv-rocm/bin/python scripts/test_pytorch_smoke.py
+
+# Recommended 5-stage anti-regression gate (Release + ASan/UBSan + hipBLASLt + PyTorch smoke)
+./scripts/run_regression_suite.sh
 ```
 
-**Expected:** 19 CTest suites passing (100% pass rate, 164 tests) + GDB/MI integration tests.
-Always run the full test suite after any change to `src/` or `include/`.
+**Expected:** 20 CTest suites passing (100% pass rate, 177 GTest tests) + ASan/UBSan suite + `hipblaslt_gemm_bench` + GDB/MI + PyTorch smoke suite.
+Always run `./scripts/run_regression_suite.sh` (or at minimum `ctest --test-dir build`) after any change to `src/` or `include/`.
 
 ---
 
@@ -58,13 +63,16 @@ Always run the full test suite after any change to `src/` or `include/`.
 ```
 include/gcnsim/    Public headers — data structures and API declarations
 src/               Implementation — one .cpp per concern
-src/hijack/        Interception library implementing hijacked HIP runtime APIs
-tests/             GTest unit and integration tests
+src/hijack/        Interception library implementing hijacked HIP runtime APIs (`hip_hijack.cpp`, `hip.map`)
+scripts/           CI & smoke scripts (`run_regression_suite.sh`, `test_pytorch_smoke.py`, `test_compiler_targets.sh`, `upgrade_rocm_7.0.sh`)
+tests/             GTest unit, integration, and anti-regression tests
 tools/vector_add/       Vector-add HIP kernel (.hsaco) for integration tests
 tools/gemm_mfma/        MFMA GEMM HIP kernel (.hsaco) for MFMA integration tests
 tools/mfma_kernels/     Multi-shape MFMA kernels (.hsaco) for integration tests
 tools/asm_gemm_mfma/    Hand-written GFX90A assembly MFMA GEMM (.co)
 tools/tensile_style_gemm/ Tensile-style SGEMM assembly kernel (.co) for end-to-end GEMM test
+tools/cov5_kernel/      Code Object V5 & memory fault integration kernel (.hsaco)
+tools/cdna4_gemm/       CDNA4 (gfx950) MFMA GEMM assembly kernel (.co)
 tools/gcndb/            GCN GPU ISA debugger wrapper and GDB/MI frontend (`gcndb`)
 ```
 
@@ -102,23 +110,25 @@ tools/gcndb/            GCN GPU ISA debugger wrapper and GDB/MI frontend (`gcndb
 ## Key data structures
 
 ### `WavefrontState` (`include/gcnsim/wavefront.h`)
-The complete execution state of one 64-lane wavefront:
-- `sgpr[108]` — scalar registers; VCC is `sgpr[106:107]`
-- `vgpr[256][64]` — indexed `[reg_index][lane]`
-- `agpr[256][64]` — accumulator registers (gfx90a MFMA destinations)
+The complete execution state of one wavefront (`Wave64` for CDNA, `Wave32` for RDNA4):
+- `sgpr[124]` — scalar registers (`sgpr[0..105]`, VCC at `sgpr[106:107]`, `ttmp0..15` at `sgpr[108:123]`)
+- `vgpr[512][64]` — vector registers indexed `[reg_index][lane]` (covers CDNA3/4 unified register file)
+- `agpr[256][64]` — accumulator registers (CDNA MFMA destinations)
 - `exec` (uint64_t) — active lane bitmask
 - `pc` — **byte offset** into `kernel_code_ptr` (not a pointer)
-- `lds_ptr` / `lds_size` — per-workgroup LDS buffer; set by execution engine
+- `lds_ptr` / `lds_size` — per-workgroup LDS buffer (`group_segment_fixed_size + cfg.shared_mem_bytes`)
 - `scratch_ptr` / `scratch_size` / `scratch_per_lane` — per-wavefront scratch memory;
   set by execution engine (`scratch_size = private_segment_fixed_size * 64`)
+- `dispatch_packet[64]` — synthetic HSA AQL kernel dispatch packet (`workgroup_size_x/y/z` at offsets `+4/+6/+8`) used by `KCP_ENABLE_SGPR_DISPATCH_PTR`
 
-`sizeof(WavefrontState)` ≈ 132 KB — **never allocate on the stack**. The execution engine uses `std::make_unique`.
+`sizeof(WavefrontState)` ≈ 200 KB — **never allocate on the stack**. The execution engine uses `std::make_unique` and initializes state via `WavefrontState::reset_zero()`.
 
 ### `WaveStatus` (`include/gcnsim/wavefront.h`)
-Returned by `run_wavefront()`:
+Returned by `run_wavefront()` / `step_wavefront()`:
 - `ENDED` — wavefront hit `s_endpgm` or ran out of code
 - `BARRIER_HIT` — wavefront hit `s_barrier` and is paused until all waves in the
   workgroup reach the barrier
+- `RUNNING` — single instruction executed (`step_wavefront()` CU interleaving mode)
 
 ### `Instruction` (`include/gcnsim/isa_decoder.h`)
 Decoded instruction. `size_bytes` is 4 or 8. The caller advances `wave.pc += inst.size_bytes`
@@ -210,12 +220,17 @@ Word 1: [31:29]=NEG[2:0]  [28:27]=OMOD[1:0]  [26:18]=SRC2  [17:9]=SRC1  [8:0]=SR
 
 **SDWA sub-encoding** (triggered by VOP1/VOP2/VOPC with src0 raw field == 0xF9):
 ```
-Word 1: [7:0]=SRC0_VGPR  [10:8]=SRC0_SEL  [11]=SRC0_SEXT  [12]=SRC0_NEG
-         [13]=SRC0_ABS  [18:16]=SRC1_SEL  [19]=SRC1_SEXT  [20]=SRC1_NEG
-         [21]=SRC1_ABS  [26:24]=DST_SEL  [28:27]=DST_UNUSED  [29]=CLAMP
+Word 1 (GFX9 VOP_SDWA for VOP1/VOP2):
+  [7:0]=SRC0  [10:8]=DST_SEL  [12:11]=DST_UNUSED  [13]=CLMP  [15:14]=OMOD
+  [18:16]=SRC0_SEL  [19]=SRC0_SEXT  [20]=SRC0_NEG  [21]=SRC0_ABS  [23]=S0
+  [26:24]=SRC1_SEL  [27]=SRC1_SEXT  [28]=SRC1_NEG  [29]=SRC1_ABS  [31]=S1
+Word 1 (GFX9 SDWAB for VOPC):
+  [7:0]=SRC0  [14:8]=SDST  [15]=SD  [18:16]=SRC0_SEL  [23]=S0
+  [26:24]=SRC1_SEL  [31]=S1  (when SD=1, dst = decode_sdst(SDST))
 ```
+- When `S0 == 0` / `S1 == 0`, the source is a VGPR index (0–255); when `S0 == 1` / `S1 == 1`, it is an SGPR/inline constant decoded via `decode_src()`.
 - Sel values: 0=BYTE_0, 1=BYTE_1, 2=BYTE_2, 3=BYTE_3, 4=WORD_0, 5=WORD_1, 6=DWORD
-- `read_vsrc_sdwa()` / `write_vdst_sdwa()` / `apply_sdwa_sel()` in `isa_executor.cpp`
+- `read_vsrc_sdwa()` / `read_vsrc_ex()` / `write_vdst_sdwa()` / `apply_sdwa_sel()` in `isa_executor.cpp`
 
 **DPP sub-encoding** (triggered by VOP1/VOP2/VOPC with src0 raw field == 0xFA):
 ```
@@ -311,6 +326,9 @@ as ground truth when adding or debugging instructions.
 | 27 | V_SUBREV_U32 |
 | 28 | V_ADDC_CO_U32 ← **confirmed: enc `38060303`** |
 | 32 | V_ADD_U32 (no carry, gfx9+) |
+| 42 | V_LSHLREV_B16 ← **confirmed: enc `54020688`** |
+| 43 | V_LSHRREV_B16 |
+| 44 | V_ASHRREV_I16 |
 | 52 | V_ADD_U32 (alt, enc `68000006`) |
 
 ---
@@ -543,9 +561,7 @@ lgkm_pending            vector    — DS/SMEM completion timestamps
 vm_pending              vector    — MUBUF/FLAT/GLOBAL completion timestamps
 ```
 
-All cycle fields are placed before `lgkm_pending` in the struct so the existing
-`memset(..., offsetof(WavefrontState, lgkm_pending))` in `init_wavefront()` and
-`make_wave()` zeroes them. **Do not place non-POD fields before `lgkm_pending`.**
+`WavefrontState::reset_zero()` in `include/gcnsim/wavefront.h` explicitly zeroes all POD arrays/scalars and `.clear()`s the `*_pending` `std::vector`s (`lgkm_pending`, `vm_pending`, `store_pending`, `ds_pending`, `km_pending`) without raw `memset` across non-POD fields. **Always initialize any new `WavefrontState` fields inside `reset_zero()`.**
 
 ### Chrome Trace timeline output
 
@@ -645,22 +661,34 @@ Key assembly constraints (GFX9 constant bus rule):
 
 ## Test suites
 
+**20 CTest suites (177 GTest tests)** + integration/Python suites:
+
 | Suite | Tests | What it covers |
 |---|---|---|
-| `test_elf_loader` | 6 | ELF parsing, symbol table, section extraction |
-| `test_isa_decoder` | 41 | Instruction decoding for all formats (SOPP, SOP1/2, SOPK, SOPC, SMEM, VOP1/2/3, VOPC, DS, MUBUF, VOP3P, MFMA, FLAT/GLOBAL, SDWA, DPP) |
-| `test_isa_executor` | 16 | Instruction execution: `v_cndmask_b32`, `s_cselect_b32`, VOP3 modifiers (NEG/ABS/CLAMP/OMOD), `s_getpc_b64`, `s_barrier` (WaveStatus), scratch memory store/load/isolation, `v_mul_f32` baseline |
-| `test_wavefront` | 9 | Wavefront initialization: EXEC masks, workitem IDs, SGPR setup, VGPR0-2 for workitem_id.x/y/z |
+| `test_elf_loader` | 9 | ELF/COV validation, symbol table, kernel descriptor parsing, truncation safety |
+| `test_isa_decoder` | 43 | Instruction decoding across GFX9/GFX12, SDWA, DPP, VOP3/VOP3P, MFMA/WMMA, VOPD |
+| `test_isa_executor` | 34 | Instruction execution, modifiers, scratch isolation, FP8/FP4/XF32 ops |
+| `test_wavefront` | 9 | Wavefront initialization: EXEC masks, SGPR setup, unpacked GFX9 vs Wave32 VGPR0–2 |
 | `test_vector_add` | 2 | End-to-end vector-add kernel (HSACO integration) |
 | `test_gemm_mfma` | 3 | MFMA 4x4x1 GEMM integration |
 | `test_mfma_kernels` | 4 | Multi-shape MFMA integration (16x16x1, 16x16x4, 32x32x1, 32x32x2) |
-| `test_asm_gemm` | 2 | Hand-written assembly MFMA GEMM integration |
+| `test_asm_gemm` | 5 | Hand-written assembly MFMA GEMM across GFX908, GFX90A, GFX950 |
+| `test_cycle_model` | 13 | MFMA shadow, `s_waitcnt` stalls, DS bank conflicts, VALU/MFMA utilization, per-SIMD interleaving |
+| `test_cache_model` | 7 | L1/L2/L3 cache hit/miss, eviction, zero-config guard, concurrent thread safety |
 | `test_tensile_gemm` | 3 | Tensile-style 128x256 SGEMM with LDS, barriers, multi-wavefront |
-| `test_cycle_model` | 13 | MFMA shadow absorption, back-to-back MFMA stalls, s_waitcnt stalls, DS bank conflict setup, VALU/MFMA utilization tracking, s_nop delay, step_wavefront basic/compat, same-SIMD interleaving, no-interleave-1-per-SIMD, barrier |
-| `test_cache_model` | 5 | L1 hit on reuse, same-line hit, L2 hit after L1 eviction, sequential reuse, stats accumulation |
 | `test_hijack_vector_add` | 2 | Dynamic runtime & driver vector add interception and CPU routing |
 | `test_hijack_asm_gemm` | 1 | Dynamic Driver API assembly GEMM interception and CPU routing |
-| `real_rocm_app` | — | Real compiler-compiled binary dynamic interception validation |
+| `test_debugger` | 7 | GDB/MI protocol parser, DWARF line-to-PC mapping, debugger expressions |
+| `test_cov5` | 3 | Code Object Version 5 and bounds-checked memory fault handling |
+| `test_hip_runtime` | 12 | Extended HIP runtime APIs (peer access, streams, graphs, MI100/200/300/350/RDNA4) |
+| `test_hip_symbols` | 2 | `__hipRegisterVar`, symbols, and `hipModuleLoadData` in-memory loading |
+| `test_cdna4_gemm` | 2 | AMD Instinct MI-350 / CDNA4 / GFX950 kernel loading and execution |
+| `test_rdna4_gfx1201` | 6 | AMD Radeon RX 9070 XT / RDNA4 Wave32, VOPD dual-issue, and WMMA v2 GEMM |
+| `test_regression_fixes` | 10 | Phase 9/10 anti-regression tests (barriers, `reset_zero()`, `SAVEEXEC`, SMEM/GLOBAL negative offsets, SDWA, 16-bit shifts, i64 cmp, dispatch packet, `BF16_1K` MFMA) |
+| `real_rocm_app` | — | Precompiled `hipcc` binary dynamic interception validation |
+| `hipblaslt_gemm_bench` | — | End-to-end hipBLASLt 128×128×128 GEMM benchmark on RDNA4 (`gfx1201`) |
+| `tests/test_mi_flow.py` | — | End-to-end GDB/MI debugging workflow test |
+| `scripts/test_pytorch_smoke.py` | 19 checks | PyTorch (`torch==2.5.1+rocm6.2`) end-to-end ops + 2-layer MiniGPT Transformer |
 
 ### Writing new tests
 
@@ -672,7 +700,7 @@ sub-encodings (SDWA, DPP).
 **Executor tests** (`test_isa_executor.cpp`): forward-declare `execute_instruction`
 and `run_wavefront` from the `gcnsim` namespace, build an `Instruction` struct manually
 (set opcode, format, operands, modifiers), allocate `WavefrontState` on the heap via
-`make_wave()`, and verify VGPR/SGPR outputs. `WavefrontState` is ~132 KB — never put
+`make_wave()`, and verify VGPR/SGPR outputs. `WavefrontState` is ~200 KB — never put
 it on the stack. See `make_inst()` and `f2u()`/`u2f()` helpers in the test file.
 
 **Wavefront tests** (`test_wavefront.cpp`): call `init_wavefront()` with a
@@ -723,10 +751,12 @@ Common past mistakes to watch for:
 - **VOP3→VOP2 opcode range**: GFX9 encodes VOP2 op N as VOP3 op `0x100+N` *and*
   as `0x140+N`. Both ranges must be handled. Missing the 0x100–0x13F range causes
   `v_add_u32_e64` (op 0x134) to decode as UNKNOWN.
-- **SDWA src0 field** (word1 bits[7:0]) is always a **VGPR index** (0-255), NOT a
-  standard 9-bit source encoding. Do NOT pass it to `decode_src()` — that maps
-  indices 0-103 to SGPRs. Set `inst.src[0].kind = Operand::Kind::VGPR` directly,
-  same as the DPP path does.
+- **GFX9 `VOP_SDWA` / `SDWAB` encoding**: GFX9 places `DST_SEL` at `word1[10:8]`, `SRC0_SEL` at `[18:16]`, and `SRC1_SEL` at `[26:24]` (do NOT use GFX8 layout where `SRC0_SEL` and `DST_SEL` are swapped). Also check `S0 = (w1 >> 23) & 1` and `S1 = (w1 >> 31) & 1`: pass to `decode_src()` when `1` (SGPR/inline const) and treat as VGPR when `0`; for `VOPC SDWAB`, write to `decode_sdst((w1 >> 8) & 0x7F)` when `SD = (w1 >> 15) & 1` is set.
+- **Negative immediate offsets on GFX9 SMEM and GLOBAL/SCRATCH**: sign-extend SMEM 21-bit immediate offsets (`w1[20:0]`) and GLOBAL/SCRATCH 13-bit `flat_offset` (`w0[12:0]`); plain `FLAT` (`seg == 0`) uses 12-bit unsigned (`w0[11:0]`).
+- **`S_ANDN2_SAVEEXEC` / `S_ORN2_SAVEEXEC` operand order**: `exec = src & ~old_exec` and `exec = src | ~old_exec` (NOT `old_exec & ~src`).
+- **64-bit integer comparisons (`V_CMP_*_I64` / `U64`)**: must read operands via `read_vsrc64()` rather than indexing `wave.vgpr[...]` directly, so SGPR pairs and inline constants work properly.
+- **Wave64 vs Wave32 `v0` workitem packing**: GFX9/CDNA Wave64 keeps `v0 = tid_x` unpacked (`v1 = tid_y`, `v2 = tid_z`); only Wave32 (RDNA4) packs `tid_x | (tid_y << 10) | (tid_z << 20)` into `v0`.
+- **Dynamic LDS & `DISPATCH_PTR`**: pass `LaunchConfig::shared_mem_bytes` (from `hipLaunchKernel` / `hipModuleLaunchKernel`) in addition to `group_segment_fixed_size`, and populate `wave.dispatch_packet` whenever `KCP_ENABLE_SGPR_DISPATCH_PTR` is set.
 
 ---
 
@@ -767,8 +797,6 @@ Common past mistakes to watch for:
 - **s_sub_i32 signed semantics** (SOP2 op 3): currently aliased to `S_SUB_U32`.
 - **MIMG instructions**: require texture descriptor and sampler state; currently silently skipped.
 - **DPP16/DPP8** (GFX10+ only): not relevant for gfx90a but would be needed for newer targets.
-- **Multi-tile Tensile GEMM**: the single-tile (128x256x32) Tensile SGEMM passes end-to-end;
-  extending to multi-tile problems would exercise inter-workgroup correctness.
 - **DS read2/write2 bank conflicts**: the bank-conflict model currently only checks
   `ds_offset0` for single-address DS ops. `ds_read2_b32`/`ds_write2_b32` access two
   addresses per lane (via both `ds_offset0` and `ds_offset1`) and need both checked.

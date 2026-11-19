@@ -1,10 +1,10 @@
-# AMD CDNA2 Matrix Core (MFMA) Lane & Register Layout Guide
+# AMD Matrix Core (MFMA & WMMA) Lane & Register Layout Guide
 
-The **AMD CDNA2 (MI200 / GFX90a)** architecture introduces second-generation Matrix Cores (**MFMA** — Matrix Fused Multiply-Add) to accelerate dense linear algebra, GEMMs, and deep learning primitives.
+The **AMD CDNA (`gfx908`, `gfx90a`, `gfx942`, `gfx950`)** and **RDNA4 (`gfx1201`)** architectures accelerate dense linear algebra, GEMMs, and deep learning primitives via Matrix Core units (**MFMA** — Matrix Fused Multiply-Add on CDNA; **WMMA** — Wave Matrix Multiply-Accumulate on RDNA4 Wave32).
 
-Unlike conventional Vector ALUs (VALU) where each lane operates independently in SIMD fashion, **MFMA instructions operate cooperatively across all 64 lanes of a Wavefront**. The 64 lanes collectively hold fragments of input matrices $A$ and $B$, broadcast them across an internal cross-lane systolic interconnect, and accumulate outer products into **Accumulator VGPRs (AGPRs)**.
+Unlike conventional Vector ALUs (VALU) where each lane operates independently in SIMD fashion, **MFMA / WMMA instructions operate cooperatively across all lanes of a Wavefront** (64 lanes on CDNA, 32 lanes on RDNA4). Lanes collectively hold fragments of input matrices $A$ and $B$, broadcast them across an internal systolic interconnect, and accumulate outer products into **Accumulator VGPRs (AGPRs)** or **unified VGPRs** (`v_mfma_*` / `v_wmma_*`).
 
-`gcn-sim` implements bit-accurate functional emulation of all CDNA2 MFMA instructions, cross-lane fragment broadcasting, and cycle-approximate pipeline timing.
+`gcn-sim` implements bit-accurate functional emulation of CDNA1–CDNA4 MFMA and RDNA4 WMMA v2 matrix instructions, cross-lane fragment broadcasting, and cycle-approximate pipeline timing. The detailed lane walkthrough below uses **CDNA2 (`gfx90a`)** as the baseline reference.
 
 ---
 
@@ -139,29 +139,52 @@ $$\mathbf{D}_{16 \times 16} = \sum_{k=0}^{3} \mathbf{A}_{16 \times 1}^{(k)} \tim
 
 ---
 
-## 3. Supported MFMA Instruction Summary
+## 3. Supported MFMA & WMMA Instruction Summary
+
+### CDNA1 / CDNA2 (`gfx908` / `gfx90a`, Wave64)
 
 | Opcode | Input Types | Output Type | Tile Size ($M \times N \times K$) | Output GPRs / Lane | Total Elements |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `v_mfma_f32_32x32x1f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 1$ | 16 (`a[0:15]`) | 1024 |
-| `v_mfma_f32_32x32x2f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 2$ | 16 (`a[0:15]`) | 1024 |
-| `v_mfma_f32_16x16x1f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 1$ | 16 (`a[0:15]`) | 256 (x4 blocks) |
-| `v_mfma_f32_16x16x4f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
-| `v_mfma_f32_4x4x1f32` | FP32 $\times$ FP32 | FP32 | $4 \times 4 \times 1$ | 4 (`a[0:3]`) | 16 (x16 blocks) |
-| `v_mfma_f32_32x32x4f16` | FP16 $\times$ FP16 | FP32 | $32 \times 32 \times 4$ | 16 (`a[0:15]`) | 1024 |
-| `v_mfma_f32_16x16x4f16` | FP16 $\times$ FP16 | FP32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
-| `v_mfma_i32_32x32x4i8` | INT8 $\times$ INT8 | INT32 | $32 \times 32 \times 4$ | 16 (`a[0:15]`) | 1024 |
-| `v_mfma_i32_16x16x4i8` | INT8 $\times$ INT8 | INT32 | $16 \times 16 \times 4$ | 4 (`a[0:3]`) | 256 |
-| `v_mfma_f64_16x16x4f64` | FP64 $\times$ FP64 | FP64 | $16 \times 16 \times 4$ | 8 (`a[0:7]` pairs) | 256 |
+| `v_mfma_f32_32x32x1f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 1$ | 16 | 1024 |
+| `v_mfma_f32_32x32x2f32` | FP32 $\times$ FP32 | FP32 | $32 \times 32 \times 2$ | 16 | 1024 |
+| `v_mfma_f32_16x16x1f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 1$ | 16 | 256 (×4 blocks) |
+| `v_mfma_f32_16x16x4f32` | FP32 $\times$ FP32 | FP32 | $16 \times 16 \times 4$ | 4 | 256 |
+| `v_mfma_f32_4x4x1f32` | FP32 $\times$ FP32 | FP32 | $4 \times 4 \times 1$ | 4 | 16 (×16 blocks) |
+| `v_mfma_f32_32x32x4f16` / `x8f16` | FP16 $\times$ FP16 | FP32 | $32 \times 32 \times \{4, 8\}$ | 16 | 1024 |
+| `v_mfma_f32_16x16x4f16` / `x16f16` | FP16 $\times$ FP16 | FP32 | $16 \times 16 \times \{4, 16\}$ | 4 | 256 |
+| `v_mfma_f32_32x32x4bf16` / `x8bf16_1k` | BF16 $\times$ BF16 | FP32 | $32 \times 32 \times \{4, 8\}$ | 16 | 1024 |
+| `v_mfma_f32_16x16x8bf16` / `x16bf16_1k` | BF16 $\times$ BF16 | FP32 | $16 \times 16 \times \{8, 16\}$ | 4 | 256 |
+| `v_mfma_i32_32x32x4i8` / `x8i8` | INT8 $\times$ INT8 | INT32 | $32 \times 32 \times \{4, 8\}$ | 16 | 1024 |
+| `v_mfma_i32_16x16x4i8` / `x16i8` | INT8 $\times$ INT8 | INT32 | $16 \times 16 \times \{4, 16\}$ | 4 | 256 |
+| `v_mfma_f64_16x16x4f64` | FP64 $\times$ FP64 | FP64 | $16 \times 16 \times 4$ | 8 (pairs) | 256 |
+
+### CDNA3 (`gfx942`) & CDNA4 (`gfx950`, Wave64) Additions
+
+| Arch | Opcodes | Data Formats & Feature Notes |
+| :--- | :--- | :--- |
+| **CDNA3 (`gfx942`)** | `v_mfma_f32_16x16x8_xf32`, `32x32x4_xf32` | TF32 / XF32 19-bit matrix multiply |
+| **CDNA3 (`gfx942`)** | `v_mfma_i32_16x16x32i8`, `32x32x16i8` | Double-rate INT8 |
+| **CDNA3 (`gfx942`)** | `v_mfma_f32_{16x16x32,32x32x16}_{fp8,bf8}_{fp8,bf8}` | OCP FP8 (E4M3) & BF8 (E5M2) mixed/pure |
+| **CDNA4 (`gfx950`)** | `v_mfma_f32_{16x16x32,32x32x16}_{f16,bf16}`, `v_mfma_i32_{16x16x64,32x32x32}_i8` | Double-rate FP16 / BF16 / INT8 |
+| **CDNA4 (`gfx950`)** | `v_mfma_ld_scale_b32`, `v_mfma_scale_f32_{16x16x128,32x32x64}_f8f6f4` | OCP Microscaling (MXFP4 / MXFP6 / MXFP8) with block scale factors |
+
+### RDNA4 (`gfx1201`, Wave32) WMMA v2 Summary
+
+| Opcode | Input Types | Output Type | Tile Size | Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| `v_wmma_f32_16x16x16_f16`, `bf16` | FP16 / BF16 | FP32 | $16 \times 16 \times 16$ | Wave32 dual-WGP matrix core |
+| `v_wmma_f16_16x16x16_f16`, `bf16_16x16x16_bf16` | FP16 / BF16 | FP16 / BF16 | $16 \times 16 \times 16$ | Native 16-bit accumulator output |
+| `v_wmma_i32_16x16x16_iu8`, `iu4` | INT8 / INT4 | INT32 | $16 \times 16 \times 16$ | Quantized integer WMMA |
+| `v_wmma_f32_16x16x16_{fp8,bf8}_{fp8,bf8}` | FP8 / BF8 | FP32 | $16 \times 16 \times 16$ | OCP E4M3 / E5M2 mixed/pure |
 
 ---
 
 ## 4. How `gcn-sim` Simulates Matrix Cores
 
-In `src/isa_executor.cpp`:
+In `src/isa_executor.cpp` and `src/execution_engine.cpp`:
 1. **Cross-Lane Collection**:
-   Before updating any lane state, `read_vsrc()` extracts all 64 source values into CPU arrays (`a_all[64]` and `b_all[64]`). This mirrors the hardware's internal register read stage.
+   Before updating any lane state, `read_vsrc()` (and `read_acc()` where appropriate) extracts all source lane values into host arrays (`a_all`, `b_all`). This mirrors the hardware's internal register read stage.
 2. **Hardware Outer-Product Emulation**:
-   For each lane, the exact row and column formulas map incoming matrix elements into standard IEEE-754 `fmaf(a, b, c)` or double-precision `fma()`.
+   For each lane, the exact row and column formulas map incoming matrix elements into standard IEEE-754 `fmaf(a, b, c)`, double-precision `fma()`, or integer/FP8/MXFP4 dot products.
 3. **Execution Shadow & Pipeline Interaction**:
-   `src/cycle_model.cpp` tracks the 64-cycle MFMA duration and enables up to 15 parallel VALU instructions in the shadow window without extra latency overhead.
+   `src/isa_executor.cpp` and `src/execution_engine.cpp` track the MFMA execution duration (e.g., 64 cycles on `32x32x2f32`) and enable overlapping independent VALU instructions in the shadow window without extra latency overhead.
