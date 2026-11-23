@@ -628,6 +628,15 @@ static uint64_t flat_addr(const WavefrontState& w, const Instruction& inst, int 
     return addr;
 }
 
+static uint64_t global_saddr_or_flat_addr(const WavefrontState& w, const Instruction& inst, int lane) {
+    if (inst.format == InstFormat::FLAT_GLOBAL && inst.src[1].kind == Operand::Kind::SGPR) {
+        uint64_t base = read_src_scalar64(w, inst.src[1]);
+        int64_t off = static_cast<int64_t>(static_cast<int32_t>(w.vgpr[inst.src[0].index][lane]));
+        return static_cast<uint64_t>(static_cast<int64_t>(base) + off + inst.flat_offset);
+    }
+    return flat_addr(w, inst, lane);
+}
+
 // ---------------------------------------------------------------------------
 // Main execute dispatch
 // ---------------------------------------------------------------------------
@@ -683,12 +692,35 @@ static uint64_t ds_issue_cycles(const WavefrontState& wave, const Instruction& i
         uint32_t lane_start = t * lanes_per_txn;
         uint32_t lane_end   = (t + 1 == num_txn) ? wsize : (lane_start + lanes_per_txn);
         uint8_t bank_count[32] = {};
-        for (uint32_t lane = lane_start; lane < lane_end; lane++) {
-            if (!((wave.exec >> lane) & 1)) continue;
-            uint32_t base_v = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index < NUM_VGPR)
-                              ? wave.vgpr[inst.src[0].index][lane] : 0;
-            uint32_t addr = base_v + inst.ds_offset0;
-            bank_count[(addr / 4) % 32]++;
+        if (wave.is_gfx942) {
+            // CDNA3: deduplicate identical dword addresses (LDS broadcast) and check all dwords
+            uint32_t seen_dwords[128];
+            int n_seen = 0;
+            for (uint32_t lane = lane_start; lane < lane_end; lane++) {
+                if (!((wave.exec >> lane) & 1)) continue;
+                uint32_t base_v = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index < NUM_VGPR)
+                                  ? wave.vgpr[inst.src[0].index][lane] : 0;
+                uint32_t addr = base_v + inst.ds_offset0;
+                for (uint32_t d = 0; d < dwords; d++) {
+                    uint32_t dw_addr = (addr + d * 4u) >> 2;
+                    bool dup = false;
+                    for (int s = 0; s < n_seen; s++) {
+                        if (seen_dwords[s] == dw_addr) { dup = true; break; }
+                    }
+                    if (!dup && n_seen < 128) {
+                        seen_dwords[n_seen++] = dw_addr;
+                        bank_count[dw_addr % 32]++;
+                    }
+                }
+            }
+        } else {
+            for (uint32_t lane = lane_start; lane < lane_end; lane++) {
+                if (!((wave.exec >> lane) & 1)) continue;
+                uint32_t base_v = (inst.src[0].kind == Operand::Kind::VGPR && inst.src[0].index < NUM_VGPR)
+                                  ? wave.vgpr[inst.src[0].index][lane] : 0;
+                uint32_t addr = base_v + inst.ds_offset0;
+                bank_count[(addr / 4) % 32]++;
+            }
         }
         uint8_t k = 1;
         for (int b = 0; b < 32; b++) k = std::max(k, bank_count[b]);
@@ -731,6 +763,27 @@ static uint64_t issue_cycles(const WavefrontState& wave, const Instruction& inst
     // s_nop N: 4*(N+1) wavefront cycles (N+1 SALU cycles × 4 cycles per wavefront issue)
     if (inst.opcode == Opcode::S_NOP) {
         return 4ULL * ((uint64_t)((uint16_t)inst.simm16) + 1);
+    }
+    if (wave.is_gfx942) {
+        // CDNA3 quarter-rate transcendental & 32-bit integer multiply VALU ops (16 wave cycles)
+        switch (inst.opcode) {
+        case Opcode::V_RCP_F32:
+        case Opcode::V_RSQ_F32:
+        case Opcode::V_SQRT_F32:
+        case Opcode::V_EXP_F32:
+        case Opcode::V_LOG_F32:
+        case Opcode::V_SIN_F32:
+        case Opcode::V_COS_F32:
+        case Opcode::V_RCP_F64:
+        case Opcode::V_RSQ_F64:
+        case Opcode::V_SQRT_F64:
+        case Opcode::V_MUL_LO_U32:
+        case Opcode::V_MUL_HI_U32:
+        case Opcode::V_MUL_HI_I32:
+            return 16;
+        default:
+            break;
+        }
     }
     return BASE;
 }
@@ -790,33 +843,46 @@ static void push_vmem_with_cache(WavefrontState& wave, const Instruction& inst,
         }
         return;
     }
-    // Coalesce: collect unique L1 cache lines (64B aligned)
-    constexpr uint64_t L1_LINE_MASK = ~(uint64_t)63;
+    // Coalesce: collect unique L1 cache lines
+    const CacheConfig& cfg = wave.cache->config();
+    const uint64_t line_bytes = std::max<uint64_t>(64ULL, cfg.l1_line_bytes);
+    const uint64_t l1_line_mask = ~(line_bytes - 1ULL);
     uint64_t lines[WAVE_SIZE];
     int n_lines = 0;
     for (int i = 0; i < n_addrs; i++) {
-        uint64_t line = addrs[i] & L1_LINE_MASK;
+        uint64_t line = addrs[i] & l1_line_mask;
         bool dup = false;
         for (int j = 0; j < n_lines; j++) {
             if (lines[j] == line) { dup = true; break; }
         }
         if (!dup) lines[n_lines++] = line;
     }
-    // Probe cache for each unique line, take worst-case latency
-    const CacheConfig& cfg = wave.cache->config();
-    uint64_t max_lat = 0;
-    for (int i = 0; i < n_lines; i++) {
-        CacheHitLevel level = wave.cache->access(lines[i], wave.cu_id);
-        uint64_t lat;
-        switch (level) {
-        case CacheHitLevel::L1:  lat = cfg.l1_hit_cycles; break;
-        case CacheHitLevel::L2:  lat = cfg.l2_hit_cycles; break;
-        case CacheHitLevel::L3:  lat = cfg.l3_hit_cycles; break;
-        default:                 lat = wave.global_mem_latency; break;
+    // Probe cache for each unique line, take worst-case completion cycle
+    uint64_t ready = wave.cycle_count;
+    if (wave.is_gfx942 && cfg.enable_bw_model) {
+        uint32_t req_bytes = std::min<uint32_t>(
+            cfg.l1_line_bytes,
+            std::max<uint32_t>(4u, static_cast<uint32_t>((n_addrs * 4) / std::max(1, n_lines))));
+        for (int i = 0; i < n_lines; i++) {
+            CacheAccessResult r = wave.cache->access_timed(
+                lines[i], wave.cu_id, wave.cycle_count, req_bytes, wave.global_mem_latency);
+            if (r.completion_cycle > ready) ready = r.completion_cycle;
         }
-        if (lat > max_lat) max_lat = lat;
+    } else {
+        uint64_t max_lat = 0;
+        for (int i = 0; i < n_lines; i++) {
+            CacheHitLevel level = wave.cache->access(lines[i], wave.cu_id);
+            uint64_t lat;
+            switch (level) {
+            case CacheHitLevel::L1:  lat = cfg.l1_hit_cycles; break;
+            case CacheHitLevel::L2:  lat = cfg.l2_hit_cycles; break;
+            case CacheHitLevel::L3:  lat = cfg.l3_hit_cycles; break;
+            default:                 lat = wave.global_mem_latency; break;
+            }
+            if (lat > max_lat) max_lat = lat;
+        }
+        ready = wave.cycle_count + max_lat;
     }
-    uint64_t ready = wave.cycle_count + max_lat;
     if (wave.is_gfx1201 && is_store) {
         wave.store_pending.push_back(ready);
     } else {
@@ -908,7 +974,10 @@ static void handle_waitcnt_cycles(WavefrontState& wave, const Instruction& inst)
 }
 
 // MFMA / WMMA execution latency.
-static uint32_t mfma_exec_cycles(Opcode op) {
+// CDNA3 (gfx942 / MI300X) rates follow AMD CDNA 3 ISA Reference Guide & public MI300X
+// peak TFLOPS specs (e.g. 163.4 TFLOPS FP32/FP64 matrix -> 128 FLOPs/cyc/SIMD = 16 cyc
+// for 16x16x4 and 32 cyc for 32x32x2; 1307.4 TFLOPS FP16 -> 16 cyc for 16x16x16).
+static uint32_t mfma_exec_cycles(Opcode op, bool is_gfx942 = false) {
     switch (op) {
     // 4×4 variants → 8 cycles
     case Opcode::V_MFMA_F32_4X4X1F32:
@@ -925,19 +994,26 @@ static uint32_t mfma_exec_cycles(Opcode op) {
     case Opcode::V_WMMA_F32_16X16X16_BF8_BF8:
         return 8;
 
-    // 4×4 F64 → 16 cycles
+    // 4×4 F64 → 16 cycles (8 cycles on CDNA3 2x FP64 matrix core)
     case Opcode::V_MFMA_F64_4X4X4F64:
-        return 16;
+        return is_gfx942 ? 8 : 16;
+
+    // 16×16 F32/F64 (2x throughput on CDNA3: 16 cycles instead of 32)
+    case Opcode::V_MFMA_F32_16X16X4F32:
+    case Opcode::V_MFMA_F64_16X16X4F64:
+        return is_gfx942 ? 16 : 32;
 
     // 16×16 "short K" variants → 32 cycles
     case Opcode::V_MFMA_F32_16X16X1F32:
-    case Opcode::V_MFMA_F32_16X16X4F32:
     case Opcode::V_MFMA_F32_16X16X4F16:
     case Opcode::V_MFMA_I32_16X16X4I8:
     case Opcode::V_MFMA_F32_16X16X2BF16:
     case Opcode::V_MFMA_F32_16X16X4BF16_1K:
-    case Opcode::V_MFMA_F64_16X16X4F64:
         return 32;
+
+    // 32×32 F32 (2x throughput on CDNA3: 32 cycles instead of 64)
+    case Opcode::V_MFMA_F32_32X32X2F32:
+        return is_gfx942 ? 32 : 64;
 
     // 16×16 "long K" variants & RDNA4 FP16/BF16 WMMA → 16 cycles
     case Opcode::V_MFMA_F32_16X16X16F16:
@@ -962,7 +1038,6 @@ static uint32_t mfma_exec_cycles(Opcode op) {
 
     // 32×32 "short K" variants → 64 cycles
     case Opcode::V_MFMA_F32_32X32X1F32:
-    case Opcode::V_MFMA_F32_32X32X2F32:
     case Opcode::V_MFMA_F32_32X32X4F16:
     case Opcode::V_MFMA_I32_32X32X4I8:
     case Opcode::V_MFMA_F32_32X32X2BF16:
@@ -1150,6 +1225,70 @@ static bool is_waitcnt_op(Opcode op) {
     }
 }
 
+static uint32_t cdna3_mfma_dst_regs(Opcode op) {
+    switch (op) {
+    case Opcode::V_MFMA_F32_32X32X1F32:
+    case Opcode::V_MFMA_F32_32X32X2F32:
+    case Opcode::V_MFMA_F32_32X32X4F16:
+    case Opcode::V_MFMA_I32_32X32X4I8:
+    case Opcode::V_MFMA_F32_32X32X2BF16:
+    case Opcode::V_MFMA_F32_32X32X4BF16_1K:
+    case Opcode::V_MFMA_F32_32X32X8F16:
+    case Opcode::V_MFMA_I32_32X32X8I8:
+    case Opcode::V_MFMA_F32_32X32X4BF16:
+    case Opcode::V_MFMA_F32_32X32X8BF16_1K:
+    case Opcode::V_MFMA_F32_32X32X4_XF32:
+    case Opcode::V_MFMA_I32_32X32X16I8:
+    case Opcode::V_MFMA_F32_32X32X16_BF8_BF8:
+    case Opcode::V_MFMA_F32_32X32X16_BF8_FP8:
+    case Opcode::V_MFMA_F32_32X32X16_FP8_BF8:
+    case Opcode::V_MFMA_F32_32X32X16_FP8_FP8:
+    case Opcode::V_MFMA_F32_32X32X16_F16:
+    case Opcode::V_MFMA_F32_32X32X16_BF16:
+    case Opcode::V_MFMA_I32_32X32X32_I8:
+    case Opcode::V_MFMA_SCALE_F32_32X32X64_F8F6F4:
+        return 16;
+    default:
+        return 4;
+    }
+}
+
+static void cdna3_apply_raw_hazard(WavefrontState& wave, const Instruction& inst, uint64_t pre_pc) {
+    uint64_t req = wave.cycle_count;
+    for (int i = 0; i < 3; i++) {
+        const Operand& op = inst.src[i];
+        if (op.kind == Operand::Kind::VGPR && op.index < NUM_VGPR) {
+            req = std::max(req, wave.vgpr_ready[op.index]);
+        } else if (op.kind == Operand::Kind::AGPR && op.index < NUM_AGPR) {
+            req = std::max(req, wave.agpr_ready[op.index]);
+        }
+    }
+    if (inst.format == InstFormat::MFMA) {
+        if (inst.dst.kind == Operand::Kind::VGPR && inst.dst.index < NUM_VGPR) {
+            req = std::max(req, wave.vgpr_ready[inst.dst.index]);
+        } else if (inst.dst.kind == Operand::Kind::AGPR && inst.dst.index < NUM_AGPR) {
+            req = std::max(req, wave.agpr_ready[inst.dst.index]);
+        }
+    }
+    if (req > wave.cycle_count) {
+        trace_stall(wave, "stall:raw_hazard", wave.cycle_count, req - wave.cycle_count, pre_pc);
+        wave.cycle_count = req;
+    }
+}
+
+static void cdna3_mark_dst_ready(WavefrontState& wave, const Operand& dst,
+                                 uint64_t ready_cycle, uint32_t count) {
+    if (dst.kind == Operand::Kind::VGPR) {
+        for (uint32_t i = 0; i < count && dst.index + i < NUM_VGPR; i++) {
+            wave.vgpr_ready[dst.index + i] = std::max(wave.vgpr_ready[dst.index + i], ready_cycle);
+        }
+    } else if (dst.kind == Operand::Kind::AGPR) {
+        for (uint32_t i = 0; i < count && dst.index + i < NUM_AGPR; i++) {
+            wave.agpr_ready[dst.index + i] = std::max(wave.agpr_ready[dst.index + i], ready_cycle);
+        }
+    }
+}
+
 // Execute exactly one instruction and return status.
 // Used by CU-level interleaving scheduler and run_wavefront.
 // Returns ENDED, BARRIER_HIT, or RUNNING (instruction executed, ready for more).
@@ -1175,10 +1314,19 @@ WaveStatus step_wavefront(WavefrontState& wave) {
                 (unsigned long long)wave.exec,
                 opcode_name(inst.opcode));
     }
-    if (inst.opcode == Opcode::S_BARRIER || inst.opcode == Opcode::S_BARRIER_WAIT)
+    if (inst.opcode == Opcode::S_BARRIER || inst.opcode == Opcode::S_BARRIER_WAIT) {
+        if (wave.is_gfx942 && wave.count_cycles && wave.mfma_busy_until > wave.cycle_count) {
+            trace_stall(wave, "stall:mfma_busy", wave.cycle_count,
+                        wave.mfma_busy_until - wave.cycle_count, pre_pc);
+            wave.cycle_count = wave.mfma_busy_until;
+        }
         return WaveStatus::BARRIER_HIT;
+    }
 
     if (wave.count_cycles) {
+        if (wave.is_gfx942) {
+            cdna3_apply_raw_hazard(wave, inst, pre_pc);
+        }
         if (is_waitcnt_op(inst.opcode)) {
             constexpr uint64_t WAITCNT_ISSUE = 4;
             uint64_t before = std::max(wave.cycle_count, wave.pipe_salu_ready);
@@ -1200,10 +1348,16 @@ WaveStatus step_wavefront(WavefrontState& wave) {
             uint64_t issue_start = wave.cycle_count;
             wave.pipe_valu_ready = issue_start + MFMA_ISSUE;
             wave.cycle_count += MFMA_ISSUE;
-            uint32_t exec = mfma_exec_cycles(inst.opcode);
+            uint32_t exec = mfma_exec_cycles(inst.opcode, wave.is_gfx942);
             uint64_t shadow = (exec > MFMA_ISSUE) ? exec - MFMA_ISSUE : 0;
             wave.mfma_busy_until = wave.cycle_count + shadow;
-            wave.mfma_shadow_remaining = shadow;
+            if (wave.is_gfx942) {
+                wave.mfma_shadow_remaining = 0;
+                cdna3_mark_dst_ready(wave, inst.dst, issue_start + exec + 4ULL,
+                                     cdna3_mfma_dst_regs(inst.opcode));
+            } else {
+                wave.mfma_shadow_remaining = shadow;
+            }
             wave.mfma_total_exec_cycles += exec;
             trace_emit(wave, "MFMA", opcode_name(inst.opcode), issue_start, exec, pre_pc);
         } else {
@@ -1219,6 +1373,11 @@ WaveStatus step_wavefront(WavefrontState& wave) {
                     wave.cycle_count += advance - wave.mfma_shadow_remaining;
                     wave.mfma_shadow_remaining = 0;
                 }
+            }
+            if (wave.is_gfx942 && cost == 16 &&
+                (inst.format == InstFormat::VOP1 || inst.format == InstFormat::VOP2 ||
+                 inst.format == InstFormat::VOP3A || inst.format == InstFormat::VOP3B)) {
+                cdna3_mark_dst_ready(wave, inst.dst, start + 16ULL, 1);
             }
             switch (inst.format) {
             case InstFormat::VOP1: case InstFormat::VOP2: case InstFormat::VOPC:
@@ -1243,6 +1402,8 @@ WaveStatus step_wavefront(WavefrontState& wave) {
                             inst.format == InstFormat::MTBUF) {
                             auto ma = mubuf_addr(wave, inst, lane);
                             if (!ma.oob) addrs[n++] = ma.addr;
+                        } else if (inst.format == InstFormat::FLAT_GLOBAL) {
+                            addrs[n++] = global_saddr_or_flat_addr(wave, inst, lane);
                         } else {
                             addrs[n++] = flat_addr(wave, inst, lane);
                         }
@@ -1258,7 +1419,12 @@ WaveStatus step_wavefront(WavefrontState& wave) {
         }
     }
     execute_instruction(wave, inst);
-    if (inst.opcode == Opcode::S_ENDPGM) return WaveStatus::ENDED;
+    if (inst.opcode == Opcode::S_ENDPGM) {
+        if (wave.is_gfx942 && wave.count_cycles && wave.mfma_busy_until > wave.cycle_count) {
+            wave.cycle_count = wave.mfma_busy_until;
+        }
+        return WaveStatus::ENDED;
+    }
     wave.insn_count++;
     return WaveStatus::RUNNING;
 }

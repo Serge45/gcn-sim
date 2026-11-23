@@ -114,6 +114,11 @@ target_link_libraries(test_rdna4_gfx1201 gcnsim_hip gcnsim GTest::gtest GTest::g
 add_test(NAME test_rdna4_gfx1201 COMMAND test_rdna4_gfx1201)
 add_dependencies(test_rdna4_gfx1201 gcnsim_hip)
 
+# test_cdna3_perf_model (CDNA3 / MI300X Perf Projection Calibration Suite)
+add_executable(test_cdna3_perf_model test_cdna3_perf_model.cpp)
+target_link_libraries(test_cdna3_perf_model PRIVATE gcnsim GTest::gtest_main)
+add_test(NAME test_cdna3_perf_model COMMAND test_cdna3_perf_model)
+
 add_executable(test_regression_fixes test_regression_fixes.cpp)
 target_link_libraries(test_regression_fixes PRIVATE gcnsim GTest::gtest_main)
 add_test(NAME test_regression_fixes COMMAND test_regression_fixes)

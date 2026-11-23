@@ -67,6 +67,9 @@ struct WavefrontState {
     uint64_t pipe_vmem_ready = 0;
     uint64_t pipe_lds_ready  = 0;
     uint64_t pipe_smem_ready = 0;
+    // Per-register RAW scoreboard timestamps (used when is_gfx942 && count_cycles)
+    uint64_t vgpr_ready[NUM_VGPR] = {0};
+    uint64_t agpr_ready[NUM_AGPR] = {0};
     uint64_t mfma_total_exec_cycles = 0; // accumulated MFMA execution cycles (for utilization)
     uint64_t valu_total_issue_cycles = 0; // accumulated VALU+MFMA issue cycles (for utilization)
     // Cache model (per-CU L1, shared L2/L3); nullptr = no cache sim
@@ -112,6 +115,8 @@ struct WavefrontState {
         mfma_shadow_remaining = 0; mfma_busy_until = 0;
         pipe_salu_ready = 0; pipe_valu_ready = 0; pipe_vmem_ready = 0;
         pipe_lds_ready = 0; pipe_smem_ready = 0;
+        std::memset(vgpr_ready, 0, sizeof(vgpr_ready));
+        std::memset(agpr_ready, 0, sizeof(agpr_ready));
         mfma_total_exec_cycles = 0; valu_total_issue_cycles = 0;
         cache = nullptr; cu_id = 0; waves_per_wg = 0;
         trace_file = nullptr; trace_wave_id = 0; trace_wg_flat_id = 0;

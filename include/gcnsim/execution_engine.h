@@ -29,6 +29,18 @@ struct KernelStats {
     double valu_utilization = 0.0;     // 0.0 to 1.0
     double compute_intensity = 0.0;    // 0.0 to 1.0 (weighted MFMA + VALU)
     uint32_t effective_clock_khz = 0;  // Effective clock in kHz under active model
+    uint64_t l1_hits = 0;
+    uint64_t l1_misses = 0;
+    uint64_t l2_hits = 0;
+    uint64_t l2_misses = 0;
+    uint64_t l3_hits = 0;
+    uint64_t l3_misses = 0;
+    uint64_t l1_bytes = 0;
+    uint64_t l2_bytes = 0;
+    uint64_t l3_bytes = 0;
+    uint64_t hbm_bytes = 0;
+    uint32_t max_wgs_per_cu = 1;
+    double achieved_occupancy = 0.0;
 };
 
 // Run a kernel on the CPU simulator.

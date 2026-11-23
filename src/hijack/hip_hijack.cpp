@@ -435,6 +435,32 @@ static void record_kernel_completion(const gcnsim::KernelInfo* ki, uint64_t kern
                 stats.mfma_utilization * 100.0, stats.valu_utilization * 100.0,
                 eff_clk_khz / 1000.0, spec.boost_khz / 1000.0, spec.base_khz / 1000.0);
     }
+
+    const char* env_perf = std::getenv("GCN_SIM_PERF_REPORT");
+    if (env_perf && (std::string(env_perf) == "1" || std::string(env_perf) == "true" || std::string(env_perf) == "on")) {
+        auto hit_pct = [](uint64_t h, uint64_t m) -> double {
+            return (h + m > 0) ? (100.0 * static_cast<double>(h) / static_cast<double>(h + m)) : 0.0;
+        };
+        double hbm_gbps = (kernel_ms > 0.0)
+            ? (static_cast<double>(stats.hbm_bytes) / (kernel_ms * 1e6))
+            : 0.0;
+        const char* bound = (stats.mfma_utilization >= 0.45)
+            ? "COMPUTE-BOUND"
+            : (hbm_gbps >= 1500.0 ? "HBM-BW-BOUND" : "LATENCY/OCCUPANCY-BOUND");
+        fprintf(stderr,
+                "[gcnsim PERF] Kernel '%s' (%s): cycles=%llu, time=%.2f us @ %.1f MHz, "
+                "MFMA=%.1f%%, VALU=%.1f%%, occ=%.1f%% (maxWGs/CU=%u), "
+                "L1=%.1f%% L2=%.1f%% L3=%.1f%%, HBM=%.1f GB/s [%s]\n",
+                ki ? ki->name.c_str() : "unknown", arch_str.c_str(),
+                static_cast<unsigned long long>(kernel_cycles),
+                kernel_ms * 1000.0, eff_clk_khz / 1000.0,
+                stats.mfma_utilization * 100.0, stats.valu_utilization * 100.0,
+                stats.achieved_occupancy * 100.0, stats.max_wgs_per_cu,
+                hit_pct(stats.l1_hits, stats.l1_misses),
+                hit_pct(stats.l2_hits, stats.l2_misses),
+                hit_pct(stats.l3_hits, stats.l3_misses),
+                hbm_gbps, bound);
+    }
 }
 
 struct EventInternal {

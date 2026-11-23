@@ -46,6 +46,22 @@ static void set_dispatch_ptr(WavefrontState& wave, const KernelDescriptor& kd, c
 WaveStatus run_wavefront(WavefrontState& wave, uint64_t max_insns = 10000ULL);
 WaveStatus step_wavefront(WavefrontState& wave);
 
+// Compute CDNA3 (gfx942 / MI300X) max concurrent workgroups per CU from public ISA/ABI limits:
+//   - Unified VGPR+AGPR file: 512 regs/SIMD, 4 SIMDs/CU, 8-reg allocation granule in rsrc1[5:0]
+//   - Max 8 waves/SIMD (32 waves/CU), max 16 WGs/CU, 64 KB LDS/CU
+// Sources: AMD Instinct MI300 / CDNA 3 ISA Reference Guide & ROCm HSA Code Object ABI (public).
+static uint32_t compute_cdna3_max_wgs_per_cu(const KernelInfo& kernel,
+                                             uint32_t waves_per_wg,
+                                             uint32_t lds_bytes) {
+    uint32_t rsrc1 = kernel.descriptor ? kernel.descriptor->compute_pgm_rsrc1 : 0u;
+    uint32_t vgprs = (rsrc1 != 0u) ? (((rsrc1 & 0x3Fu) + 1u) * 8u) : 64u;
+    uint32_t max_waves_per_simd = std::min(8u, 512u / std::max(8u, vgprs));
+    uint32_t max_waves_per_cu = std::max(1u, max_waves_per_simd * 4u);
+    uint32_t max_wgs_by_waves = std::max(1u, max_waves_per_cu / std::max(1u, waves_per_wg));
+    uint32_t max_wgs_by_lds = (lds_bytes > 0u) ? std::max(1u, 65536u / lds_bytes) : 16u;
+    return std::min({16u, max_wgs_by_waves, max_wgs_by_lds});
+}
+
 bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::string& error_msg,
                    uint64_t* total_cycles, KernelStats* stats) {
     if (!kernel.descriptor) {
@@ -181,11 +197,40 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         else num_cus = 104;
     }
 
-    // Create cache model (per-CU L1, shared L2, L3 Infinity Cache on CDNA3/CDNA4/RDNA4)
+    // Create cache model (per-CU L1, shared/per-XCD L2, L3 Infinity Cache / MALL)
     std::unique_ptr<CacheModel> global_cache;
     if (cfg.enable_cycle_counting) {
         CacheConfig ccfg;
-        if (kernel.is_gfx950 || kernel.is_gfx942) {
+        if (kernel.is_gfx942) {
+            // CDNA3 (MI300X) public cache & memory hierarchy:
+            //   - Official AMD CDNA 3 Whitepaper / MI300X Datasheet:
+            //     304 CUs (8 XCDs x 38 CUs), 32 KB vL1D/CU, 4 MB L2/XCD (32 MB total),
+            //     256 MB shared Infinity Cache (MALL), 5.3 TB/s HBM3 @ 2.1 GHz.
+            //   - Unloaded latencies (L1=36, L2=160, L3=270, HBM=440 cyc) are approximate
+            //     defaults from public MI300X microbenchmark reports (override HBM via
+            //     GCN_SIM_HBM_LATENCY).
+            ccfg.l1_size_bytes = 32768;
+            ccfg.l1_ways = 4;
+            ccfg.l1_line_bytes = 128;
+            ccfg.l1_hit_cycles = 36;
+            ccfg.num_xcds = 8;
+            ccfg.l2_size_bytes = 4 * 1024 * 1024;
+            ccfg.l2_ways = 16;
+            ccfg.l2_line_bytes = 128;
+            ccfg.l2_hit_cycles = 160;
+            ccfg.enable_l3 = true;
+            ccfg.l3_size_bytes = 256 * 1024 * 1024;
+            ccfg.l3_ways = 16;
+            ccfg.l3_line_bytes = 128;
+            ccfg.l3_hit_cycles = 270;
+            ccfg.enable_bw_model = true;
+            uint32_t hbm_lat = (cfg.global_mem_latency == 300) ? 440 : cfg.global_mem_latency;
+            if (const char* env_hbm = std::getenv("GCN_SIM_HBM_LATENCY")) {
+                int v = std::atoi(env_hbm);
+                if (v > 0) hbm_lat = static_cast<uint32_t>(v);
+            }
+            ccfg.hbm_base_cycles = hbm_lat;
+        } else if (kernel.is_gfx950) {
             ccfg.l1_size_bytes = 32768; // 32 KB per CU
             ccfg.l2_size_bytes = 32 * 1024 * 1024; // 32 MB total L2 across 8 XCDs
             ccfg.enable_l3 = true;
@@ -248,8 +293,254 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         return max_barrier_cc;
     };
 
+    uint32_t max_wgs_per_cu = kernel.is_gfx942
+        ? compute_cdna3_max_wgs_per_cu(kernel, waves_per_wg, lds_bytes)
+        : 1u;
+
     try {
-        if (total_wgs > 1) {
+        if (kernel.is_gfx942 && cfg.enable_cycle_counting) {
+            // CDNA3 time-windowed concurrent multi-WG CU scheduler
+            struct ResidentWg {
+                uint32_t wg_flat = 0;
+                uint32_t wg_x = 0, wg_y = 0, wg_z = 0;
+                uint32_t cu_id = 0;
+                uint64_t start_cycle = 0;
+                std::vector<uint8_t> lds_buf;
+                std::vector<std::unique_ptr<WavefrontState>> waves;
+                std::vector<std::vector<uint8_t>> scratch_bufs;
+                std::vector<bool> ended;
+                std::vector<bool> at_barrier;
+            };
+            struct CuState {
+                std::vector<uint32_t> queue;
+                size_t q_head = 0;
+                std::vector<ResidentWg> resident;
+                uint64_t simd_cycle[NUM_SIMDS] = {};
+                uint32_t simd_next[NUM_SIMDS] = {};
+            };
+
+            std::vector<CuState> cus(num_cus);
+            const char* xcd_sched = std::getenv("GCN_SIM_XCD_SCHED");
+            bool chunk_sched = (xcd_sched && std::string(xcd_sched) == "chunk");
+            constexpr uint32_t NUM_XCDS = 8;
+            uint32_t cus_per_xcd = std::max(1u, num_cus / NUM_XCDS);
+
+            for (uint32_t wg = 0; wg < total_wgs; wg++) {
+                uint32_t xcd = chunk_sched
+                    ? ((wg * NUM_XCDS) / std::max(1u, total_wgs)) % NUM_XCDS
+                    : (wg % NUM_XCDS);
+                uint32_t cu = chunk_sched
+                    ? (xcd * cus_per_xcd + (wg % cus_per_xcd)) % num_cus
+                    : (xcd * cus_per_xcd + ((wg / NUM_XCDS) % cus_per_xcd)) % num_cus;
+                cus[cu].queue.push_back(wg);
+            }
+
+            auto spawn_wg = [&](uint32_t cu_id, uint32_t flat_idx, uint64_t start_cycle) -> ResidentWg {
+                ResidentWg rwg;
+                rwg.wg_flat = flat_idx;
+                rwg.wg_x = flat_idx % wg_count_x;
+                rwg.wg_y = (flat_idx / wg_count_x) % wg_count_y;
+                rwg.wg_z = flat_idx / (wg_count_x * wg_count_y);
+                rwg.cu_id = cu_id;
+                rwg.start_cycle = start_cycle;
+                rwg.lds_buf.assign(lds_bytes, 0);
+                uint8_t* lds_ptr = lds_bytes > 0 ? rwg.lds_buf.data() : nullptr;
+
+                rwg.waves.resize(waves_per_wg);
+                rwg.scratch_bufs.resize(waves_per_wg);
+                rwg.ended.assign(waves_per_wg, false);
+                rwg.at_barrier.assign(waves_per_wg, false);
+
+                for (uint32_t w = 0; w < waves_per_wg; w++) {
+                    rwg.waves[w] = std::make_unique<WavefrontState>();
+                    init_wavefront(*rwg.waves[w], *kernel.descriptor,
+                                   kernarg,
+                                   kernel.code_ptr,
+                                   kernel.code_size,
+                                   rwg.wg_x, rwg.wg_y, rwg.wg_z,
+                                   w, waves_per_wg,
+                                   block_x, block_y, block_z);
+                    set_dispatch_ptr(*rwg.waves[w], *kernel.descriptor, dispatch_pkt);
+                    rwg.waves[w]->lds_ptr = lds_ptr;
+                    rwg.waves[w]->lds_size = lds_bytes;
+                    rwg.waves[w]->is_gfx942 = true;
+                    rwg.waves[w]->wave_size = wave_sz;
+                    rwg.waves[w]->accum_offset = kernel.accum_offset;
+
+                    rwg.scratch_bufs[w].resize(scratch_per_wave, 0);
+                    rwg.waves[w]->scratch_ptr = scratch_per_wave > 0 ? rwg.scratch_bufs[w].data() : nullptr;
+                    rwg.waves[w]->scratch_size = scratch_per_wave;
+                    rwg.waves[w]->scratch_per_lane = scratch_per_lane;
+                    set_dispatch_ptr(*rwg.waves[w], *kernel.descriptor, dispatch_pkt);
+
+                    rwg.waves[w]->count_cycles = true;
+                    rwg.waves[w]->cycle_count = start_cycle;
+                    rwg.waves[w]->global_mem_latency = cfg.global_mem_latency;
+                    rwg.waves[w]->smem_latency = cfg.smem_latency;
+                    rwg.waves[w]->cache = global_cache.get();
+                    rwg.waves[w]->cu_id = cu_id;
+                    rwg.waves[w]->waves_per_wg = waves_per_wg;
+                    rwg.waves[w]->trace_file = trace_file;
+                    rwg.waves[w]->trace_wave_id = w;
+                    rwg.waves[w]->trace_wg_flat_id = flat_idx;
+                    rwg.waves[w]->debug_hook = cfg.debug_hook;
+                }
+                return rwg;
+            };
+
+            std::vector<uint32_t> active_cus;
+            for (uint32_t c = 0; c < num_cus; c++) {
+                while (cus[c].resident.size() < max_wgs_per_cu && cus[c].q_head < cus[c].queue.size()) {
+                    cus[c].resident.push_back(spawn_wg(c, cus[c].queue[cus[c].q_head++], 0ULL));
+                }
+                if (!cus[c].resident.empty()) {
+                    active_cus.push_back(c);
+                }
+            }
+
+            uint32_t completed_wgs = 0;
+            uint64_t sim_clock = 0;
+            constexpr uint64_t WINDOW_CYCLES = 64ULL;
+
+            while (completed_wgs < total_wgs) {
+                uint64_t window_end = sim_clock + WINDOW_CYCLES;
+                uint64_t next_global_ready = UINT64_MAX;
+                bool any_progress = false;
+
+                for (size_t ci = 0; ci < active_cus.size(); ) {
+                    uint32_t c = active_cus[ci];
+                    CuState& cu = cus[c];
+
+                    for (uint32_t s = 0; s < NUM_SIMDS; s++) {
+                        if (cu.simd_cycle[s] < sim_clock) cu.simd_cycle[s] = sim_clock;
+                    }
+
+                    struct WaveSlot { size_t slot; uint32_t w; };
+                    std::vector<WaveSlot> simd_waves[NUM_SIMDS];
+                    for (size_t slot = 0; slot < cu.resident.size(); slot++) {
+                        for (uint32_t w = 0; w < waves_per_wg; w++) {
+                            if (cu.resident[slot].ended[w] || cu.resident[slot].at_barrier[w]) continue;
+                            uint32_t s = static_cast<uint32_t>((slot * waves_per_wg + w) % NUM_SIMDS);
+                            simd_waves[s].push_back({slot, w});
+                        }
+                    }
+
+                    for (uint32_t s = 0; s < NUM_SIMDS; s++) {
+                        auto& sw = simd_waves[s];
+                        if (sw.empty()) continue;
+                        uint32_t n = static_cast<uint32_t>(sw.size());
+                        while (cu.simd_cycle[s] < window_end) {
+                            bool issued = false;
+                            for (uint32_t i = 0; i < n; i++) {
+                                uint32_t idx = (cu.simd_next[s] + i) % n;
+                                auto& rwg = cu.resident[sw[idx].slot];
+                                uint32_t w = sw[idx].w;
+                                if (rwg.ended[w] || rwg.at_barrier[w]) continue;
+                                auto& wave = *rwg.waves[w];
+                                if (wave.cycle_count > cu.simd_cycle[s]) continue;
+
+                                wave.cycle_count = std::max(wave.cycle_count, cu.simd_cycle[s]);
+                                WaveStatus status = step_wavefront(wave);
+                                cu.simd_cycle[s] += 4;
+                                cu.simd_next[s] = (idx + 1) % n;
+                                any_progress = true;
+                                issued = true;
+
+                                if (status == WaveStatus::ENDED) {
+                                    rwg.ended[w] = true;
+                                } else if (status == WaveStatus::BARRIER_HIT) {
+                                    rwg.at_barrier[w] = true;
+                                }
+                                break;
+                            }
+                            if (!issued) {
+                                uint64_t min_ready = UINT64_MAX;
+                                for (uint32_t idx = 0; idx < n; idx++) {
+                                    auto& rwg = cu.resident[sw[idx].slot];
+                                    uint32_t w = sw[idx].w;
+                                    if (rwg.ended[w] || rwg.at_barrier[w]) continue;
+                                    min_ready = std::min(min_ready, rwg.waves[w]->cycle_count);
+                                }
+                                if (min_ready != UINT64_MAX) {
+                                    if (min_ready < window_end && min_ready > cu.simd_cycle[s]) {
+                                        cu.simd_cycle[s] = min_ready;
+                                        any_progress = true;
+                                    } else {
+                                        next_global_ready = std::min(next_global_ready, min_ready);
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    for (size_t slot = 0; slot < cu.resident.size(); ) {
+                        auto& rwg = cu.resident[slot];
+                        uint32_t active_w = 0, barrier_w = 0;
+                        for (uint32_t w = 0; w < waves_per_wg; w++) {
+                            if (rwg.ended[w]) continue;
+                            active_w++;
+                            if (rwg.at_barrier[w]) barrier_w++;
+                        }
+                        if (barrier_w > 0 && barrier_w == active_w) {
+                            uint64_t b_cc = sync_barrier_cycles(rwg.waves, rwg.ended);
+                            for (uint32_t w = 0; w < waves_per_wg; w++) rwg.at_barrier[w] = false;
+                            next_global_ready = std::min(next_global_ready, b_cc);
+                            any_progress = true;
+                        }
+                        if (active_w == 0) {
+                            uint64_t wg_end = 0;
+                            for (uint32_t w = 0; w < waves_per_wg; w++) {
+                                wg_end = std::max(wg_end, rwg.waves[w]->cycle_count);
+                                uint64_t wave_dur = (rwg.waves[w]->cycle_count >= rwg.start_cycle)
+                                    ? (rwg.waves[w]->cycle_count - rwg.start_cycle)
+                                    : rwg.waves[w]->cycle_count;
+                                accum_mfma_cycles += rwg.waves[w]->mfma_total_exec_cycles;
+                                accum_valu_cycles += rwg.waves[w]->valu_total_issue_cycles;
+                                accum_wave_cycles += wave_dur;
+                                if (trace_file && wave_dur > 0) {
+                                    double cc = static_cast<double>(wave_dur);
+                                    double mfma_util = static_cast<double>(rwg.waves[w]->mfma_total_exec_cycles) / cc * 100.0;
+                                    double valu_util = static_cast<double>(rwg.waves[w]->valu_total_issue_cycles) / cc * 100.0;
+                                    fprintf(trace_file,
+                                        ",\n{\"ph\":\"M\",\"pid\":%u,\"tid\":%u,"
+                                        "\"name\":\"thread_name\","
+                                        "\"args\":{\"name\":\"wave%u/SIMD%u (VALU %.1f%% MFMA %.1f%%)\"}}",
+                                        rwg.wg_flat, w, w, static_cast<uint32_t>((slot * waves_per_wg + w) % NUM_SIMDS),
+                                        valu_util, mfma_util);
+                                }
+                            }
+                            cu_wall_cycles[c] = std::max(cu_wall_cycles[c], wg_end);
+                            completed_wgs++;
+                            any_progress = true;
+                            cu.resident.erase(cu.resident.begin() + static_cast<ptrdiff_t>(slot));
+                            if (cu.q_head < cu.queue.size()) {
+                                uint64_t spawn_cc = std::max(sim_clock, *std::min_element(cu.simd_cycle, cu.simd_cycle + NUM_SIMDS));
+                                cu.resident.push_back(spawn_wg(c, cu.queue[cu.q_head++], spawn_cc));
+                            }
+                            continue;
+                        }
+                        slot++;
+                    }
+
+                    if (cu.resident.empty() && cu.q_head >= cu.queue.size()) {
+                        active_cus.erase(active_cus.begin() + static_cast<ptrdiff_t>(ci));
+                    } else {
+                        ci++;
+                    }
+                }
+
+                if (any_progress) {
+                    sim_clock = window_end;
+                } else if (next_global_ready != UINT64_MAX && next_global_ready > sim_clock) {
+                    sim_clock = next_global_ready;
+                } else {
+                    sim_clock = window_end;
+                }
+            }
+        } else if (total_wgs > 1) {
             struct ActiveWg {
                 uint32_t wg_flat = 0;
                 uint32_t wg_x = 0, wg_y = 0, wg_z = 0;
@@ -629,8 +920,9 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
         current_wg++;
     }
     }
+    uint64_t max_cu_wall = *std::max_element(cu_wall_cycles.begin(), cu_wall_cycles.end());
     if (total_cycles && cfg.enable_cycle_counting) {
-        *total_cycles = *std::max_element(cu_wall_cycles.begin(), cu_wall_cycles.end());
+        *total_cycles = max_cu_wall;
     }
     if (stats) {
         stats->total_cycles = (total_cycles && cfg.enable_cycle_counting) ? *total_cycles : 0;
@@ -644,6 +936,23 @@ bool launch_kernel(const KernelInfo& kernel, const LaunchConfig& cfg, std::strin
             ? static_cast<double>(accum_valu_cycles) / static_cast<double>(accum_wave_cycles)
             : 0.0;
         stats->compute_intensity = std::min(1.0, stats->mfma_utilization + 0.5 * stats->valu_utilization);
+        stats->max_wgs_per_cu = max_wgs_per_cu;
+        if (max_cu_wall > 0 && num_cus > 0) {
+            double total_wave_slots = static_cast<double>(max_cu_wall) * static_cast<double>(num_cus) * 32.0;
+            stats->achieved_occupancy = std::min(1.0, static_cast<double>(accum_wave_cycles) / total_wave_slots);
+        }
+        if (global_cache) {
+            stats->l1_hits   = global_cache->l1_hits();
+            stats->l1_misses = global_cache->l1_misses();
+            stats->l2_hits   = global_cache->l2_hits();
+            stats->l2_misses = global_cache->l2_misses();
+            stats->l3_hits   = global_cache->l3_hits();
+            stats->l3_misses = global_cache->l3_misses();
+            stats->l1_bytes  = global_cache->l1_bytes();
+            stats->l2_bytes  = global_cache->l2_bytes();
+            stats->l3_bytes  = global_cache->l3_bytes();
+            stats->hbm_bytes = global_cache->hbm_bytes();
+        }
     }
     } catch (const MemoryFaultException& ex) {
         error_msg = ex.what();

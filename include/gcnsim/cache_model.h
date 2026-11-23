@@ -33,7 +33,26 @@ struct CacheConfig {
     uint32_t l3_ways        = 16;
     uint32_t l3_line_bytes  = 128;
     uint32_t l3_hit_cycles  = 180;
-    // HBM miss latency comes from LaunchConfig::global_mem_latency
+    // Per-XCD L2 & finite bandwidth / queuing model (opt-in for CDNA3 / MI300X).
+    // Public sources:
+    //   - Topology & HBM3 peak BW (8 XCDs, 4 MB L2/XCD, 256 MB MALL, 5.3 TB/s HBM3):
+    //     AMD Instinct MI300X Datasheet & AMD CDNA 3 Architecture Whitepaper (public).
+    //   - Per-tier internal BW & unloaded latency defaults below are approximate
+    //     defaults derived from public MI300X microbenchmark literature (not official
+    //     AMD datasheet guarantees) and can be overridden in config/env.
+    uint32_t num_xcds           = 1;
+    bool     enable_bw_model    = false;
+    double   l1_bytes_per_cycle = 128.0;   // public microbenchmark estimate (per CU)
+    double   l2_bytes_per_cycle = 768.0;   // public microbenchmark estimate (per XCD, ~1.6 TB/s @ 2.1 GHz)
+    double   l3_bytes_per_cycle = 4096.0;  // public microbenchmark estimate (shared MALL, ~8.6 TB/s @ 2.1 GHz)
+    double   hbm_bytes_per_cycle = 2524.0; // MI300X public 5.3 TB/s HBM3 / 2.1 GHz boost
+    uint32_t hbm_base_cycles    = 0;       // 0 = fallback to LaunchConfig::global_mem_latency
+};
+
+struct CacheAccessResult {
+    CacheHitLevel level = CacheHitLevel::HBM;
+    uint64_t completion_cycle = 0;
+    uint32_t bytes = 0;
 };
 
 class CacheSet {
@@ -77,26 +96,45 @@ public:
     CacheModel() = default;
     explicit CacheModel(const CacheConfig& cfg, uint32_t num_cus = 1);
 
-    // Probe per-CU L1 then shared L2 (and L3 if enabled). Returns the hit level.
+    // Probe per-CU L1 then shared/per-XCD L2 (and L3 if enabled). Returns the hit level.
     CacheHitLevel access(uint64_t addr, uint32_t cu_id = 0);
+
+    // Timed probe with byte accounting and optional bandwidth/queuing delay.
+    CacheAccessResult access_timed(uint64_t addr, uint32_t cu_id, uint64_t issue_cycle,
+                                   uint32_t req_bytes, uint32_t hbm_latency_fallback);
 
     const CacheConfig& config() const { return cfg_; }
 
-    // Stats (L1 stats aggregated across all per-CU L1 instances)
+    // Stats (L1/L2 stats aggregated across all per-CU L1 / per-XCD L2 instances)
     uint64_t l1_hits()   const;
     uint64_t l1_misses() const;
-    uint64_t l2_hits()   const { std::lock_guard<std::mutex> lock(mutex_); return l2_.hits(); }
-    uint64_t l2_misses() const { std::lock_guard<std::mutex> lock(mutex_); return l2_.misses(); }
+    uint64_t l2_hits()   const;
+    uint64_t l2_misses() const;
     uint64_t l3_hits()   const { std::lock_guard<std::mutex> lock(mutex_); return l3_.hits(); }
     uint64_t l3_misses() const { std::lock_guard<std::mutex> lock(mutex_); return l3_.misses(); }
+    uint64_t l1_bytes()  const { std::lock_guard<std::mutex> lock(mutex_); return l1_bytes_; }
+    uint64_t l2_bytes()  const { std::lock_guard<std::mutex> lock(mutex_); return l2_bytes_; }
+    uint64_t l3_bytes()  const { std::lock_guard<std::mutex> lock(mutex_); return l3_bytes_; }
+    uint64_t hbm_bytes() const { std::lock_guard<std::mutex> lock(mutex_); return hbm_bytes_; }
 
 private:
+    uint32_t xcd_for_cu(uint32_t cu_id) const;
+
     mutable std::mutex mutex_;
     CacheConfig cfg_;
+    uint32_t cus_per_xcd_ = 1;
     std::vector<CacheLevel> l1_per_cu_;
-    CacheLevel l2_;
+    std::vector<CacheLevel> l2_per_xcd_;
     bool       enable_l3_ = false;
     CacheLevel l3_;
+    std::vector<double> l1_busy_until_;
+    std::vector<double> l2_busy_until_;
+    double l3_busy_until_  = 0.0;
+    double hbm_busy_until_ = 0.0;
+    uint64_t l1_bytes_  = 0;
+    uint64_t l2_bytes_  = 0;
+    uint64_t l3_bytes_  = 0;
+    uint64_t hbm_bytes_ = 0;
 };
 
 } // namespace gcnsim
